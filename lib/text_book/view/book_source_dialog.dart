@@ -214,16 +214,7 @@ Widget _buildBookDetailsContent(
               title: 'נושאים:',
               value: information.topics.join(', '),
             ),
-          if (information.shortDescription != null)
-            DetailsInfoSection(
-              title: 'תיאור קצר:',
-              value: information.shortDescription!,
-            ),
-          if (information.fullDescription != null)
-            DetailsInfoSection(
-              title: 'תיאור מורחב:',
-              value: information.fullDescription!,
-            ),
+          // תיאורי הספר (קצר ומורחב) הוסרו — שאר הפרטים נשמרו.
           const Divider(height: 24),
           const Text(
             'מקור הספר:',

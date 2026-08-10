@@ -2093,14 +2093,17 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v1
         with:
-          token: ${{ secrets.GH_RELEASE_TOKEN }}
+          # שינוי מקומי ב-fork: בריפו המקורי משתמשים ב-GH_RELEASE_TOKEN;
+          # ב-fork נופלים חזרה ל-GITHUB_TOKEN הרגיל כדי שה-release ייווצר
+          # בלי להגדיר PAT נוסף.
+          token: ${{ secrets.GH_RELEASE_TOKEN || github.token }}
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.title }}
           prerelease: ${{ steps.version.outputs.prerelease }}
           files: release-files/*
           body_path: release-body.md
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN || github.token }}
 
   trigger_google_play_deploy:
     if: "!cancelled() && needs.check_version.outputs.is_version == 'true' && needs.build_android.result == 'success' && github.event_name != 'release' && github.event_name != 'pull_request'"
@@ -2110,8 +2113,10 @@ jobs:
 
   # --- הכרזה על גרסה שפורסמה ---
   announce_release:
-    # תנאי לריצה רק כשיש אירוע של פרסום release
-    if: github.event_name == 'release'
+    # תנאי לריצה רק כשיש אירוע של פרסום release.
+    # שינוי מקומי ב-fork: ללא TOKEN_YEMOT (ולא שאר סודות ההכרזה) מדלגים
+    # על ההכרזה — אחרת כל release ב-fork היה נכשל בגלל סודות חסרים.
+    if: github.event_name == 'release' && secrets.TOKEN_YEMOT != ''
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

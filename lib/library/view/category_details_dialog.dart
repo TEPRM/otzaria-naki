@@ -23,9 +23,6 @@ class _CategoryDetailsDialogContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final shortDescription = category.shortDescription.trim();
-    final fullDescription = category.description.trim();
-
     return SizedBox(
       width: 450,
       child: AppSelectionArea(
@@ -34,20 +31,11 @@ class _CategoryDetailsDialogContent extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // תיאורי הקטגוריה (קצר ומורחב) הוסרו — מוצג רק שם הקטגוריה.
               DetailsInfoSection(
                 title: 'שם הקטגוריה:',
                 value: category.title,
               ),
-              if (shortDescription.isNotEmpty)
-                DetailsInfoSection(
-                  title: 'תיאור קצר:',
-                  value: category.shortDescription,
-                ),
-              if (fullDescription.isNotEmpty)
-                DetailsInfoSection(
-                  title: 'תיאור מורחב:',
-                  value: category.description,
-                ),
             ],
           ),
         ),

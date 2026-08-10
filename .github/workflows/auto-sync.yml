@@ -1,0 +1,152 @@
+name: "Auto Sync & Build (upstream releases)"
+
+# סנכרון אוטומטי עם הריפו המקורי (Otzaria/otzaria) ובנייה אוטומטית.
+#
+# מודל הסנכרון: ה-fork חובר פעם אחת להיסטוריית upstream (commit הגראפט,
+# שאביו הוא upstream/dev), ולכן הסנכרון כאן הוא מיזוג git רגיל. הקבצים
+# המוגנים של ה-fork (הסרת תיאורים, תיקוני build) נשמרים ע"י merge drivers
+# סלקטיביים — ראו .gitattributes ו-tool/fork-merge-driver.sh: שינויים של
+# upstream באזורים שה-fork לא נגע בהם נכנסים, ובאזורי ההסרה הגרסה שלנו
+# מנצחת.
+#
+# זרימה:
+#   1. כל 6 שעות (או בהפעלה ידנית) נבדק ה-release האחרון של upstream.
+#   2. אם יצא release חדש (לפי קובץ הסימן .github/LAST_UPSTREAM_RELEASE):
+#        א. מיזוג upstream/dev ל-dev (עם ה-merge drivers).
+#        ב. עדכון קובץ הסימן + push.
+#        ג. הפעלת build-and-announce.yml — בניית כל הפלטפורמות
+#           ופרסום release ב-fork.
+#   3. הפעלה ידנית תמיד מבצעת סנכרון ובנייה מחדש (מתעלמת מקובץ הסימן).
+#
+# הערה: ה-merge drivers דורשים את ה-tag fork-snapshot-base (נדחף ל-origin),
+# שמחזיק את גרסת הקבצים המוגנים ברגע יצירת ה-fork.
+
+on:
+  schedule:
+    # כל 6 שעות — מספיק כדי לקלוט releases של upstream בזמן סביר.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  # נדרש כדי להפעיל workflow אחר דרך workflow_dispatch.
+  actions: write
+
+jobs:
+  sync_and_dispatch:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: Otzaria/otzaria
+      UPSTREAM_BRANCH: dev
+      MARKER: .github/LAST_UPSTREAM_RELEASE
+    steps:
+      - name: Clone fork
+        uses: actions/checkout@v4.2.2
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream and snapshot tag
+        run: |
+          git remote add upstream "https://github.com/${{ env.UPSTREAM_REPO }}.git"
+          git fetch upstream "${{ env.UPSTREAM_BRANCH }}"
+          # ה-tag של בסיס ה-snapshot — נדרש ע"י ה-merge drivers.
+          git fetch origin tag fork-snapshot-base
+
+      - name: Configure merge drivers for protected files
+        run: |
+          # כל קובץ מוגן מקבל driver סלקטיבי עם הנתיב שלו (ה-driver זקוק
+          # לו כדי לשלוף את גרסת ה-snapshot). ההפניות ב-.gitattributes.
+          git config merge.fork-keep-grid.driver "tool/fork-merge-driver.sh lib/library/view/grid_items.dart %A %O %B"
+          git config merge.fork-keep-catdialog.driver "tool/fork-merge-driver.sh lib/library/view/category_details_dialog.dart %A %O %B"
+          git config merge.fork-keep-srcdialog.driver "tool/fork-merge-driver.sh lib/text_book/view/book_source_dialog.dart %A %O %B"
+          git config merge.fork-keep-build.driver "tool/fork-merge-driver.sh .github/workflows/build-and-announce.yml %A %O %B"
+          git config merge.fork-keep-sync.driver "tool/fork-merge-driver.sh .github/workflows/auto-sync.yml %A %O %B"
+
+      - name: Latest upstream release
+        id: release
+        run: |
+          TAG=$(gh api "repos/${{ env.UPSTREAM_REPO }}/releases/latest" --jq .tag_name)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream release: $TAG"
+
+      - name: Compare with last processed release
+        id: compare
+        run: |
+          if [ -f "${{ env.MARKER }}" ]; then
+            LAST=$(cat "${{ env.MARKER }}")
+          else
+            LAST=""
+          fi
+          echo "last=$LAST" >> "$GITHUB_OUTPUT"
+          if [ "$LAST" = "${{ steps.release.outputs.tag }}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No new upstream release (last processed: $LAST). Nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "New upstream release: ${{ steps.release.outputs.tag }} (last processed: $LAST)."
+          fi
+
+      - name: Merge upstream dev
+        if: github.event_name == 'workflow_dispatch' || steps.compare.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          PROTECTED=(
+            "lib/library/view/grid_items.dart"
+            "lib/library/view/category_details_dialog.dart"
+            "lib/text_book/view/book_source_dialog.dart"
+            ".github/workflows/build-and-announce.yml"
+            ".github/workflows/auto-sync.yml"
+          )
+          if git merge-base --is-ancestor "upstream/${{ env.UPSTREAM_BRANCH }}" HEAD; then
+            echo "Already up to date with upstream/${{ env.UPSTREAM_BRANCH }}."
+          else
+            git merge --no-edit "upstream/${{ env.UPSTREAM_BRANCH }}" || {
+              echo "Merge conflicts detected — resolving protected files with fork version..."
+              for f in "${PROTECTED[@]}"; do
+                if git ls-files -u -- "$f" | grep -q .; then
+                  git checkout --ours -- "$f"
+                  git add -- "$f"
+                fi
+              done
+              REMAINING=$(git diff --name-only --diff-filter=U)
+              if [ -n "$REMAINING" ]; then
+                echo "::error::Unresolved conflicts: $REMAINING"
+                echo "Fix manually on the fork and re-run this workflow."
+                exit 1
+              fi
+              git commit --no-edit
+            }
+            # רשת ביטחון: אסור שיישארו סימני קונפליקט בקבצים המוגנים.
+            for f in "${PROTECTED[@]}"; do
+              if grep -qE '^(<<<<<<<|>>>>>>>)' "$f" 2>/dev/null; then
+                echo "::error::Conflict markers left in $f"
+                exit 1
+              fi
+            done
+          fi
+
+      - name: Update sync marker and push
+        if: github.event_name == 'workflow_dispatch' || steps.compare.outputs.changed == 'true'
+        run: |
+          echo "${{ steps.release.outputs.tag }}" > "${{ env.MARKER }}"
+          git add "${{ env.MARKER }}"
+          if git diff --cached --quiet && git diff --quiet; then
+            echo "Nothing to commit."
+          else
+            git commit -m "Sync with upstream release ${{ steps.release.outputs.tag }}"
+          fi
+          git push origin dev
+
+      - name: Trigger build-and-announce (all platforms + release)
+        if: github.event_name == 'workflow_dispatch' || steps.compare.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run build-and-announce.yml --ref dev
+          echo "Dispatched 'Build, Release and Announce' on dev."

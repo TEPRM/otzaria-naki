@@ -10,7 +10,6 @@ import 'dart:math';
 import 'package:otzaria/core/ui_snack.dart';
 import 'package:otzaria/core/messages/library_messages.dart';
 import 'package:otzaria/data/book_locator.dart';
-import 'package:otzaria/library/view/category_details_dialog.dart';
 import 'package:otzaria/library/view/book_versions_dialog.dart';
 import 'package:otzaria/theme/theme_exports.dart';
 import 'package:otzaria/text_book/view/book_source_dialog.dart';
@@ -26,26 +25,6 @@ String truncateBookCardDescription(String description) {
   if (trimmed.length <= kBookCardDescriptionMaxCharacters) return trimmed;
   final contentLength = kBookCardDescriptionMaxCharacters - 3;
   return '${trimmed.substring(0, contentLength).trimRight()}...';
-}
-
-String? _bookInfoTooltipText(Book book) {
-  final fullDescription = book.heDesc?.trim();
-  if (fullDescription != null && fullDescription.isNotEmpty) {
-    return fullDescription;
-  }
-  final shortDescription = book.heShortDesc?.trim();
-  return shortDescription == null || shortDescription.isEmpty
-      ? null
-      : shortDescription;
-}
-
-/// הטקסט שיוצג ב־Tooltip של לחצן המידע לקטגוריה.
-String? categoryInfoText(Category category) {
-  final fullDescription = category.description.trim();
-  if (fullDescription.isNotEmpty) return fullDescription;
-
-  final shortDescription = category.shortDescription.trim();
-  return shortDescription.isEmpty ? null : shortDescription;
 }
 
 /// מחזיר את נתיב הלוגו של הקטלוג החיצוני שממנו מגיע הספר, או null אם זהו
@@ -273,7 +252,6 @@ class CategoryGridItem extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
-    final infoText = categoryInfoText(category);
     return AppCard(
       onTap: onCategoryClickCallback,
       focusNode: focusNode,
@@ -307,43 +285,8 @@ class CategoryGridItem extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 18),
-            if (infoText != null)
-              Tooltip(
-                message: infoText,
-                waitDuration: const Duration(milliseconds: 400),
-                textAlign: TextAlign.right,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 10,
-                ),
-                margin: const EdgeInsets.all(12),
-                constraints: const BoxConstraints(maxWidth: 320),
-                textStyle: _libraryTooltipTextStyle(context),
-                decoration: _libraryTooltipDecoration(context),
-                child: Container(
-                  width: 28,
-                  height: 28,
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: IconButton(
-                    onPressed: () =>
-                        showCategoryDetailsDialog(context, category),
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints.tightFor(
-                      width: 28,
-                      height: 28,
-                    ),
-                    icon: Icon(
-                      FluentIcons.info_24_regular,
-                      size: 15,
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-              ),
-            const SizedBox(width: 4),
+            // כפתור המידע של הקטגוריה הוסר — הדיאלוג הציג רק את שם הקטגוריה
+            // (התיאורים הוסרו), ולכן הכפתור היה מיותר.
             Container(
               width: 32,
               height: 32,
@@ -629,7 +572,6 @@ class _BookGridActionColumn extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final infoTooltipText = _bookInfoTooltipText(book);
     // מהדורות (book_version) קיימות רק לספרי הספרייה הרשמית (seforim.db);
     // תפריט 'גרסאות' מוצג רק כשיש בפועל מהדורה לבחירה (נבדק ב-FutureBuilder).
     final versionsEligible =
@@ -657,20 +599,8 @@ class _BookGridActionColumn extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (infoTooltipText != null)
-          Tooltip(
-            message: infoTooltipText,
-            waitDuration: const Duration(milliseconds: 400),
-            textAlign: TextAlign.right,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            margin: const EdgeInsets.all(12),
-            constraints: const BoxConstraints(maxWidth: 320),
-            textStyle: _libraryTooltipTextStyle(context),
-            decoration: _libraryTooltipDecoration(context),
-            child: infoButton,
-          )
-        else
-          infoButton,
+        // לחצן המידע נשמר — דיאלוג פרטי הספר מציג את שאר הפרטים ללא תיאורים.
+        infoButton,
         FutureBuilder<List<bool>>(
           future: Future.wait([
             _canDeleteBookFromLibrary(book),

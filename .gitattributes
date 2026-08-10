@@ -1,2 +1,17 @@
 # Generated Dart files - keep LF to avoid spurious diffs on Windows
 *.g.dart text eol=lf
+
+# ── קבצים מוגנים של ה-fork ──────────────────────────────────────────────
+# בכל מיזוג של upstream ל-dev, קבצים אלה עוברים מיזוג סלקטיבי (merge driver):
+# שינויים של upstream באזורים שה-fork לא נגע בהם נכנסים, ובאזורים שה-fork
+# שינה (הסרת תיאורים, תיקוני build) הגרסה שלנו מנצחת.
+# הגדרת ה-drivers מתבצעת ע"י auto-sync.yml לפני המיזוג, ע"י קריאה ל-
+# tool/fork-merge-driver.sh עם נתיב הקובץ (כי ה-driver זקוק לגרסת ה-snapshot).
+lib/library/view/grid_items.dart merge=fork-keep-grid
+lib/library/view/category_details_dialog.dart merge=fork-keep-catdialog
+lib/text_book/view/book_source_dialog.dart merge=fork-keep-srcdialog
+.github/workflows/build-and-announce.yml merge=fork-keep-build
+.github/workflows/auto-sync.yml merge=fork-keep-sync
+
+# סקריפטים של ה-fork — חייבים להישאר LF כדי שה-shebang יעבוד גם ב-Windows/CI
+tool/*.sh text eol=lf
