@@ -2114,10 +2114,12 @@ jobs:
   # --- הכרזה על גרסה שפורסמה ---
   announce_release:
     # תנאי לריצה רק כשיש אירוע של פרסום release.
-    # שינוי מקומי ב-fork: ללא TOKEN_YEMOT (ולא שאר סודות ההכרזה) מדלגים
-    # על ההכרזה — אחרת כל release ב-fork היה נכשל בגלל סודות חסרים.
-    if: github.event_name == 'release' && secrets.TOKEN_YEMOT != ''
     runs-on: ubuntu-latest
+    env:
+      # שינוי מקומי ב-fork: GitHub אוסר שימוש ב-secrets בתוך if, לכן ה-token
+      # מועבר דרך env ושלבי ההכרזה מדלגים כשאינו מוגדר — אחרת כל release
+      # ב-fork היה נכשל בגלל סודות הכרזה שאינם קיימים כאן.
+      TOKEN_YEMOT: ${{ secrets.TOKEN_YEMOT }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
@@ -2128,9 +2130,11 @@ jobs:
           python-version: '3.13'
 
       - name: Install dependencies for webhook script
+        if: env.TOKEN_YEMOT != ''
         run: pip install bs4 requests pyluach yemot-api
 
       - name: Run announcement script (Forum + Yemot)
+        if: env.TOKEN_YEMOT != ''
         env:
           # פרטי ה-Release נלקחים מאירוע ה-Webhook של GitHub
           RELEASE_TAG:  ${{ github.event.release.tag_name }}

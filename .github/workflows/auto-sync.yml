@@ -70,6 +70,8 @@ jobs:
 
       - name: Latest upstream release
         id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           TAG=$(gh api "repos/${{ env.UPSTREAM_REPO }}/releases/latest" --jq .tag_name)
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
