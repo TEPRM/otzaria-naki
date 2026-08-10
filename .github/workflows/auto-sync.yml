@@ -149,6 +149,9 @@ jobs:
         if: github.event_name == 'workflow_dispatch' || steps.compare.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          # מציינים את ריפו ה-fork במפורש — בלי זה gh בוחר את ה-remote
+          # 'upstream' (שנוסף לסנכרון) ושולח את ה-dispatch לריפו המקורי.
+          GH_REPO: ${{ github.repository }}
         run: |
           gh workflow run build-and-announce.yml --ref dev
           echo "Dispatched 'Build, Release and Announce' on dev."
