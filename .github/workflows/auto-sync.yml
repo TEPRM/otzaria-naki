@@ -68,14 +68,20 @@ jobs:
           git config merge.fork-keep-build.driver "tool/fork-merge-driver.sh .github/workflows/build-and-announce.yml %A %O %B"
           git config merge.fork-keep-sync.driver "tool/fork-merge-driver.sh .github/workflows/auto-sync.yml %A %O %B"
 
-      - name: Latest upstream release
+      - name: Latest upstream release (including prereleases)
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG=$(gh api "repos/${{ env.UPSTREAM_REPO }}/releases/latest" --jq .tag_name)
+          # releases/latest מדלג על prereleases (גירסאות בטא) — אנחנו רוצים
+          # לקבל במקביל גם בטא של upstream, לכן שואלים את רשימת ה-releases
+          # ובוחרים את האחרונה לפי תאריך הפרסום (כולל prereleases).
+          LATEST=$(gh api "repos/${{ env.UPSTREAM_REPO }}/releases?per_page=10" --jq '[.[] | select(.draft == false)] | sort_by(.published_at) | reverse | .[0]')
+          TAG=$(printf '%s' "$LATEST" | jq -r .tag_name)
+          IS_PRERELEASE=$(printf '%s' "$LATEST" | jq -r .prerelease)
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Latest upstream release: $TAG"
+          echo "prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream release: $TAG (prerelease: $IS_PRERELEASE)"
 
       - name: Compare with last processed release
         id: compare
@@ -137,7 +143,10 @@ jobs:
         if: github.event_name == 'workflow_dispatch' || steps.compare.outputs.changed == 'true'
         run: |
           echo "${{ steps.release.outputs.tag }}" > "${{ env.MARKER }}"
-          git add "${{ env.MARKER }}"
+          # שומרים גם את סטטוס ה-prerelease — build-and-announce קורא אותו
+          # כדי לפרסם אצלנו באותו אופן (בטא→בטא, יציבה→יציבה).
+          echo "${{ steps.release.outputs.prerelease }}" > .github/LAST_UPSTREAM_PRERELEASE
+          git add "${{ env.MARKER }}" .github/LAST_UPSTREAM_PRERELEASE
           if git diff --cached --quiet && git diff --quiet; then
             echo "Nothing to commit."
           else

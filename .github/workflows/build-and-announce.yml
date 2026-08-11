@@ -1765,7 +1765,24 @@ jobs:
             exit 1
           fi
           
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          # שינוי מקומי ב-fork: פרסום מקביל ל-upstream. auto-sync כותב
+          # .github/LAST_UPSTREAM_PRERELEASE עם סטטוס ה-prerelease של
+          # הגרסה האחרונה של upstream — אם הוא קיים, משקפים אותו
+          # (בטא→בטא, יציבה→יציבה) במקום ההתנהגות לפי ענף.
+          UPSTREAM_PRERELEASE=""
+          if [ -f .github/LAST_UPSTREAM_PRERELEASE ]; then
+            UPSTREAM_PRERELEASE=$(cat .github/LAST_UPSTREAM_PRERELEASE)
+          fi
+          
+          if [ "$UPSTREAM_PRERELEASE" = "true" ] || [ "$UPSTREAM_PRERELEASE" = "false" ]; then
+            echo "tag=$VERSION+${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "prerelease=$UPSTREAM_PRERELEASE" >> $GITHUB_OUTPUT
+            if [ "$UPSTREAM_PRERELEASE" = "true" ]; then
+              echo "title=Otzaria $VERSION (Preview — במקביל ל-release של upstream)" >> $GITHUB_OUTPUT
+            else
+              echo "title=Otzaria $VERSION" >> $GITHUB_OUTPUT
+            fi
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
             echo "tag=$VERSION" >> $GITHUB_OUTPUT
             echo "prerelease=false" >> $GITHUB_OUTPUT
             echo "title=Otzaria $VERSION" >> $GITHUB_OUTPUT
