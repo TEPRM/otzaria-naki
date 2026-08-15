@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otzaria/tabs/models/combined_tab.dart';
@@ -47,12 +48,13 @@ Widget _host(
   OpenedTab root, {
   ValueChanged<double>? onRatioChanged,
   Widget Function(OpenedTab)? paneBuilder,
+  TextDirection textDirection = TextDirection.rtl,
 }) {
   return MaterialApp(
     // עובי המפריד תלוי בפלטפורמה (רחב יותר במגע); כאן נבדקת התנהגות העכבר.
     theme: ThemeData(platform: TargetPlatform.windows),
     home: Directionality(
-      textDirection: TextDirection.rtl,
+      textDirection: textDirection,
       child: Scaffold(
         body: SplitPaneView(
           root: root,
@@ -132,6 +134,57 @@ void main() {
       final wide = tester.getSize(find.text('רחבה')).width;
       final narrow = tester.getSize(find.text('צרה')).width;
       expect(wide, greaterThan(narrow * 2));
+    });
+
+    // הכרטיס עטוף בחיתוך מרובע בגודלו: צל היה נחתך לאורך הצדדים הישרים,
+    // ונשאר רק ככתם מרובע בכל פינה עגולה.
+    testWidgets('כרטיס החלונית אינו מצייר צל', (tester) async {
+      for (final isActive in [true, false]) {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PaneCard(
+              isActive: isActive,
+              isSplit: true,
+              child: const SizedBox(),
+            ),
+          ),
+        );
+
+        final decoration =
+            tester
+                    .widget<AnimatedContainer>(find.byType(AnimatedContainer))
+                    .decoration!
+                as BoxDecoration;
+        expect(decoration.boxShadow, isNull, reason: 'isActive=$isActive');
+      }
+    });
+
+    // גבול בין החלוניות על שבר פיקסל: חיתוך הכרטיס מקצר את הרוחב לפיקסל שלם
+    // ומוחק את קו המסגרת של החלונית הפעילה.
+    testWidgets('גבול החלוניות נופל על פיקסל שלם', (tester) async {
+      addTearDown(tester.view.reset);
+
+      for (final width in [1600.0, 1601.0, 1287.0]) {
+        for (final ratio in [0.5, 0.4237, 0.618]) {
+          tester.view.physicalSize = Size(width, 900);
+          tester.view.devicePixelRatio = 1.0;
+
+          final right = _LeafTab('ימין');
+          final left = _LeafTab('שמאל');
+          await tester.pumpWidget(
+            _host(
+              CombinedTab(rightTab: right, leftTab: left, splitRatio: ratio),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final leftRect = tester.getRect(find.byKey(GlobalObjectKey(left)));
+          final rightRect = tester.getRect(find.byKey(GlobalObjectKey(right)));
+          final reason = 'רוחב $width ויחס $ratio';
+          expect(leftRect.right % 1, 0, reason: reason);
+          expect(rightRect.left % 1, 0, reason: reason);
+        }
+      }
     });
   });
 
@@ -242,6 +295,213 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(reportedRatio, 0.5);
+    });
+
+    // המפריד מצויר בין החלוניות: שכבת ציור חדשה בהצבעה מפצלת את הרסטר,
+    // ומסגרת הפיקסל של החלונית שמצוירת אחריו נעלמת עד שהעכבר מתרחק.
+    testWidgets('הצבעה על המפריד אינה מוסיפה שכבות ציור', (tester) async {
+      final root = CombinedTab(
+        rightTab: _LeafTab('ימין'),
+        leftTab: _LeafTab('שמאל'),
+      );
+      await tester.pumpWidget(_host(root));
+      await tester.pumpAndSettle();
+
+      final layersBefore = tester.layers.length;
+      final handle = find.descendant(
+        of: find.byType(MouseRegion).last,
+        matching: find.byType(AnimatedContainer),
+      );
+      BoxDecoration decoration() =>
+          tester.widget<AnimatedContainer>(handle).decoration! as BoxDecoration;
+      expect(decoration().color!.a, 0);
+
+      final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.addPointer(location: Offset.zero);
+      addTearDown(gesture.removePointer);
+      await gesture.moveTo(tester.getCenter(find.byType(MouseRegion).last));
+      await tester.pumpAndSettle();
+
+      // הידית נראית עכשיו — ובכל זאת מספר השכבות לא גדל.
+      expect(decoration().color!.a, greaterThan(0));
+      expect(tester.layers.length, layersBefore);
+    });
+  });
+
+  // רגרסיה: הרצפה הייתה בפיקסלים בלבד (140), ובמסך רחב היא כמעט לא הגבילה —
+  // אפשר היה לגרור ספר אחד על כמעט כל הרוחב ולהשאיר לשני רצועה.
+  group('רצפת החלונית בגרירה', () {
+    /// מקבע רוחב מסך לוגי לבדיקה.
+    void useScreenWidth(WidgetTester tester, double width) {
+      tester.view.physicalSize = Size(width, 1000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+    }
+
+    CombinedTab twoPanes({double ratio = 0.5}) => CombinedTab(
+      rightTab: _LeafTab('ימין'),
+      leftTab: _LeafTab('שמאל'),
+      splitRatio: ratio,
+    );
+
+    double paneWidth(WidgetTester tester, String title) =>
+        tester.getSize(find.text(title)).width;
+
+    Future<void> dragDivider(WidgetTester tester, double dx) async {
+      await tester.drag(
+        find.byType(MouseRegion).last,
+        Offset(dx, 0),
+        warnIfMissed: false,
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('במסך רחב גרירה קיצונית משאירה חמישית לחלונית', (tester) async {
+      useScreenWidth(tester, 2400);
+      final root = twoPanes();
+      double? reported;
+      await tester.pumpWidget(_host(root, onRatioChanged: (r) => reported = r));
+
+      await dragDivider(tester, 5000);
+
+      expect(reported, closeTo(kMinPaneRatio, 1e-6));
+      final right = paneWidth(tester, 'ימין');
+      final left = paneWidth(tester, 'שמאל');
+      expect(right / (right + left), closeTo(kMinPaneRatio, 0.005));
+      // הרצפה בפיקסלים לבדה הייתה מתירה כאן פחות מ-6%.
+      expect(right, greaterThan(kMinPaneExtent * 3));
+    });
+
+    testWidgets('הרצפה חלה גם בכיוון ההפוך', (tester) async {
+      useScreenWidth(tester, 2400);
+      final root = twoPanes();
+      double? reported;
+      await tester.pumpWidget(_host(root, onRatioChanged: (r) => reported = r));
+
+      await dragDivider(tester, -5000);
+
+      expect(reported, closeTo(1 - kMinPaneRatio, 1e-6));
+      final right = paneWidth(tester, 'ימין');
+      final left = paneWidth(tester, 'שמאל');
+      expect(left / (right + left), closeTo(kMinPaneRatio, 0.005));
+    });
+
+    testWidgets('ב-LTR הרצפה זהה ובשני הכיוונים', (tester) async {
+      useScreenWidth(tester, 2400);
+      for (final dx in [5000.0, -5000.0]) {
+        final root = twoPanes();
+        double? reported;
+        await tester.pumpWidget(
+          _host(
+            root,
+            onRatioChanged: (r) => reported = r,
+            textDirection: TextDirection.ltr,
+          ),
+        );
+
+        await dragDivider(tester, dx);
+
+        expect(reported, inInclusiveRange(kMinPaneRatio, 1 - kMinPaneRatio));
+        expect(
+          paneWidth(tester, 'ימין') + paneWidth(tester, 'שמאל'),
+          greaterThan(0),
+        );
+      }
+    });
+
+    testWidgets('במסך צר הרצפה בפיקסלים היא שגוברת', (tester) async {
+      useScreenWidth(tester, 700);
+      final root = twoPanes();
+      double? reported;
+      await tester.pumpWidget(_host(root, onRatioChanged: (r) => reported = r));
+
+      await dragDivider(tester, 5000);
+
+      // 20% מ-700 קטן מ-140, ולכן כאן הרצפה בפיקסלים היא הקובעת.
+      expect(reported, greaterThan(kMinPaneRatio));
+      expect(
+        paneWidth(tester, 'ימין'),
+        greaterThanOrEqualTo(kMinPaneExtent - 1),
+      );
+    });
+
+    testWidgets('יחס קיצוני שנשמר בעבר מצויר לפי הרצפה', (tester) async {
+      useScreenWidth(tester, 2400);
+      // יחס כזה נשמר בטאבים לפני שהוחזרה הרצפה היחסית.
+      await tester.pumpWidget(_host(twoPanes(ratio: 0.03)));
+      await tester.pumpAndSettle();
+
+      final right = paneWidth(tester, 'ימין');
+      final left = paneWidth(tester, 'שמאל');
+      expect(right / (right + left), closeTo(kMinPaneRatio, 0.005));
+    });
+
+    testWidgets('גרירות חוזרות אינן צוברות חריגה מהרצפה', (tester) async {
+      useScreenWidth(tester, 2400);
+      final root = twoPanes();
+      final reported = <double>[];
+      await tester.pumpWidget(
+        _host(root, onRatioChanged: reported.add),
+      );
+
+      for (var i = 0; i < 8; i++) {
+        await dragDivider(tester, 900);
+      }
+
+      expect(reported, isNotEmpty);
+      for (final ratio in reported) {
+        expect(ratio, inInclusiveRange(kMinPaneRatio, 1 - kMinPaneRatio));
+      }
+      expect(root.splitRatio, closeTo(kMinPaneRatio, 1e-6));
+    });
+
+    testWidgets('שתי החלוניות והמפריד ממלאים בדיוק את הרוחב', (tester) async {
+      useScreenWidth(tester, 2400);
+      for (final ratio in [0.03, 0.2, 0.5, 0.8, 0.97]) {
+        await tester.pumpWidget(_host(twoPanes(ratio: ratio)));
+        await tester.pumpAndSettle();
+
+        final total =
+            paneWidth(tester, 'ימין') +
+            paneWidth(tester, 'שמאל') +
+            tester.getSize(find.byType(MouseRegion).last).width;
+        // שוליי כרטיס החלונית משני צדי השורה.
+        expect(total, closeTo(2400 - kPaneCardMargin * 2, 1.0));
+      }
+    });
+
+    testWidgets('איפוס בלחיצה כפולה מחזיר לחצי גם מיחס קיצוני', (tester) async {
+      useScreenWidth(tester, 2400);
+      final root = twoPanes(ratio: 0.03);
+      double? reported;
+      await tester.pumpWidget(_host(root, onRatioChanged: (r) => reported = r));
+
+      await tester.tap(find.byType(MouseRegion).last, warnIfMissed: false);
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tap(find.byType(MouseRegion).last, warnIfMissed: false);
+      await tester.pumpAndSettle();
+
+      expect(reported, 0.5);
+      expect(
+        paneWidth(tester, 'ימין'),
+        closeTo(paneWidth(tester, 'שמאל'), 2.0),
+      );
+    });
+
+    testWidgets('מסך צר מדי לשתי חלוניות אינו מפיל ואינו משנה יחס', (
+      tester,
+    ) async {
+      useScreenWidth(tester, 260);
+      final root = twoPanes();
+      var reports = 0;
+      await tester.pumpWidget(_host(root, onRatioChanged: (_) => reports++));
+
+      await dragDivider(tester, 400);
+
+      // הרצפה מגיעה למחצית — אין יחס חוקי לשנות אליו.
+      expect(root.splitRatio, 0.5);
+      expect(reports, lessThanOrEqualTo(1));
+      expect(tester.takeException(), isNull);
     });
   });
 

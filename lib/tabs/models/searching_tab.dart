@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:otzaria/search/bloc/search_bloc.dart';
 import 'package:otzaria/search/bloc/search_event.dart';
+import 'package:otzaria/search/models/external_search_status.dart';
+import 'package:otzaria/search/models/external_search_summary.dart';
 import 'package:otzaria/search/models/search_configuration.dart';
+import 'package:otzaria/search/search_defaults.dart';
 import 'package:otzaria/search/search_query_builder.dart';
 import 'package:otzaria/tabs/models/tab.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
@@ -15,6 +18,17 @@ class SearchingTab extends OpenedTab {
   final searchFieldFocusNode = FocusNode();
   late final ValueNotifier<String> titleNotifier;
   final ValueNotifier<bool> isLeftPaneOpen = ValueNotifier(true);
+
+  /// סיכום סיווג התוצאות של ספק החיפוש החיצוני (תוסף), כשפעיל — מזין את
+  /// ספירות הקטגוריות בעץ הסינון. נכתב ע"י מדור התוצאות החיצוני.
+  final ValueNotifier<ExternalSearchSummary?> externalSearchSummary =
+      ValueNotifier(null);
+
+  /// מצב המדור החיצוני להצגה בשורת המונים שבראש הטאב (מקור, התקדמות
+  /// וספירות). נכתב ע"י מדור התוצאות החיצוני; null כשאין ספק פעיל.
+  final ValueNotifier<ExternalSearchStatus?> externalSearchStatus =
+      ValueNotifier(null);
+
   final ItemScrollController scrollController = ItemScrollController();
   List<Book> allBooks = [];
 
@@ -73,8 +87,16 @@ class SearchingTab extends OpenedTab {
     super.isPinned = false,
     super.dedupeKey,
     SearchConfiguration? initialConfiguration,
+    SearchBloc? searchBloc,
   }) {
-    searchBloc = SearchBloc(initialConfiguration: initialConfiguration);
+    // בלי configuration מפורשת זה טאב חיפוש חדש — הוא נפתח עם המיון ומצב
+    // האיחוד שהמשתמש בחר לאחרונה.
+    this.searchBloc =
+        searchBloc ??
+        SearchBloc(
+          initialConfiguration:
+              initialConfiguration ?? SearchDefaults.withResultPreferences(),
+        );
     titleNotifier = ValueNotifier(title);
     if (searchText != null) {
       queryController.text = searchText;
@@ -319,6 +341,8 @@ class SearchingTab extends OpenedTab {
     negativeSpacingValuesChanged.dispose();
     useGlobalSearchOptions.dispose();
     useGlobalNegativeSearchOptions.dispose();
+    externalSearchSummary.dispose();
+    externalSearchStatus.dispose();
     // סגירת ה-bloc כדי למנוע דליפה
     searchBloc.close();
     super.dispose();
@@ -355,6 +379,20 @@ class SearchingTab extends OpenedTab {
             sortByIndex < ResultsOrder.values.length)
         ? ResultsOrder.values[sortByIndex]
         : defaultConfig.sortBy;
+    final scopeIndex = json['proximityScope'];
+    final initialProximityScope =
+        (scopeIndex is int &&
+            scopeIndex >= 0 &&
+            scopeIndex < SearchScope.values.length)
+        ? SearchScope.values[scopeIndex]
+        : defaultConfig.proximityScope;
+    final groupingIndex = json['resultGrouping'];
+    final initialGrouping =
+        (groupingIndex is int &&
+            groupingIndex >= 0 &&
+            groupingIndex < ResultGroupingMode.values.length)
+        ? ResultGroupingMode.values[groupingIndex]
+        : defaultConfig.resultGrouping;
     final initialCurrentFacets = rawCurrentFacets is List
         ? rawCurrentFacets.map((e) => e.toString()).toList(growable: false)
         : defaultConfig.currentFacets;
@@ -376,13 +414,23 @@ class SearchingTab extends OpenedTab {
 
     final initialConfig = SearchConfiguration(
       distance: initialDistance,
+      proximityScope: initialProximityScope,
       searchMode: initialMode,
       numResults: initialNumResults,
       sortBy: initialSortBy,
+      resultGrouping: initialGrouping,
       currentFacets: initialCurrentFacets,
       searchScopeFacets: initialScopeFacets,
       wordMatchMode: initialWordMatchMode,
       wordMatchCount: initialWordMatchCount,
+      pluginSearchSelections: switch (json['pluginSearchSelections']) {
+        final Map values => {
+          for (final entry in values.entries)
+            if (entry.key is String && entry.value is bool)
+              entry.key as String: entry.value as bool,
+        },
+        _ => defaultConfig.pluginSearchSelections,
+      },
       regexEnabled: json['regexEnabled'] == true,
       caseSensitive: json['caseSensitive'] == true,
       multiline: json['multiline'] == true,
@@ -551,13 +599,16 @@ class SearchingTab extends OpenedTab {
       'isPinned': isPinned,
       'type': 'SearchingTabWindow',
       'distance': config.distance,
+      'proximityScope': config.proximityScope.index,
       'searchMode': config.searchMode.index,
       'numResults': config.numResults,
       'sortBy': config.sortBy.index,
+      'resultGrouping': config.resultGrouping.index,
       'currentFacets': config.currentFacets,
       'searchScopeFacets': config.searchScopeFacets,
       'wordMatchMode': config.wordMatchMode.index,
       'wordMatchCount': config.wordMatchCount,
+      'pluginSearchSelections': config.pluginSearchSelections,
       'regexEnabled': config.regexEnabled,
       'caseSensitive': config.caseSensitive,
       'multiline': config.multiline,

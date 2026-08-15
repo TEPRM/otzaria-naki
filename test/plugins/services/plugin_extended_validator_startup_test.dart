@@ -12,8 +12,9 @@ Map<String, dynamic> _manifest({
     'reader.toolbar',
     'reader.context_menu',
     'published_data.write',
+    'search.dialog',
   ],
-  String minAppVersion = '0.9.97',
+  String minAppVersion = '0.9.96',
   Map<String, dynamic>? startup,
 }) => {
   'schemaVersion': 1,
@@ -78,11 +79,105 @@ void main() {
       },
     ],
     'activationEvents': ['app.startup'],
+    'searchDialogItems': [
+      {
+        'id': 'include-external',
+        'type': 'checkbox',
+        'title': 'חפש גם במקור חיצוני',
+        'visibleInModes': ['exact', 'advanced'],
+      },
+    ],
   };
 
   test('a valid startup section passes without errors', () {
     final report = _run(tempDir, _manifest(startup: validStartup()));
     expect(report.errors, isEmpty);
+  });
+
+  group('externalEditions', () {
+    Map<String, dynamic> editionsManifest({
+      List<String> permissions = const [
+        'app.startup_contributions',
+        'database.read',
+        'library.books.read',
+      ],
+      String minAppVersion = '0.9.97',
+      String sourceId = 'mapping_source',
+      List<Map<String, dynamic>>? items,
+    }) {
+      final json = _manifest(
+        permissions: permissions,
+        minAppVersion: minAppVersion,
+        startup: {
+          'externalEditions':
+              items ??
+              [
+                {
+                  'id': 'editions-1',
+                  'provider': 'extlib',
+                  'sourceId': sourceId,
+                  'table': 'mapping',
+                  'externalIdColumn': 'ext_id',
+                  'otzariaIdColumn': 'otzaria_id',
+                },
+              ],
+        },
+      );
+      json['contributes'] = <String, dynamic>{
+        ...(json['contributes'] as Map),
+        'databaseSources': [
+          {'id': 'mapping_source', 'label': 'מיפוי', 'required': true},
+        ],
+      };
+      return json;
+    }
+
+    test('תרומה תקינה עוברת ללא שגיאות', () {
+      final report = _run(tempDir, editionsManifest());
+      expect(report.errors, isEmpty);
+    });
+
+    test('חסרה הרשאת database.read — שגיאה חוסמת', () {
+      final report = _run(
+        tempDir,
+        editionsManifest(
+          permissions: const [
+            'app.startup_contributions',
+            'library.books.read',
+          ],
+        ),
+      );
+      expect(report.errors, contains(contains('database.read')));
+    });
+
+    test('minAppVersion ישן מדי — שגיאה חוסמת', () {
+      final report = _run(tempDir, editionsManifest(minAppVersion: '0.9.96'));
+      expect(
+        report.errors,
+        contains(contains('externalEditions נתמך החל מגרסה')),
+      );
+    });
+
+    test('sourceId שלא הוכרז — שגיאה חוסמת', () {
+      final report = _run(tempDir, editionsManifest(sourceId: 'other_source'));
+      expect(report.errors, contains(contains('other_source')));
+    });
+
+    test('מזהה כפול — שגיאה חוסמת', () {
+      final item = {
+        'id': 'editions-1',
+        'provider': 'extlib',
+        'sourceId': 'mapping_source',
+        'table': 'mapping',
+        'externalIdColumn': 'ext_id',
+        'otzariaIdColumn': 'otzaria_id',
+      };
+      final report = _run(
+        tempDir,
+        editionsManifest(items: [item, Map.of(item)]),
+      );
+      expect(report.errors, contains(contains('מזהה כפול')));
+    });
   });
 
   test('missing app.startup_contributions permission is a blocking error', () {
@@ -103,12 +198,70 @@ void main() {
     );
   });
 
-  test('minAppVersion below 0.9.97 is a blocking error', () {
+  test('minAppVersion below 0.9.96 is a blocking error', () {
     final report = _run(
       tempDir,
       _manifest(minAppVersion: '0.9.95', startup: validStartup()),
     );
     expect(report.errors, contains(contains('minAppVersion')));
+  });
+
+  test('openPluginOnSubmit דורש minAppVersion 0.9.97', () {
+    final startup = validStartup();
+    (startup['searchDialogItems'] as List).single['openPluginOnSubmit'] = true;
+
+    final oldVersion = _run(
+      tempDir,
+      _manifest(minAppVersion: '0.9.96', startup: startup),
+    );
+    expect(oldVersion.errors, contains(contains('0.9.97')));
+
+    final supportedVersion = _run(
+      tempDir,
+      _manifest(minAppVersion: '0.9.97', startup: startup),
+    );
+    expect(supportedVersion.errors, isEmpty);
+  });
+
+  test('data.choose דורש minAppVersion 0.9.97', () {
+    final startup = {
+      'programs': [
+        {
+          'id': 'choose-data',
+          'version': 1,
+          'triggers': ['reader.activeBookChanged'],
+          'commands': [
+            {
+              'id': 'selected',
+              'type': 'data.choose',
+              'args': {
+                'condition': {
+                  'op': 'exists',
+                  'value': {r'$context': 'reader.book.id'},
+                },
+                'whenTrue': {r'$literal': 'yes'},
+                'whenFalse': {r'$literal': 'no'},
+              },
+            },
+          ],
+          'outputs': {
+            'selected': {r'$result': 'selected'},
+          },
+        },
+      ],
+    };
+
+    final oldVersion = _run(
+      tempDir,
+      _manifest(minAppVersion: '0.9.96', startup: startup),
+    );
+    expect(oldVersion.errors, contains(contains('0.9.97')));
+
+    final supportedVersion = _run(
+      tempDir,
+      _manifest(minAppVersion: '0.9.97', startup: startup),
+    );
+    expect(supportedVersion.errors, isEmpty);
   });
 
   test('an invalid toolbar item (missing icon) is a blocking error', () {
@@ -137,6 +290,28 @@ void main() {
       ),
     );
     expect(report.errors, contains(contains('publishedData')));
+  });
+
+  test('unknown static search option id is a blocking error', () {
+    final report = _run(
+      tempDir,
+      _manifest(
+        startup: {
+          'searchDialogItems': [
+            {
+              'id': 'include-external',
+              'type': 'checkbox',
+              'title': 'חפש גם במקור חיצוני',
+              'disabledSearchOptions': {
+                'advanced': ['word.not-a-real-option'],
+              },
+            },
+          ],
+        },
+      ),
+    );
+
+    expect(report.errors, contains(contains('searchDialogItems')));
   });
 
   test('unknown activation event is a warning, not an error', () {
@@ -213,12 +388,14 @@ void main() {
         startup: {
           'toolbarItems': 'not-a-list',
           'contextMenuItems': ['not-a-map'],
+          'programs': ['not-a-map'],
           'activationEvents': [17],
         },
       ),
     );
     expect(report.errors, contains(contains('toolbarItems')));
     expect(report.errors, contains(contains('contextMenuItems')));
+    expect(report.errors, contains(contains('programs')));
     expect(report.errors, contains(contains('activationEvents')));
   });
 
@@ -348,4 +525,209 @@ void main() {
 
     expect(report.errors, contains(contains('מפעיל מנוע רקע')));
   });
+
+  test('תכנית Host תקינה עוברת ולידציה בלי להפעיל מנוע רקע', () {
+    final report = _run(
+      tempDir,
+      _manifest(
+        minAppVersion: '0.9.96',
+        permissions: const ['app.startup_contributions'],
+        startup: {
+          'programs': [_validHostProgram()],
+        },
+      ),
+    );
+
+    expect(report.errors, isEmpty);
+  });
+
+  test('פקודה דקלרטיבית לא מוכרת היא שגיאה חוסמת', () {
+    final program = _validHostProgram();
+    (program['commands'] as List<dynamic>)[0] = {
+      'id': 'unsafe',
+      'type': 'database.rawSql',
+      'args': {'sql': 'DELETE FROM books'},
+    };
+    final report = _run(
+      tempDir,
+      _manifest(
+        minAppVersion: '0.9.96',
+        permissions: const ['app.startup_contributions'],
+        startup: {
+          'programs': [program],
+        },
+      ),
+    );
+
+    expect(report.errors, contains(contains('unknown_command')));
+  });
+
+  test('תכנית דקלרטיבית דורשת minAppVersion 0.9.96', () {
+    final report = _run(
+      tempDir,
+      _manifest(
+        minAppVersion: '0.9.95',
+        permissions: const ['app.startup_contributions'],
+        startup: {
+          'programs': [_validHostProgram()],
+        },
+      ),
+    );
+
+    expect(report.errors, contains(contains('0.9.96')));
+  });
+
+  test('שני פקדי Host דקלרטיביים עוברים ולידציה', () {
+    final report = _run(
+      tempDir,
+      _manifest(
+        minAppVersion: '0.9.96',
+        permissions: const [
+          'app.startup_contributions',
+          'reader.toolbar',
+          'reader.open',
+        ],
+        startup: {
+          'programs': [_toolbarProgram()],
+          'toolbarItems': _declarativeToolbarItems(),
+        },
+      ),
+    );
+
+    expect(report.errors, isEmpty);
+  });
+
+  test('פקד Host דקלרטיבי ללא reader.toolbar נדחה בהתקנה', () {
+    final report = _run(
+      tempDir,
+      _manifest(
+        minAppVersion: '0.9.96',
+        permissions: const ['app.startup_contributions', 'reader.open'],
+        startup: {
+          'programs': [_toolbarProgram()],
+          'toolbarItems': _declarativeToolbarItems(),
+        },
+      ),
+    );
+
+    expect(report.errors, contains(contains('reader.toolbar')));
+  });
+
+  test('פקד דקלרטיבי שמפנה לפלט חסר נדחה', () {
+    final items = _declarativeToolbarItems();
+    (items.first['binding'] as Map<String, dynamic>)['visibleOutput'] =
+        'missing';
+    final report = _run(
+      tempDir,
+      _manifest(
+        minAppVersion: '0.9.96',
+        permissions: const [
+          'app.startup_contributions',
+          'reader.toolbar',
+          'reader.open',
+        ],
+        startup: {
+          'programs': [_toolbarProgram()],
+          'toolbarItems': items,
+        },
+      ),
+    );
+
+    expect(report.errors, contains(contains('output_not_found')));
+  });
 }
+
+Map<String, dynamic> _validHostProgram() => {
+  'id': 'host-program',
+  'version': 1,
+  'triggers': ['reader.activeBookChanged'],
+  'commands': [
+    {
+      'id': 'first',
+      'type': 'data.first',
+      'args': {
+        'items': {
+          r'$literal': [1],
+        },
+      },
+    },
+  ],
+  'outputs': {
+    'first': {r'$result': 'first'},
+  },
+};
+
+Map<String, dynamic> _toolbarProgram() => {
+  'id': 'book-links',
+  'version': 1,
+  'triggers': ['reader.activeBookChanged'],
+  'commands': [
+    {
+      'id': 'first',
+      'type': 'data.first',
+      'args': {
+        'items': {
+          r'$literal': [
+            {'id': 1, 'title': 'מהדורה'},
+          ],
+        },
+      },
+    },
+  ],
+  'outputs': {
+    'defaultEdition': {r'$result': 'first'},
+    'editions': {
+      r'$literal': [
+        {'id': 1, 'title': 'מהדורה'},
+      ],
+    },
+  },
+};
+
+List<Map<String, dynamic>> _declarativeToolbarItems() => [
+  {
+    'id': 'default',
+    'title': 'פתח מהדורת ברירת מחדל',
+    'icon': 'book_24_regular',
+    'binding': {
+      'program': 'book-links',
+      'visibleOutput': 'defaultEdition',
+    },
+    'action': {
+      'type': 'reader.openBook',
+      'args': {
+        'identity': {r'$output': 'defaultEdition'},
+      },
+    },
+  },
+  {
+    'id': 'editions',
+    'type': 'menu',
+    'title': 'פתח מהדורה אחרת',
+    'icon': 'book_24_regular',
+    'binding': {
+      'program': 'book-links',
+      'visibleOutput': 'editions',
+    },
+    'childrenBinding': {
+      'itemsOutput': 'editions',
+      'itemTemplate': {
+        'id': {
+          r'$concat': [
+            'edition-',
+            {r'$item': 'id'},
+          ],
+        },
+        'title': {r'$item': 'title'},
+        'action': {
+          'type': 'reader.openBook',
+          'args': {
+            'identity': {
+              'id': {r'$item': 'id'},
+            },
+          },
+        },
+      },
+    },
+  },
+];

@@ -155,6 +155,9 @@ my-plugin/
 | `contributes.publishedDataTypes` | `[]` | סוגי נתונים שהתוסף מפרסם |
 | `contributes.background.entrypoint` | `null` | נתיב יחסי לקובץ HTML קליל (ללא UI) שייטען ברקע במקום ה-`entrypoint` המלא. רלוונטי רק לתוסף עם `app.run_on_startup`. ראה §ריצת רקע. |
 | `contributes.startup` | `null` | פקדים, פריטי תפריט ונתונים שאוצריא טוענת ישירות מהמניפסט בלי להפעיל WebView. |
+| `contributes.startup.programs` | `[]` | תכניות חישוב Host מוולדות, ללא JavaScript; ראו `API_REFERENCE.md` §תכניות Host ללא WebView. |
+| `contributes.startup.searchDialogItems` | `[]` | שורות checkbox סטטיות; `openPluginOnSubmit` יכול לנתב את אישור החיפוש לתוסף. |
+| `contributes.startup.externalEditions` | `[]` | קונפיגורציית מהדורות מקבילות של ספק חיצוני (טבלת מיפוי במקור DB מוכרז); ראו `API_REFERENCE.md` §מהדורות מקבילות חיצוניות. |
 | `contributes.startup.activationEvents` | `[]` | אירועים שמעירים את מנוע הרקע בעצלנות; כל נושא דורש גם הרשאת subscribe מתאימה. |
 | `contributes.startup.keepAlive` | `false` | בקשה למנוע כיבוי אוטומטי; דורשת אישור נפרד של `app.background_keep_alive`. |
 
@@ -222,6 +225,7 @@ Otzaria.off('calendar.date_changed', handler); // חייב להיות אותו r
 | `navigation.changed` | 🔁 חוזר | `{ screen: string }` |
 | `reader.current_book_changed` | 🔁 חוזר | `{ bookId: string, id: number?, type: string?, source: string?, index: number }` |
 | `calendar.date_changed` | 🔁 חוזר | `{ date: string }` |
+| `calendar.city_changed` | 🔁 חוזר | `{ city: string }` |
 | `workspace.changed` | 🔁 חוזר | `{ workspaceId: string }` |
 | `settings.changed` | 🔁 חוזר | `{ key: string, newValue: * }` |
 | `plugin.permissions_changed` | 🔁 חוזר | `{ permissions: string[] }` |
@@ -282,7 +286,7 @@ Otzaria.on('plugin.suspended', stop);   // עצירת timers / polling / WebSock
 |--------|-------|--------|
 | `app.getInfo` | `app.info.read` | גרסת האפליקציה, פלטפורמה |
 | `app.getTheme` | `app.info.read` | ערכת נושא מלאה (colorScheme + typography) |
-| `app.getLocale` | `app.info.read` | locale ו-textDirection |
+| `app.getLocale` | `app.info.read` | locale, language ו-textDirection (מ-0.9.97 — לפי שפת הממשק שנבחרה) |
 | `app.openUrl` | `app.open_url` | פתיחת כתובת http/https בדפדפן המערכת |
 | `app.getConnectivity` | `app.info.read` | האם יש אינטרנט — להסתרת יכולות מקוונות |
 
@@ -292,18 +296,27 @@ Otzaria.on('plugin.suspended', stop);   // עצירת timers / polling / WebSock
 |--------|-------|----------|-------|
 | `library.findBooks` | `library.books.read` | `{ query, limit? }` | `BookMeta[]` |
 | `library.getBookMetadata` | `library.books.read` | `{ bookId }` | `BookMeta \| null` |
+| `library.resolveBooks` | `library.books.read` | `{ items: BookIdentity[] }` (עד 100) | `(BookMeta \| null)[]` |
 | `library.listRecentBooks` | `library.books.read` | — | `{ bookId, title, ref }[]` |
 | `library.getBookContent` | `library.content.read` | `{ bookId, offset?, limit?, section? }` | `string` (max 5000 תווים) |
 | `library.getBookToc` | `library.content.read` | `{ bookId }` | `TocEntry[]` |
 | `library.listBookAltStructures` | `library.content.read` | `{ bookId }` | `AltStructure[]` |
 | `library.getBookAltToc` | `library.content.read` | `{ bookId, structureKey? }` | `TocEntry[]` |
 
+### network.*
+
+| Method | הרשאה | פרמטרים | החזרה |
+|--------|-------|----------|-------|
+| `network.fetchStream` | `network.access` או `network.localhost` | `{ url, method?, headers?, body?, timeoutMs? }` | `AsyncIterable` של metadata ומקטעי UTF-8 |
+| `network.fetch` | כנ״ל | אותם פרמטרים | תגובה מלאה; מיושן ומוסר ב-0.9.98 |
+| `network.download` | כנ״ל | `{ url, filename?, destPath?, resume? }` | נתיב הקובץ שנשמר |
+
 ### search.*
 
 | Method | הרשאה | פרמטרים | החזרה |
 |--------|-------|----------|-------|
 | `search.fullText` | `search.fulltext.read` | `{ query, limit? }` | `SearchResult[]` |
-| `search.query` | `search.fulltext.read` | `{ query, mode?, distance?, proximityScope?, order?, grouping?, wordMatchMode?, options?, wordOptions?, alternativeWords?, customSpacing?, negativeQuery?, categories?, books?, authors?, eras?, baseBooksOnly?, limit?, offset?, includeBookCounts? }` | `{ results, total, groupCount, truncated, facets, bookCounts? }` |
+| `search.query` | `search.fulltext.read` | `{ query, mode?, distance?, proximityScope?, order?, grouping?, wordMatchMode?, options?, wordOptions?, alternativeWords?, customSpacing?, negativeQuery?, categories?, books?, authors?, eras?, baseBooksOnly?, limit?, offset?, includeBookCounts? }` | `AsyncIterable<{ sequence, results, total, groupCount, truncated, facets, bookCounts? }>` |
 | `search.getOptions` | `search.fulltext.read` | `{}` | הערכים החוקיים לכל פרמטר של `search.query` |
 
 ב-`search.query`, גודל עמוד מוגבל ל-500 וחלון הדפדוף (`offset + limit`
@@ -364,18 +377,21 @@ Otzaria.on('plugin.suspended', stop);   // עצירת timers / polling / WebSock
 **מפתחות מותרים:**
 `keyDarkMode`, `keyFollowSystemTheme`, `keySwatchColor`, `keyDarkSwatchColor`,
 `keyFontSize`, `keyFontFamily`, `keyCommentatorsFontFamily`, `keyCommentatorsFontSize`,
-`keyLineHeight`, `keySelectedCity`, `keyCalendarType`, `keyShowTeamim`,
+`keyLineHeight`, `keySelectedCity`, `keyCalendarType`, `keySettingsLanguage`, `keyShowTeamim`,
 `keyDefaultNikud`, `keyRemoveNikudFromTanach`, `keyReplaceHolyNames`,
-`keyLibraryViewMode`, `keyAlignTabsToRight`, `keyCopyWithHeaders`, `keyCopyHeaderFormat`
+`keyLibraryViewMode`, `keyAlignTabsToRight`, `keyCopyWithHeaders`, `keyCopyHeaderFormat`,
+`key-hebrew-books-path`
 
-> ⚠️ מפתחות לא-מורשים (סיסמאות, נתיבים, credentials) יחזירו `null` ולא ישלחו שגיאה.
+> ⚠️ מפתחות לא-מורשים (סיסמאות, נתיבים אחרים ו־credentials) יחזירו `null` ולא ישלחו שגיאה.
 
 ### calendar.*
 
 | Method | הרשאה | החזרה |
 |--------|-------|-------|
 | `calendar.getSelectedDate` | `calendar.read` | `string` (ISO 8601) |
-| `calendar.getDailyTimes`   | `calendar.read` | `Record<string, string>` |
+| `calendar.getDailyTimes`   | `calendar.read` | `Record<string, string>` — מ-0.9.97 מקבל `{ date?, city?, lat?, lng?, elevation?, timezone?, inIsrael? }` |
+| `calendar.getHalachicTimes`| `calendar.read` | `Record<string, string>` — אותם פרמטרים כמו `calendar.getDailyTimes` (מ-0.9.97) |
+| `calendar.getCities`       | `calendar.read` | `CityInfo[]` (מ-0.9.97) |
 | `calendar.getJewishDate`   | `calendar.read` | `JewishDate` |
 | `calendar.getEvents`       | `calendar.read` | `CalendarEvent[]` |
 
@@ -625,7 +641,7 @@ Otzaria.on('plugin.boot', async (payload) => {
 
 ### תאימות זמנית לתוספים ישנים
 
-ב-0.9.97 בלבד, תוסף שמבקש `app.run_on_startup` אך אינו מצהיר על
+בגרסאות 0.9.96–0.9.97, תוסף שמבקש `app.run_on_startup` אך אינו מצהיר על
 `contributes.startup` עדיין נטען בעליית אוצריא ונשאר פעיל לאורך הסשן. המסלול
 הישן יוסר ב-0.9.98; תוסף שלא יעבור להצהרות דקלרטיביות לא יופעל עוד ברקע.
 
@@ -659,7 +675,7 @@ Otzaria.on('plugin.boot', async (payload) => {
 - ה-`network.allowlist` במניפסט הוא **תנאי חובה אך לא תנאי מספיק** — בלי הצהרה במניפסט ה-URL ייחסם, וגם עם הצהרה הוא ייחסם אם אינו מופיע במקור אמון רשמי של אוצריא.
 - אם תוסף מבקש גישה ל-URL שאינו ב-allowlist הגלובלי, יש לפנות למתחזקי אוצריא בבקשה להוסיף אותו.
 
-**שירותים מקומיים (localhost):** גישה ל-`localhost` / `127.0.0.1` / `::1` (למשל מודל שפה מקומי כמו Ollama / LM Studio) משתמשת בהרשאה הנפרדת **`network.localhost`** — לא `network.access`. מסלול זה **אינו** דורש את שכבה 3 (allowlist גלובלי / PR לאוצריא); די בשלושה: `network.enabled: true`, הצהרת היעד ב-`network.allowlist` של התוסף (מותר host חשוף כמו `"127.0.0.1"` שמתיר כל פורט, או URL מלא שנועל לפורט מסוים), ואישור המשתמש להרשאת `network.localhost`. הקריאות חייבות לעבור דרך `network.fetch` (לא `fetch()` ישיר מה-WebView — הוא נחסם ב-CORS מול שרת מקומי שדוחה `Origin: null`).
+**שירותים מקומיים (localhost):** גישה ל-`localhost` / `127.0.0.1` / `::1` (למשל מודל שפה מקומי כמו Ollama / LM Studio) משתמשת בהרשאה הנפרדת **`network.localhost`** — לא `network.access`. מסלול זה **אינו** דורש את שכבה 3 (allowlist גלובלי / PR לאוצריא); די בשלושה: `network.enabled: true`, הצהרת היעד ב-`network.allowlist` של התוסף (מותר host חשוף כמו `"127.0.0.1"` שמתיר כל פורט, או URL מלא שנועל לפורט מסוים), ואישור המשתמש להרשאת `network.localhost`. הקריאות חייבות לעבור דרך `network.fetchStream` (לא `fetch()` ישיר מה-WebView — הוא נחסם ב-CORS מול שרת מקומי שדוחה `Origin: null`).
 
 ### window.open
 חסום לחלוטין מטעמי אבטחה.

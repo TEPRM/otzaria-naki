@@ -2,11 +2,17 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:otzaria/plugins/declarative/compiler/declarative_program_compiler.dart';
+import 'package:otzaria/plugins/declarative/compiler/declarative_toolbar_template_compiler.dart';
+import 'package:otzaria/plugins/declarative/models/declarative_program.dart';
 import 'package:otzaria/plugins/models/plugin_manifest.dart';
 import 'package:otzaria/plugins/models/plugin_network_allowlist.dart';
+import 'package:otzaria/plugins/models/plugin_search_dialog_item.dart';
 import 'package:otzaria/plugins/models/plugin_startup_contributions.dart';
+import 'package:otzaria/plugins/models/plugin_toolbar_item.dart';
 import 'package:otzaria/plugins/models/plugin_valid_permissions.dart';
 import 'package:otzaria/plugins/services/context_menu_registry.dart';
+import 'package:otzaria/plugins/services/plugin_external_editions_registry.dart';
 import 'package:otzaria/plugins/services/plugin_toolbar_registry.dart';
 import 'package:otzaria/plugins/utils/plugin_version_utils.dart';
 import 'package:path/path.dart' as p;
@@ -52,6 +58,8 @@ const Set<String> _knownApiMethods = {
   'app.openUrl',
   'library.findBooks',
   'library.getBookMetadata',
+  'library.resolveBooks',
+  'library.resolveCategoryPaths',
   'library.listRecentBooks',
   'library.getBookContent',
   'library.getBookToc',
@@ -123,6 +131,7 @@ const Set<String> _knownApiMethods = {
   'calendar.getHalachicTimes',
   'calendar.getJewishDate',
   'calendar.getEvents',
+  'calendar.getCities',
   'publishedData.upsert',
   'publishedData.remove',
   'publishedData.listOwn',
@@ -131,6 +140,7 @@ const Set<String> _knownApiMethods = {
   'database.query',
   'database.batchQuery',
   'network.fetch',
+  'network.fetchStream',
   'network.download',
   'shortcut.create',
 };
@@ -160,9 +170,15 @@ const Set<String> _knownEvents = {
   'contextMenu.itemClicked',
   'contextMenu.colorClicked',
   'calendar.date_changed',
+  'calendar.city_changed',
   'workspace.changed',
   'settings.changed',
   'plugin.permissions_changed',
+  'search.requested',
+  // אירוע ממוקד מ-PluginExternalSearchService: בקשת חיפוש חיצוני ממסך
+  // החיפוש המובנה. תוסף-ספק מצהיר עליו ב-activationEvents כדי שהבקשה
+  // תעיר מנוע רקע במקום לפתוח את דף התוסף.
+  'search.external.requested',
 };
 
 /// מיפוי `method -> permission` נדרשת (תואם METHOD_REQUIRED_PERMISSION ב-JS).
@@ -176,6 +192,8 @@ const Map<String, String> _methodRequiredPermission = {
   'app.openUrl': 'app.open_url',
   'library.findBooks': 'library.books.read',
   'library.getBookMetadata': 'library.books.read',
+  'library.resolveBooks': 'library.books.read',
+  'library.resolveCategoryPaths': 'library.books.read',
   'library.listRecentBooks': 'library.books.read',
   'library.getTree': 'library.books.read',
   'library.getBookContent': 'library.content.read',
@@ -246,6 +264,7 @@ const Map<String, String> _methodRequiredPermission = {
   'calendar.getHalachicTimes': 'calendar.read',
   'calendar.getJewishDate': 'calendar.read',
   'calendar.getEvents': 'calendar.read',
+  'calendar.getCities': 'calendar.read',
   'publishedData.upsert': 'published_data.write',
   'publishedData.remove': 'published_data.write',
   'publishedData.listOwn': 'published_data.write',
@@ -254,6 +273,7 @@ const Map<String, String> _methodRequiredPermission = {
   'database.query': 'database.read',
   'database.batchQuery': 'database.read',
   'network.fetch': 'network.access',
+  'network.fetchStream': 'network.access',
   'network.download': 'network.access',
   'shortcut.create': 'ui.create_shortcut',
 };
@@ -276,6 +296,8 @@ const Map<String, String> _methodMinVersion = {
   'app.getGrantedPermissions': '0.9.89',
   'library.findBooks': '0.9.89',
   'library.getBookMetadata': '0.9.89',
+  'library.resolveBooks': '0.9.97',
+  'library.resolveCategoryPaths': '0.9.97',
   'library.listRecentBooks': '0.9.89',
   'library.getBookContent': '0.9.89',
   'library.getBookToc': '0.9.89',
@@ -331,10 +353,12 @@ const Map<String, String> _methodMinVersion = {
   'settings.get': '0.9.89',
   'settings.getMany': '0.9.89',
   'calendar.getSelectedDate': '0.9.89',
-  'calendar.getDailyTimes': '0.9.89',
-  'calendar.getHalachicTimes': '0.9.89',
+  'calendar.getDailyTimes': '0.9.97',
+  'calendar.getHalachicTimes': '0.9.97',
   'calendar.getJewishDate': '0.9.89',
   'calendar.getEvents': '0.9.89',
+  // 0.9.97 — זמנים לפי תאריך/עיר שרירותיים ורשימת הערים.
+  'calendar.getCities': '0.9.97',
   'publishedData.upsert': '0.9.89',
   'publishedData.remove': '0.9.89',
   'publishedData.listOwn': '0.9.89',
@@ -345,6 +369,7 @@ const Map<String, String> _methodMinVersion = {
   // 0.9.93
   'library.getTree': '0.9.93',
   'network.fetch': '0.9.93',
+  'network.fetchStream': '0.9.97',
   'network.download': '0.9.93',
   'fs.deleteFile': '0.9.93',
   'fs.extractZip': '0.9.93',
@@ -463,7 +488,7 @@ class PluginExtendedValidator {
       final required = _methodRequiredPermission[method];
       if (required == null) continue;
       if (declaredPermissions.contains(required)) continue;
-      // קריאות רשת (network.fetch/download) מסתפקות גם ב-network.localhost
+      // קריאות רשת מסתפקות גם ב-network.localhost
       // (גישה לשירות מקומי), לא רק ב-network.access.
       if (required == 'network.access' &&
           declaredPermissions.contains('network.localhost')) {
@@ -528,7 +553,11 @@ class PluginExtendedValidator {
   // ===== Manifest checks =====
 
   /// הגרסה שבה נוסף מנגנון contributes.startup — נאכף מול minAppVersion.
-  static const String _startupContributionsMinVersion = '0.9.97';
+  static const String _startupContributionsMinVersion = '0.9.96';
+  static const String _declarativeProgramsMinVersion = '0.9.96';
+  static const String _dataChooseMinVersion = '0.9.97';
+  static const String _searchSubmitRoutingMinVersion = '0.9.97';
+  static const String _externalEditionsMinVersion = '0.9.97';
 
   /// ולידציית contributes.startup: סכימה (דרך אותם parsers של ה-runtime),
   /// הרשאות נדרשות וגרסת מינימום.
@@ -574,6 +603,9 @@ class PluginExtendedValidator {
     checkListField('toolbarItems', (e) => e is Map, 'אובייקט');
     checkListField('contextMenuItems', (e) => e is Map, 'אובייקט');
     checkListField('publishedData', (e) => e is Map, 'אובייקט');
+    checkListField('programs', (e) => e is Map, 'אובייקט');
+    checkListField('searchDialogItems', (e) => e is Map, 'אובייקט');
+    checkListField('externalEditions', (e) => e is Map, 'אובייקט');
     checkListField('activationEvents', (e) => e is String, 'מחרוזת');
     final keepAliveRaw = startupMap['keepAlive'];
     if (keepAliveRaw != null && keepAliveRaw is! bool) {
@@ -618,14 +650,37 @@ class PluginExtendedValidator {
     }
 
     if (startup.toolbarItems.isNotEmpty) {
+      final hasDeclarativeItems = startup.toolbarItems.any(
+        DeclarativeToolbarTemplateCompiler.isDeclarative,
+      );
       if (!declaredPermissions.contains('reader.toolbar')) {
-        warnings.add(
-          'contributes.startup.toolbarItems דורש את ההרשאה "reader.toolbar" '
-          'שלא הוכרזה ב-manifest',
+        final message =
+            'contributes.startup.toolbarItems דורש את ההרשאה "reader.toolbar" '
+            'שלא הוכרזה ב-manifest';
+        if (hasDeclarativeItems) {
+          errors.add(message);
+        } else {
+          warnings.add(message);
+        }
+      }
+      if (startup.toolbarItems.length >
+          PluginToolbarRegistry.maxTopLevelItemsPerPlugin) {
+        errors.add(
+          'contributes.startup.toolbarItems מוגבל ל-'
+          '${PluginToolbarRegistry.maxTopLevelItemsPerPlugin} פריטים',
         );
       }
+      final toolbarIds = startup.toolbarItems
+          .map((item) => item['id'])
+          .whereType<String>()
+          .toList();
+      if (toolbarIds.toSet().length != toolbarIds.length) {
+        errors.add('contributes.startup.toolbarItems מכיל מזהה כפול');
+      }
       final registry = PluginToolbarRegistry.detached();
-      for (final item in startup.toolbarItems) {
+      for (final item in startup.toolbarItems.where(
+        (item) => !DeclarativeToolbarTemplateCompiler.isDeclarative(item),
+      )) {
         try {
           registry.registerPayload(manifest.id, item);
         } catch (e) {
@@ -673,6 +728,187 @@ class PluginExtendedValidator {
             'ו-payload (ו-scope מחרוזת אם צוין): ${jsonEncode(record)}',
           );
         }
+      }
+    }
+
+    if (startup.searchDialogItems.isNotEmpty) {
+      if (!declaredPermissions.contains('search.dialog')) {
+        errors.add(
+          'contributes.startup.searchDialogItems דורש את ההרשאה '
+          '"search.dialog" שלא הוכרזה ב-manifest',
+        );
+      }
+      if (startup.searchDialogItems.length >
+          PluginSearchDialogItem.maxItemsPerPlugin) {
+        errors.add(
+          'contributes.startup.searchDialogItems מוגבל ל-'
+          '${PluginSearchDialogItem.maxItemsPerPlugin} פריטים',
+        );
+      }
+      if (startup.searchDialogItems.any(
+        (item) => item['openPluginOnSubmit'] == true,
+      )) {
+        try {
+          if (PluginVersionUtils.compareCoreVersions(
+                _searchSubmitRoutingMinVersion,
+                manifest.minAppVersion,
+              ) >
+              0) {
+            errors.add(
+              'openPluginOnSubmit נתמך החל מגרסה '
+              '$_searchSubmitRoutingMinVersion, אך minAppVersion שהוצהר הוא '
+              '${manifest.minAppVersion}. עדכן את minAppVersion',
+            );
+          }
+        } on PluginVersionFormatException {
+          // minAppVersion נבדק ב-PluginManifestValidator.
+        }
+      }
+      final itemIds = <String>{};
+      for (final item in startup.searchDialogItems) {
+        try {
+          final parsed = PluginSearchDialogItem.fromPayload(item);
+          if (!itemIds.add(parsed.id)) {
+            errors.add('contributes.startup.searchDialogItems מכיל מזהה כפול');
+          }
+        } on PluginSearchDialogItemException catch (error) {
+          errors.add('contributes.startup.searchDialogItems לא תקין: $error');
+        }
+      }
+    }
+
+    if (startup.externalEditions.isNotEmpty) {
+      for (final permission in const ['database.read', 'library.books.read']) {
+        if (!declaredPermissions.contains(permission)) {
+          errors.add(
+            'contributes.startup.externalEditions דורש את ההרשאה '
+            '"$permission" ב-manifest',
+          );
+        }
+      }
+      if (startup.externalEditions.length >
+          PluginExternalEditionsRegistry.maxItemsPerPlugin) {
+        errors.add(
+          'contributes.startup.externalEditions מוגבל ל-'
+          '${PluginExternalEditionsRegistry.maxItemsPerPlugin} תרומות',
+        );
+      }
+      try {
+        if (PluginVersionUtils.compareCoreVersions(
+              _externalEditionsMinVersion,
+              manifest.minAppVersion,
+            ) >
+            0) {
+          errors.add(
+            'contributes.startup.externalEditions נתמך החל מגרסה '
+            '$_externalEditionsMinVersion, אך minAppVersion שהוצהר הוא '
+            '${manifest.minAppVersion}',
+          );
+        }
+      } on PluginVersionFormatException {
+        // minAppVersion נבדק ב-PluginManifestValidator.
+      }
+      final declaredSourceIds = {
+        for (final source in manifest.databaseSources)
+          if (source['id'] is String) source['id'] as String,
+      };
+      final editionIds = <String>{};
+      for (final item in startup.externalEditions) {
+        try {
+          final parsed = PluginExternalEditionsRegistry.parsePayload(
+            item,
+            declaredSourceIds: declaredSourceIds,
+          );
+          if (!editionIds.add(parsed.id)) {
+            errors.add('contributes.startup.externalEditions מכיל מזהה כפול');
+          }
+        } on PluginExternalEditionsException catch (error) {
+          errors.add('contributes.startup.externalEditions לא תקין: $error');
+        }
+      }
+    }
+
+    final compiledPrograms = <String, CompiledDeclarativeProgram>{};
+    if (startup.programs.isNotEmpty) {
+      if (startup.programs.length > 8) {
+        errors.add('contributes.startup.programs מוגבל ל-8 תכניות');
+      }
+      try {
+        if (PluginVersionUtils.compareCoreVersions(
+              _declarativeProgramsMinVersion,
+              manifest.minAppVersion,
+            ) >
+            0) {
+          errors.add(
+            'contributes.startup.programs נתמך החל מגרסה '
+            '$_declarativeProgramsMinVersion, אך minAppVersion שהוצהר הוא '
+            '${manifest.minAppVersion}',
+          );
+        }
+      } on PluginVersionFormatException {
+        // minAppVersion נבדק ב-PluginManifestValidator.
+      }
+      final usesDataChoose = startup.programs.any((program) {
+        final commands = program['commands'];
+        return commands is List &&
+            commands.whereType<Map>().any(
+              (command) => command['type'] == 'data.choose',
+            );
+      });
+      if (usesDataChoose) {
+        try {
+          if (PluginVersionUtils.compareCoreVersions(
+                _dataChooseMinVersion,
+                manifest.minAppVersion,
+              ) >
+              0) {
+            errors.add(
+              'data.choose נתמך החל מגרסה $_dataChooseMinVersion, אך '
+              'minAppVersion שהוצהר הוא ${manifest.minAppVersion}',
+            );
+          }
+        } on PluginVersionFormatException {
+          // minAppVersion נבדק ב-PluginManifestValidator.
+        }
+      }
+      final sourceIds = {
+        for (final source in manifest.databaseSources)
+          if (source['id'] is String) source['id'] as String,
+      };
+      final compiler = DeclarativeProgramCompiler(
+        declaredPermissions: declaredPermissions,
+        declaredSourceIds: sourceIds,
+      );
+      final programIds = <String>{};
+      for (final program in startup.programs) {
+        try {
+          final compiled = compiler.compile(program);
+          if (!programIds.add(compiled.id)) {
+            errors.add(
+              'contributes.startup.programs מכיל מזהה כפול: ${compiled.id}',
+            );
+          } else {
+            compiledPrograms[compiled.id] = compiled;
+          }
+        } on DeclarativeProgramException catch (error) {
+          errors.add('contributes.startup.programs לא תקין: $error');
+        }
+      }
+    }
+
+    final declarativeToolbarItems = startup.toolbarItems
+        .where(DeclarativeToolbarTemplateCompiler.isDeclarative)
+        .toList();
+    if (declarativeToolbarItems.isNotEmpty) {
+      try {
+        DeclarativeToolbarTemplateCompiler(
+          declaredPermissions: declaredPermissions,
+          programs: compiledPrograms,
+        ).compileAll(manifest.id, declarativeToolbarItems);
+      } on DeclarativeProgramException catch (error) {
+        errors.add('contributes.startup.toolbarItems לא תקין: $error');
+      } on PluginToolbarException catch (error) {
+        errors.add('contributes.startup.toolbarItems לא תקין: $error');
       }
     }
 
@@ -1101,11 +1337,16 @@ class PluginExtendedValidator {
           continue;
         }
         if (RegExp(r'^0(?:px)?$').hasMatch(value)) continue;
+        // חריג פס הכותרת: DESIGN_GUIDE מחייב שם גדלים קשיחים ב-px דווקא, כדי
+        // שהפס לא יתנפח עם גופן הקריאה של המשתמש. נאכף לפי שם הסלקטור.
+        if (_isTopBarSelector(_selectorAtOffset(stripped, m.start))) continue;
         if (RegExp(r'\d+\s*px', caseSensitive: false).hasMatch(value)) {
           final preview = value.length > 30 ? value.substring(0, 30) : value;
           addOnce(
             'font-size-px',
-            '${chunk.name}: font-size ב-px קבוע ("$preview"). חובה em/rem או var(--font-size-base)',
+            '${chunk.name}: font-size ב-px קבוע ("$preview"). חובה em/rem או '
+                'var(--font-size-base) (px מותר רק בסלקטור פס הכותרת — ראו '
+                'DESIGN_GUIDE.md)',
           );
           break;
         }
@@ -1147,6 +1388,27 @@ class PluginExtendedValidator {
       violations: violations,
     );
   }
+
+  /// הסלקטור של הכלל שבתוכו נמצא ההיסט — לחריגים תלויי-סלקטור בסריקת ה-CSS.
+  /// (סריקה טקסטואלית: נסוגים אל ה-'{' הפותח, והסלקטור הוא מה שלפניו עד סוף
+  ///  הכלל/הבלוק הקודם.)
+  @visibleForTesting
+  static String selectorAtOffset(String css, int index) =>
+      _selectorAtOffset(css, index);
+
+  static String _selectorAtOffset(String css, int index) {
+    final open = css.lastIndexOf('{', index);
+    if (open <= 0) return '';
+    final start = [
+      css.lastIndexOf('}', open - 1),
+      css.lastIndexOf('{', open - 1),
+    ].reduce((a, b) => a > b ? a : b);
+    return css.substring(start + 1, open).trim();
+  }
+
+  /// פס כותרת התוסף — הסלקטור המוסכם ב-DESIGN_GUIDE (`.topbar` / `.top-bar`).
+  static bool _isTopBarSelector(String selector) =>
+      RegExp(r'top-?bar', caseSensitive: false).hasMatch(selector);
 
   static String _stripCssComments(String css) =>
       css.replaceAll(RegExp(r'/\*[\s\S]*?\*/'), '');

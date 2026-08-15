@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
@@ -8,6 +10,7 @@ import 'package:otzaria/theme/app_fonts.dart';
 import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:kosher_dart/kosher_dart.dart';
+import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:otzaria/plugins/models/installed_plugin.dart';
@@ -26,11 +29,18 @@ import 'package:otzaria/library/models/library.dart';
 import 'package:otzaria/search/search_repository.dart';
 import 'package:otzaria/plugins/bridge/plugin_search_api.dart';
 import 'package:otzaria_search_engine/otzaria_search_engine.dart'
-    show SearchResult;
+    show SearchStreamUpdate;
 import 'package:otzaria/utils/navigation/book_open_coordinator.dart';
 import 'package:otzaria/utils/text/text_manipulation.dart';
+import 'package:otzaria/search/bloc/search_event.dart';
+import 'package:otzaria/search/models/search_configuration.dart';
 import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
+import 'package:otzaria/tabs/bloc/tabs_event.dart';
 import 'package:otzaria/tabs/models/combined_tab.dart';
+import 'package:otzaria/tabs/models/searching_tab.dart';
+import 'package:otzaria/plugins/services/plugin_external_search_service.dart';
+import 'package:otzaria/plugins/services/plugin_in_book_search_service.dart';
+import 'package:otzaria/tabs/models/external_book_matches.dart';
 import 'package:otzaria/tabs/models/tab.dart';
 import 'package:otzaria/tabs/models/tool_tab.dart';
 import 'package:otzaria/tools/tools_launcher_controller.dart';
@@ -44,8 +54,13 @@ import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
 import 'package:otzaria/navigation/bloc/navigation_event.dart';
 import 'package:otzaria/navigation/bloc/navigation_state.dart';
 import 'package:otzaria/tools/calendar/utils/calendar_cubit.dart';
+import 'package:otzaria/tools/calendar/helpers/zmanim_helpers.dart'
+    as zmanim_helpers;
+import 'package:otzaria/tools/calendar/models/calendar_location.dart';
 import 'package:otzaria/tools/calendar/services/notification_service.dart';
+import 'package:timezone/timezone.dart' as tz;
 import 'package:otzaria/settings/engine/settings_repository.dart';
+import 'package:otzaria/settings/l10n/settings_language.dart';
 import 'package:otzaria/workspaces/bloc/workspace_bloc.dart';
 import 'package:otzaria/plugins/database/plugin_database_service.dart';
 import 'package:otzaria/plugins/utils/reader_location_resolver.dart';
@@ -68,9 +83,11 @@ import 'package:otzaria/plugins/services/plugin_highlight_registry.dart';
 import 'package:otzaria/plugins/services/plugin_highlight_reveal_service.dart';
 import 'package:otzaria/plugins/models/plugin_text_normalization.dart';
 import 'package:otzaria/plugins/models/plugin_book_identity.dart';
+import 'package:otzaria/plugins/declarative/services/declarative_library_book_access.dart';
 import 'package:otzaria/plugins/services/plugin_section_text_map_service.dart';
 import 'package:otzaria/plugins/services/plugin_text_occurrence_service.dart';
 import 'package:otzaria/plugins/services/text_source_map_service.dart';
+import 'package:otzaria/search/utils/facet_helper.dart';
 import 'package:otzaria/widgets/smart_text/render_settings.dart';
 
 // ===================================================================
@@ -89,6 +106,7 @@ const _settingsAllowlist = {
   SettingsRepository.keyLineHeight,
   SettingsRepository.keySelectedCity,
   SettingsRepository.keyCalendarType,
+  SettingsRepository.keySettingsLanguage,
   SettingsRepository.keyShowTeamim,
   SettingsRepository.keyDefaultNikud,
   SettingsRepository.keyRemoveNikudFromTanach,
@@ -96,6 +114,7 @@ const _settingsAllowlist = {
   SettingsRepository.keyLibraryViewMode,
   SettingsRepository.keyCopyWithHeaders,
   SettingsRepository.keyCopyHeaderFormat,
+  SettingsRepository.keyHebrewBooksPath,
 };
 
 // keys a plugin CANNOT read even if attempted
@@ -107,7 +126,6 @@ const _settingsBlocklist = {
   SettingsRepository.keyLibraryPath,
   SettingsRepository.keyIndexPath,
   SettingsRepository.keyBackupPath,
-  SettingsRepository.keyHebrewBooksPath,
   SettingsRepository.keyErrorReportSenderEmail,
 };
 
@@ -338,6 +356,28 @@ class PluginBridgeDependencies {
   });
 }
 
+typedef PluginRpcEventSink =
+    Future<void> Function(
+      String topic,
+      Map<String, dynamic> payload,
+    );
+
+class _PluginNetworkRequest {
+  final Uri uri;
+  final String method;
+  final Map<String, String>? headers;
+  final String? body;
+  final Duration timeout;
+
+  const _PluginNetworkRequest({
+    required this.uri,
+    required this.method,
+    required this.headers,
+    required this.body,
+    required this.timeout,
+  });
+}
+
 // ===================================================================
 // Bridge Adapter - strict 1:1 with plugin_system_plan.md
 // ===================================================================
@@ -399,7 +439,7 @@ class PluginBridgeAdapter {
   /// `dispose` (טעינה/השבתה מחדש של התוסף).
   final Set<String> _grantedFolders = <String>{};
 
-  // שירות בקשות HTTP (network.fetch) — מופע יחיד לכל adapter; ניתן להזרקה
+  // שירות בקשות HTTP — מופע יחיד לכל adapter; ניתן להזרקה
   // לבדיקות, נוצר עם השימוש הראשון אם לא הוזרק, ומשוחרר ב-dispose.
   PluginNetworkFetchService? _networkFetchService;
   PluginNetworkFetchService get _fetchService =>
@@ -414,8 +454,45 @@ class PluginBridgeAdapter {
   Map<int, List<Book>> _booksById = const {};
   Map<String, List<Book>> _booksByTitle = const {};
   Map<String, Book> _booksByIndexedPath = const {};
+  final Map<String, Future<void> Function()> _activeSearchStreams = {};
+  final Set<String> _pendingSearchCancellations = {};
+  final Map<String, Future<void> Function()> _activeNetworkFetchStreams = {};
+  final Set<String> _pendingNetworkFetchCancellations = {};
+
+  static const _searchStreamEvent = '__otzaria.search.query.chunk';
+  static const _networkFetchStreamEvent = '__otzaria.network.fetchStream.chunk';
+  static const _streamIdKey = '__streamId';
+  static const _cancelStreamIdKey = '__cancelStreamId';
+  static const _maxConcurrentSearchStreams = 4;
+  static const _maxConcurrentNetworkFetchStreams = 4;
+  static const _maxNetworkFetchChunkCodeUnits = 32 * 1024;
+  static const _maxSearchDuration = Duration(minutes: 2);
+  static const _searchIdleTimeout = Duration(seconds: 30);
+  static final _streamIdPattern = RegExp(r'^[A-Za-z0-9_-]{1,64}$');
+
+  static bool isSearchCancellationPayload(Map<String, dynamic> args) {
+    if (args.length != 1) return false;
+    final streamId = args[_cancelStreamIdKey];
+    return streamId is String && _streamIdPattern.hasMatch(streamId);
+  }
+
+  static bool isNetworkFetchCancellationPayload(Map<String, dynamic> args) {
+    if (args.length != 1) return false;
+    final streamId = args[_cancelStreamIdKey];
+    return streamId is String && _streamIdPattern.hasMatch(streamId);
+  }
 
   void dispose() {
+    for (final cancel in _activeSearchStreams.values) {
+      unawaited(cancel());
+    }
+    _activeSearchStreams.clear();
+    _pendingSearchCancellations.clear();
+    for (final cancel in _activeNetworkFetchStreams.values) {
+      unawaited(cancel());
+    }
+    _activeNetworkFetchStreams.clear();
+    _pendingNetworkFetchCancellations.clear();
     _networkFetchService?.dispose();
     _fileDownloadService?.dispose();
     _bookIndexLibrary = null;
@@ -465,15 +542,16 @@ class PluginBridgeAdapter {
   Future<dynamic> execute(
     String domain,
     String action,
-    Map<String, dynamic> args,
-  ) async {
+    Map<String, dynamic> args, {
+    PluginRpcEventSink? eventSink,
+  }) async {
     switch (domain) {
       case 'app':
         return await _handleApp(action, args);
       case 'library':
         return await _handleLibrary(action, args);
       case 'search':
-        return await _handleSearch(action, args);
+        return await _handleSearch(action, args, eventSink: eventSink);
       case 'reader':
         return await _handleReader(action, args);
       case 'navigation':
@@ -499,7 +577,7 @@ class PluginBridgeAdapter {
       case 'database':
         return _handleDatabase(action, args);
       case 'network':
-        return await _handleNetwork(action, args);
+        return await _handleNetwork(action, args, eventSink: eventSink);
       case 'fs':
         return await _handleFs(action, args);
       case 'shortcut':
@@ -526,7 +604,14 @@ class PluginBridgeAdapter {
       case 'getTheme':
         return _dependencies.themePayloadBuilder();
       case 'getLocale':
-        return {'locale': 'he-IL', 'textDirection': 'rtl'};
+        // שפת הממשק שבחר המשתמש (או שפת המערכת בזיהוי אוטומטי) — לתוספים
+        // רב-לשוניים. 'language' הוא קוד השפה ('he'/'en'); 'locale' נשמר
+        // בצורתו הישנה (he-IL) לתאימות.
+        return pluginLocalePayload(
+          code: Settings.getValue<String>(
+            SettingsRepository.keySettingsLanguage,
+          ),
+        );
       case 'getUserEmail':
         final email =
             Settings.getValue<String>(
@@ -615,7 +700,59 @@ class PluginBridgeAdapter {
             ...PluginBookIdentity.toJson(book),
             'title': book.title,
             'topics': book.topics,
+            'categoryPath': FacetHelper.resolveCategoryPath(book),
           };
+        }
+      case 'resolveBooks':
+        {
+          final rawItems = args['items'];
+          if (rawItems is! List || rawItems.length > 100) {
+            throw Exception('items must be an array with at most 100 entries');
+          }
+          final identities = <Map<String, dynamic>>[];
+          for (final item in rawItems) {
+            if (item is! Map) {
+              throw Exception('items entries must be objects');
+            }
+            identities.add(Map<String, dynamic>.from(item));
+          }
+          final access = DeclarativeLibraryBookAccess.otzaria(
+            _dependencies.bookOpenCoordinator,
+          );
+          final books = await access.findUniqueBooks(identities);
+          return [
+            for (final book in books)
+              if (book == null)
+                null
+              else
+                {
+                  ...PluginBookIdentity.toJson(book),
+                  'title': book.title,
+                  'categoryPath': FacetHelper.resolveCategoryPath(book),
+                },
+          ];
+        }
+      case 'resolveCategoryPaths':
+        {
+          // spec: resolveCategoryPaths({ ids }) — נתיב הקטגוריה בעץ הספרייה
+          // לכל מזהה ספר, מיושר לסדר הקלט (null למזהה לא מוכר). מסלול bulk:
+          // ספק תוצאות חיצוני מסווג אינדקס שלם (עד תקרת האינדקס של מדור
+          // החיפוש) בקריאה אחת, במקום קריאת resolveBooks לכל 100 מזהים.
+          final rawIds = args['ids'];
+          if (rawIds is! List || rawIds.length > 20000) {
+            throw Exception('ids must be an array with at most 20000 entries');
+          }
+          final bookById = <int, Book>{
+            for (final book in library.getAllBooks())
+              if (book.id != null) book.id!: book,
+          };
+          return [
+            for (final raw in rawIds)
+              if (raw is int && bookById[raw] != null)
+                FacetHelper.resolveCategoryPath(bookById[raw]!)
+              else
+                null,
+          ];
         }
       case 'listRecentBooks':
         final historyState = _dependencies.historyBloc.state;
@@ -891,8 +1028,9 @@ class PluginBridgeAdapter {
   // ----------------------------------------------------------------
   Future<dynamic> _handleSearch(
     String action,
-    Map<String, dynamic> args,
-  ) async {
+    Map<String, dynamic> args, {
+    PluginRpcEventSink? eventSink,
+  }) async {
     switch (action) {
       case 'fullText':
         final query = args['query'] as String?;
@@ -916,123 +1054,158 @@ class PluginBridgeAdapter {
       case 'getOptions':
         return PluginSearchApi.describeOptions();
       case 'query':
-        return await _runPluginSearch(args);
+        if (args[_cancelStreamIdKey] case final String streamId) {
+          return _cancelPluginSearch(streamId);
+        }
+        return await _runPluginSearch(args, eventSink: eventSink);
       default:
         throw Exception("Unknown action in search: $action");
     }
   }
 
-  /// מריץ את `search.query` באותו מסלול מנוע של מסך החיפוש. ספירות לפי
-  /// ספר נאספות רק כשהתוסף מבקש אותן.
+  /// מזרים את `search.query` באותו מסלול chunks של מסך החיפוש.
   Future<Map<String, dynamic>> _runPluginSearch(
-    Map<String, dynamic> args,
-  ) async {
-    final request = PluginSearchRequest.fromArgs(args)..validateAgainstQuery();
+    Map<String, dynamic> args, {
+    required PluginRpcEventSink? eventSink,
+  }) async {
+    final streamId = args[_streamIdKey];
+    if (streamId is! String || !_streamIdPattern.hasMatch(streamId)) {
+      throw Exception('error.invalid_params: invalid internal stream id');
+    }
+    if (eventSink == null) {
+      throw Exception('error.internal: search stream transport unavailable');
+    }
+    if (_pendingSearchCancellations.remove(streamId)) {
+      return {'completed': false, 'cancelled': true};
+    }
+    if (_activeSearchStreams.containsKey(streamId)) {
+      throw Exception('error.invalid_params: duplicate search stream id');
+    }
+    if (_activeSearchStreams.length >= _maxConcurrentSearchStreams) {
+      throw Exception('error.rate_limited: too many active search streams');
+    }
+
+    final publicArgs = Map<String, dynamic>.of(args)..remove(_streamIdKey);
+    final request = PluginSearchRequest.fromArgs(publicArgs)
+      ..validateAgainstQuery();
     final library = await DataRepository.instance.library;
     final facets = PluginSearchApi.resolveFacets(
-      args,
+      publicArgs,
       findBook: (identity) => _findPluginBook(library, identity),
     );
+    final stream = _dependencies.searchRepository.searchTextsStreamWithCounts(
+      request.sanitizedQuery,
+      facets,
+      request.limit,
+      offset: request.offset,
+      chunkSize: 50,
+      order: request.order,
+      searchMode: request.searchMode,
+      distance: request.distance,
+      negativeQuery: request.sanitizedNegativeQuery,
+      negativeDistance: request.negativeDistance,
+      scope: request.proximityScope,
+      negativeScope: request.negativeProximityScope,
+      customSpacing: request.effectiveCustomSpacing,
+      negativeCustomSpacing: request.effectiveNegativeCustomSpacing,
+      alternativeWords: request.effectiveAlternativeWords,
+      negativeAlternativeWords: request.effectiveNegativeAlternativeWords,
+      searchOptions: request.effectiveSearchOptions,
+      negativeSearchOptions: request.effectiveNegativeSearchOptions,
+      grouping: request.grouping,
+      wordMatchMode: request.wordMatchMode,
+      wordMatchCount: request.wordMatchCount,
+    );
+    final iterator = StreamIterator<SearchStreamUpdate>(stream);
+    var cancelled = false;
+    var expired = false;
+    Future<void> cancel() async {
+      cancelled = true;
+      await iterator.cancel();
+    }
 
-    final results = <SearchResult>[];
+    if (_pendingSearchCancellations.remove(streamId)) {
+      await iterator.cancel();
+      return {'completed': false, 'cancelled': true};
+    }
+    _activeSearchStreams[streamId] = cancel;
+    final deadline = Timer(_maxSearchDuration, () {
+      expired = true;
+      unawaited(cancel());
+    });
+    var sequence = 0;
     int? totalCount;
     int? groupCount;
     var truncated = false;
-    Map<String, int>? bookCounts;
-
-    if (request.includeBookCounts) {
-      final stream = _dependencies.searchRepository.searchTextsStreamWithCounts(
-        request.sanitizedQuery,
-        facets,
-        request.limit,
-        offset: request.offset,
-        order: request.order,
-        searchMode: request.searchMode,
-        distance: request.distance,
-        negativeQuery: request.sanitizedNegativeQuery,
-        negativeDistance: request.negativeDistance,
-        scope: request.proximityScope,
-        negativeScope: request.negativeProximityScope,
-        customSpacing: request.effectiveCustomSpacing,
-        negativeCustomSpacing: request.effectiveNegativeCustomSpacing,
-        alternativeWords: request.effectiveAlternativeWords,
-        negativeAlternativeWords: request.effectiveNegativeAlternativeWords,
-        searchOptions: request.effectiveSearchOptions,
-        negativeSearchOptions: request.effectiveNegativeSearchOptions,
-        grouping: request.grouping,
-        wordMatchMode: request.wordMatchMode,
-        wordMatchCount: request.wordMatchCount,
-      );
-
-      await for (final update in stream) {
+    try {
+      while (await iterator.moveNext().timeout(_searchIdleTimeout)) {
+        final update = iterator.current;
         if (update.totalCount != null) {
           totalCount = update.totalCount;
           groupCount = update.groupCount;
           truncated = update.truncated;
-          bookCounts = update.bookCounts;
         }
-        results.addAll(update.results);
+        if (update.results.isNotEmpty || update.bookCounts != null) {
+          _ensureBookIndex(library);
+        }
+        final booksByPath = _booksByIndexedPath;
+        await eventSink(_searchStreamEvent, {
+          'streamId': streamId,
+          'chunk': {
+            'sequence': sequence++,
+            'results': [
+              for (final result in update.results)
+                PluginSearchApi.resultToJson(
+                  result,
+                  booksByPath[result.filePath],
+                  booksByPath: booksByPath,
+                ),
+            ],
+            'total': totalCount,
+            'groupCount': groupCount,
+            'truncated': truncated,
+            'limit': request.limit,
+            'offset': request.offset,
+            'facets': facets,
+            if (request.includeBookCounts && update.bookCounts != null)
+              'bookCounts': [
+                for (final entry in update.bookCounts!.entries)
+                  if (booksByPath[entry.key] case final Book book)
+                    {
+                      ...PluginBookIdentity.toJson(book),
+                      'title': book.title,
+                      'count': entry.value,
+                    },
+              ],
+          },
+        });
       }
-    } else {
-      final page = await _dependencies.searchRepository.searchTextsAndCount(
-        request.sanitizedQuery,
-        facets,
-        request.limit,
-        offset: request.offset,
-        order: request.order,
-        searchMode: request.searchMode,
-        distance: request.distance,
-        negativeQuery: request.sanitizedNegativeQuery,
-        negativeDistance: request.negativeDistance,
-        scope: request.proximityScope,
-        negativeScope: request.negativeProximityScope,
-        customSpacing: request.effectiveCustomSpacing,
-        negativeCustomSpacing: request.effectiveNegativeCustomSpacing,
-        alternativeWords: request.effectiveAlternativeWords,
-        negativeAlternativeWords: request.effectiveNegativeAlternativeWords,
-        searchOptions: request.effectiveSearchOptions,
-        negativeSearchOptions: request.effectiveNegativeSearchOptions,
-        grouping: request.grouping,
-        wordMatchMode: request.wordMatchMode,
-        wordMatchCount: request.wordMatchCount,
-      );
-      results.addAll(page.results);
-      totalCount = page.totalCount;
-      groupCount = page.groupCount;
-      truncated = page.truncated;
+      if (expired) throw TimeoutException('Search stream timed out');
+      return {
+        'completed': !cancelled,
+        'cancelled': cancelled,
+        'chunks': sequence,
+      };
+    } finally {
+      deadline.cancel();
+      _activeSearchStreams.remove(streamId);
+      await iterator.cancel();
     }
+  }
 
-    if (results.isNotEmpty || bookCounts != null) {
-      _ensureBookIndex(library);
+  Map<String, dynamic> _cancelPluginSearch(String streamId) {
+    if (!_streamIdPattern.hasMatch(streamId)) {
+      throw Exception('error.invalid_params: invalid internal stream id');
     }
-    final booksByPath = _booksByIndexedPath;
-
-    return {
-      'results': [
-        for (final result in results)
-          PluginSearchApi.resultToJson(
-            result,
-            booksByPath[result.filePath],
-            booksByPath: booksByPath,
-          ),
-      ],
-      'total': totalCount ?? results.length,
-      'groupCount': groupCount,
-      'truncated': truncated,
-      'limit': request.limit,
-      'offset': request.offset,
-      'facets': facets,
-      if (request.includeBookCounts)
-        'bookCounts': [
-          for (final entry in (bookCounts ?? const <String, int>{}).entries)
-            if (booksByPath[entry.key] case final Book book)
-              {
-                ...PluginBookIdentity.toJson(book),
-                'title': book.title,
-                'count': entry.value,
-              },
-        ],
-    };
+    final cancel = _activeSearchStreams[streamId];
+    if (cancel == null) {
+      if (_pendingSearchCancellations.length < 16) {
+        _pendingSearchCancellations.add(streamId);
+      }
+      return {'cancelled': false};
+    }
+    unawaited(cancel());
+    return {'cancelled': true};
   }
 
   // ----------------------------------------------------------------
@@ -1044,7 +1217,8 @@ class PluginBridgeAdapter {
   ) async {
     switch (action) {
       case 'openBook':
-        // spec: openBook({ id?, bookId?, type?, index?, searchQuery?, navigateToPositionIfReused? })
+        // spec: openBook({ id?, bookId?, type?, index?, searchQuery?,
+        //   navigateToPositionIfReused?, matchPages?, matchedTerms? })
         // also accepts legacy 'title' for back-compat; all supplied identity fields must match.
         {
           final bookId = (args['bookId'] ?? args['title']) as String?;
@@ -1052,9 +1226,25 @@ class PluginBridgeAdapter {
           final searchQuery = args['searchQuery'] as String? ?? '';
           final navigateToPositionIfReused =
               args['navigateToPositionIfReused'] as bool? ?? false;
+          final openInSidePane = args['openInSidePane'] as bool? ?? false;
+          final externalMatches = _parseExternalMatches(args, searchQuery);
           if (PluginBookIdentity.parseId(args['id']) == null &&
-              bookId == null) {
+              bookId == null &&
+              args['external'] == null) {
             throw Exception('id or bookId required');
+          }
+          if (args['external'] != null) {
+            final access = DeclarativeLibraryBookAccess.otzaria(
+              _dependencies.bookOpenCoordinator,
+            );
+            return access.openUnique(
+              _identityFields(args),
+              index: index,
+              searchQuery: searchQuery,
+              navigateToPositionIfReused: navigateToPositionIfReused,
+              inSidePane: openInSidePane,
+              externalMatches: externalMatches,
+            );
           }
           final book = _findPluginBook(
             await DataRepository.instance.library,
@@ -1068,7 +1258,141 @@ class PluginBridgeAdapter {
             ignoreHistory: true,
             requiresStableLayout: book is PdfBook,
             navigateToPositionIfReused: navigateToPositionIfReused,
+            inSidePane: openInSidePane,
+            externalMatches: externalMatches,
           );
+          return true;
+        }
+      case 'registerInBookSearchProvider':
+        // spec: registerInBookSearchProvider({ provider })
+        // רושם את התוסף כספק חיפוש-בתוך-ספר לספרים חיצוניים של provider.
+        {
+          final provider = args['provider'];
+          if (provider is! String || provider.isEmpty) {
+            throw Exception('error.invalid_params: provider required');
+          }
+          try {
+            PluginInBookSearchService.instance.register(
+              provider,
+              plugin.pluginId,
+            );
+          } on StateError {
+            throw Exception(
+              'error.conflict: provider is owned by another plugin',
+            );
+          }
+          return true;
+        }
+      case 'respondInBookSearch':
+        // spec: respondInBookSearch({ requestId, pages?, matchedTerms?, query?, error? })
+        // תשובת הספק לאירוע reader.inBookSearch.requested.
+        {
+          final requestId = args['requestId'];
+          if (requestId is! String || requestId.isEmpty) {
+            throw Exception('error.invalid_params: requestId required');
+          }
+          final accepted = PluginInBookSearchService.instance.respond(
+            plugin.pluginId,
+            requestId,
+            pages: (args['pages'] as List? ?? const [])
+                .whereType<num>()
+                .map((page) => page.toInt())
+                .where((page) => page > 0)
+                .toList(),
+            matchedTerms: (args['matchedTerms'] as List? ?? const [])
+                .whereType<String>()
+                .toList(),
+            query: args['query'] as String? ?? '',
+            error: args['error'] as String?,
+          );
+          if (!accepted) {
+            throw Exception(
+              'error.not_found: request does not belong to this plugin',
+            );
+          }
+          return true;
+        }
+      case 'openSearchTab':
+        // spec: openSearchTab({ query, selectItems? })
+        // פותח כרטיסיית חיפוש מובנית עם השאילתה; selectItems מסמן שורות
+        // דיאלוג של התוסף הקורא (מפתחי הבחירה נגזרים מ-pluginId שלו בלבד).
+        {
+          final query = (args['query'] as String? ?? '').trim();
+          if (query.isEmpty || query.length > 500) {
+            throw Exception('query required');
+          }
+          final selectItems = (args['selectItems'] as List? ?? const [])
+              .whereType<String>()
+              .where(
+                (id) => RegExp(r'^[A-Za-z0-9._-]{1,128}$').hasMatch(id),
+              )
+              .take(4)
+              .toList();
+          final tab = SearchingTab(
+            SearchingTab.titleForQuery(query),
+            query,
+            initialConfiguration: SearchConfiguration(
+              pluginSearchSelections: {
+                for (final itemId in selectItems)
+                  '${plugin.pluginId}/$itemId': true,
+              },
+            ),
+          );
+          tab.searchBloc.add(UpdateSearchQuery(query));
+          final coordinator = _dependencies.bookOpenCoordinator;
+          coordinator.historyBloc.add(AddHistory(tab));
+          coordinator.tabsBloc.add(AddTab(tab));
+          coordinator.navigationBloc.add(
+            const NavigateToScreen(Screen.search),
+          );
+          return true;
+        }
+      case 'registerExternalSearchProvider':
+        // spec: registerExternalSearchProvider({ provider })
+        // רושם את התוסף כספק תוצאות חיצוני למסך החיפוש המובנה.
+        {
+          final provider = args['provider'];
+          if (provider is! String || provider.isEmpty) {
+            throw Exception('error.invalid_params: provider required');
+          }
+          try {
+            PluginExternalSearchService.instance.register(
+              provider,
+              plugin.pluginId,
+            );
+          } on StateError {
+            throw Exception(
+              'error.conflict: provider is owned by another plugin',
+            );
+          }
+          return true;
+        }
+      case 'respondExternalSearch':
+        // spec: respondExternalSearch({ requestId, results?, totalBooks?,
+        //   totalHits?, hasMore?, done?, index?, error? })
+        // תשובת הספק לאירוע search.external.requested; הניקוי נעשה בשירות.
+        // done: false — עדכון חלקי תוך כדי הזרמה; הבקשה נשארת פתוחה.
+        {
+          final requestId = args['requestId'];
+          if (requestId is! String || requestId.isEmpty) {
+            throw Exception('error.invalid_params: requestId required');
+          }
+          final accepted = PluginExternalSearchService.instance.respond(
+            plugin.pluginId,
+            requestId,
+            results: args['results'] as List? ?? const [],
+            totalBooks: (args['totalBooks'] as num?)?.toInt() ?? 0,
+            totalHits: (args['totalHits'] as num?)?.toInt() ?? 0,
+            hasMore: args['hasMore'] == true,
+            done: args['done'] != false,
+            index: args['index'] as List?,
+            error: args['error'] as String?,
+          );
+          if (!accepted) {
+            throw Exception(
+              'error.not_found: request does not belong to this plugin',
+            );
+          }
           return true;
         }
       case 'openBookAtRef':
@@ -1424,6 +1748,39 @@ class PluginBridgeAdapter {
       default:
         throw Exception('Unknown action in reader: $action');
     }
+  }
+
+  Map<String, dynamic> _identityFields(Map<String, dynamic> args) => {
+    for (final key in ['id', 'bookId', 'type', 'source', 'external'])
+      if (args.containsKey(key)) key: args[key],
+  };
+
+  /// עמודי התאמה שהתוסף צירף לפתיחה (חיפוש חיצוני): רשימת עמודים חיוביים,
+  /// מוגבלת בגודל. ערך לא תקין נדחה בשקט — פתיחת הספר חשובה מההתאמות.
+  ExternalBookMatches? _parseExternalMatches(
+    Map<String, dynamic> args,
+    String searchQuery,
+  ) {
+    final rawPages = args['matchPages'];
+    if (rawPages is! List || rawPages.isEmpty || rawPages.length > 10000) {
+      return null;
+    }
+    final pages = rawPages
+        .whereType<num>()
+        .map((page) => page.toInt())
+        .where((page) => page > 0)
+        .toList();
+    if (pages.isEmpty) return null;
+    final terms = (args['matchedTerms'] as List? ?? const [])
+        .whereType<String>()
+        .where((term) => term.isNotEmpty && term.length <= 256)
+        .take(64)
+        .toList();
+    return ExternalBookMatches(
+      pages: pages,
+      matchedTerms: terms,
+      query: searchQuery,
+    );
   }
 
   Future<Map<String, dynamic>> _findTextOccurrences(
@@ -2190,14 +2547,93 @@ class PluginBridgeAdapter {
   ) async {
     final calendarState = _dependencies.calendarCubit.state;
 
+    // getDailyTimes/getHalachicTimes מקבלים אופציונלית date (ISO) ומיקום —
+    // עיר מרשימת הלוח (city) או קואורדינטות (lat+lng, עם elevation/timezone/
+    // inIsrael אופציונליים). בלי אף פרמטר מוחזרים זמני התאריך והעיר הנבחרים
+    // בלוח (התנהגות הגרסאות הקודמות).
+    Map<String, String> resolveDailyTimes() {
+      final rawDate = args['date'];
+      if (rawDate != null && rawDate is! String) {
+        throw Exception('Date must be an ISO-8601 string');
+      }
+      final dateArg = rawDate == null ? null : DateTime.tryParse(rawDate);
+      if (rawDate != null && dateArg == null) {
+        throw Exception('Invalid date: $rawDate');
+      }
+      final cityArg = (args['city'] as String?)?.trim();
+      final latArg = args['lat'], lngArg = args['lng'];
+      final date = dateArg ?? calendarState.selectedGregorianDate;
+
+      if ((latArg == null) != (lngArg == null)) {
+        throw Exception('Both lat and lng are required');
+      }
+      if (latArg != null && lngArg != null) {
+        if (latArg is! num || lngArg is! num) {
+          throw Exception('Coordinates must be numbers');
+        }
+        if (cityArg != null && cityArg.isNotEmpty) {
+          throw Exception('Pass either city or lat/lng, not both');
+        }
+        final lat = latArg.toDouble(), lng = lngArg.toDouble();
+        if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+          throw Exception('Coordinates out of range');
+        }
+        // בלי אזור זמן מפורש — אזור נומינלי מקו האורך (Etc/GMT הפוך-סימן:
+        // Etc/GMT-3 הוא UTC+3). מומלץ להעביר מזהה IANA אמיתי.
+        final tzArg = (args['timezone'] as String?)?.trim();
+        final nominalOffset = -(lng / 15).round();
+        final tzId = (tzArg == null || tzArg.isEmpty)
+            ? 'Etc/GMT${nominalOffset >= 0 ? '+' : ''}$nominalOffset'
+            : tzArg;
+        try {
+          return zmanim_helpers.calculateDailyTimesForCoordinates(
+            date,
+            latitude: lat,
+            longitude: lng,
+            elevation: (args['elevation'] as num?)?.toDouble() ?? 0,
+            timeZoneId: tzId,
+            inIsrael: args['inIsrael'] as bool? ?? false,
+          );
+        } on tz.LocationNotFoundException {
+          throw Exception('Unknown timezone: $tzId');
+        }
+      }
+
+      if (dateArg == null && (cityArg == null || cityArg.isEmpty)) {
+        return calendarState.dailyTimes;
+      }
+      final city = (cityArg == null || cityArg.isEmpty)
+          ? calendarState.selectedCity
+          : cityArg;
+      if (getCityData(city) == null) {
+        throw Exception('Unknown city: $city');
+      }
+      return zmanim_helpers.calculateDailyTimes(date, city);
+    }
+
     switch (action) {
       case 'getSelectedDate':
         return calendarState.selectedGregorianDate.toIso8601String();
       case 'getDailyTimes':
-        return calendarState.dailyTimes;
+        return resolveDailyTimes();
       case 'getHalachicTimes':
         // dailyTimes contains all halachic times (shekia, tzet haochavim, etc.)
-        return calendarState.dailyTimes;
+        return resolveDailyTimes();
+      case 'getCities':
+        // רשימת הערים שהלוח מכיר — לבחירת עיר ב-getDailyTimes {city}
+        return [
+          for (final country in cityCoordinates.entries)
+            for (final city in country.value.entries)
+              {
+                'name': city.key,
+                'country': country.key,
+                'lat': city.value['lat'],
+                'lng': city.value['lng'],
+                'elevation': city.value['elevation'],
+                'timezone': city.value['timezone'],
+                'inIsrael': country.key == 'ארץ ישראל',
+              },
+        ];
       case 'getJewishDate':
         final dateArg = args['date'] != null
             ? DateTime.tryParse(args['date'] as String)
@@ -2907,7 +3343,10 @@ class PluginBridgeAdapter {
   // ----------------------------------------------------------------
   // database.*
   // ----------------------------------------------------------------
-  dynamic _handleDatabase(String action, Map<String, dynamic> args) {
+  Future<dynamic> _handleDatabase(
+    String action,
+    Map<String, dynamic> args,
+  ) async {
     switch (action) {
       case 'listSources':
         final sources = _databaseService.listSourcesForPlugin(plugin);
@@ -2924,7 +3363,7 @@ class PluginBridgeAdapter {
         return _databaseService.describeSource(plugin, sourceId);
 
       case 'query':
-        return _databaseService.query(plugin, args);
+        return await _databaseService.query(plugin, args);
 
       case 'batchQuery':
         final queries = (args['queries'] as List<dynamic>?)
@@ -2935,7 +3374,7 @@ class PluginBridgeAdapter {
             '"queries" list is required',
           );
         }
-        final results = _databaseService.batchQuery(plugin, queries);
+        final results = await _databaseService.batchQuery(plugin, queries);
         return {'results': results};
 
       default:
@@ -3000,75 +3439,104 @@ class PluginBridgeAdapter {
   // ----------------------------------------------------------------
   // network.*
   // ----------------------------------------------------------------
-  Future<dynamic> _handleNetwork(
-    String action,
+  Future<_PluginNetworkRequest> _prepareNetworkRequest(
     Map<String, dynamic> args,
   ) async {
+    if (!plugin.manifest.networkEnabled) {
+      throw Exception(
+        'error.permission_denied: '
+        'התוסף אינו מצהיר על גישה לאינטרנט במניפסט.',
+      );
+    }
+
+    final url = args['url'] as String?;
+    if (url == null) throw Exception('error.invalid_params: url required');
+    final uri = Uri.tryParse(url);
+    if (uri == null) throw Exception('error.invalid_params: invalid URL');
+
+    final requiredPermission = requiredNetworkPermissionFor(uri);
+    final granted = await _pluginRepo.getPermission(
+      plugin.pluginId,
+      requiredPermission,
+    );
+    if (granted != true) {
+      final what = requiredPermission == 'network.localhost'
+          ? 'גישה לשירותים מקומיים (localhost)'
+          : 'גישה לאינטרנט';
+      throw Exception(
+        'error.permission_denied: '
+        'לתוסף אין הרשאת $what. '
+        'ניתן להפעיל אותה בהגדרות, תחת ניהול תוספים.',
+      );
+    }
+
+    final allowed = await PluginNetworkAccessResolver.instance
+        .isUriAllowedForPlugin(uri, plugin.manifest);
+    if (!allowed) {
+      throw Exception(
+        'error.forbidden: הכתובת אינה ברשימת ההיתר לגישת רשת של תוספים',
+      );
+    }
+
+    final method = (args['method'] as String? ?? 'GET').toUpperCase();
+    if (!RegExp(r'^[A-Z]+$').hasMatch(method)) {
+      throw Exception('error.invalid_params: invalid method');
+    }
+    final rawTimeoutMs = args['timeoutMs'];
+    if (rawTimeoutMs != null &&
+        (rawTimeoutMs is! int ||
+            rawTimeoutMs <= 0 ||
+            rawTimeoutMs >
+                PluginNetworkFetchService.maxTimeout.inMilliseconds)) {
+      throw Exception(
+        'error.invalid_params: timeoutMs must be a positive integer '
+        'up to ${PluginNetworkFetchService.maxTimeout.inMilliseconds}',
+      );
+    }
+    final rawHeaders = args['headers'];
+    final headers = <String, String>{};
+    if (rawHeaders is Map) {
+      rawHeaders.forEach((key, value) {
+        if (key is String && value != null) {
+          headers[key] = value.toString();
+        }
+      });
+    }
+
+    return _PluginNetworkRequest(
+      uri: uri,
+      method: method,
+      headers: headers.isEmpty ? null : headers,
+      body: args['body'] as String?,
+      timeout: rawTimeoutMs == null
+          ? PluginNetworkFetchService.defaultTimeout
+          : Duration(milliseconds: rawTimeoutMs),
+    );
+  }
+
+  Future<dynamic> _handleNetwork(
+    String action,
+    Map<String, dynamic> args, {
+    PluginRpcEventSink? eventSink,
+  }) async {
     switch (action) {
       case 'fetch':
-        if (!plugin.manifest.networkEnabled) {
-          throw Exception(
-            'error.permission_denied: '
-            'התוסף אינו מצהיר על גישה לאינטרנט במניפסט.',
-          );
-        }
-
-        final url = args['url'] as String?;
-        if (url == null) throw Exception('error.invalid_params: url required');
-
-        final uri = Uri.tryParse(url);
-        if (uri == null) throw Exception('error.invalid_params: invalid URL');
-
-        final requiredPermission = requiredNetworkPermissionFor(uri);
-        final granted = await _pluginRepo.getPermission(
-          plugin.pluginId,
-          requiredPermission,
-        );
-        if (granted != true) {
-          final what = requiredPermission == 'network.localhost'
-              ? 'גישה לשירותים מקומיים (localhost)'
-              : 'גישה לאינטרנט';
-          throw Exception(
-            'error.permission_denied: '
-            'לתוסף אין הרשאת $what. '
-            'ניתן להפעיל אותה בהגדרות, תחת ניהול תוספים.',
-          );
-        }
-
-        final allowed = await PluginNetworkAccessResolver.instance
-            .isUriAllowedForPlugin(uri, plugin.manifest);
-        if (!allowed) {
-          throw Exception(
-            'error.forbidden: הכתובת אינה ברשימת ההיתר לגישת רשת של תוספים',
-          );
-        }
-
-        // method/headers/body אופציונליים. הניתוב דרך הגשר נחוץ לתוספים
-        // שקוראים ל-APIs חיצוניים (כמו דיקטה) ב-POST: fetch ישיר מה-WebView
-        // (origin file://) נחסם ב-CORS, ואילו לקוח ה-HTTP של Flutter אינו
-        // כפוף ל-CORS.
-        final method = (args['method'] as String? ?? 'GET').toUpperCase();
-        if (!RegExp(r'^[A-Z]+$').hasMatch(method)) {
-          throw Exception('error.invalid_params: invalid method');
-        }
-        final requestBody = args['body'] as String?;
-        final rawHeaders = args['headers'];
-        final headers = <String, String>{};
-        if (rawHeaders is Map) {
-          rawHeaders.forEach((key, value) {
-            if (key is String && value != null) {
-              headers[key] = value.toString();
-            }
-          });
-        }
-
+        // TODO(0.9.98): להסיר את network.fetch לאחר מעבר התוספים ל-fetchStream.
+        final request = await _prepareNetworkRequest(args);
         final result = await _fetchService.fetch(
-          uri,
-          method: method,
-          headers: headers.isEmpty ? null : headers,
-          body: requestBody,
+          request.uri,
+          method: request.method,
+          headers: request.headers,
+          body: request.body,
+          timeout: request.timeout,
         );
         return {'status': result.status, 'ok': result.ok, 'body': result.body};
+
+      case 'fetchStream':
+        if (args[_cancelStreamIdKey] case final String streamId) {
+          return _cancelPluginNetworkFetch(streamId);
+        }
+        return _runPluginNetworkFetchStream(args, eventSink: eventSink);
 
       case 'download':
         // הורדה רגילה של קובץ מ-URL מותר אל תיקיית ההורדות של המערכת.
@@ -3147,4 +3615,154 @@ class PluginBridgeAdapter {
         throw Exception('Unknown action in network: $action');
     }
   }
+
+  Future<Map<String, dynamic>> _runPluginNetworkFetchStream(
+    Map<String, dynamic> args, {
+    required PluginRpcEventSink? eventSink,
+  }) async {
+    final streamId = args[_streamIdKey];
+    if (streamId is! String || !_streamIdPattern.hasMatch(streamId)) {
+      throw Exception('error.invalid_params: invalid internal stream id');
+    }
+    if (eventSink == null) {
+      throw Exception('error.internal: network stream transport unavailable');
+    }
+    if (_pendingNetworkFetchCancellations.remove(streamId)) {
+      return {'completed': false, 'cancelled': true};
+    }
+    if (_activeNetworkFetchStreams.containsKey(streamId)) {
+      throw Exception('error.invalid_params: duplicate network stream id');
+    }
+    if (_activeNetworkFetchStreams.length >=
+        _maxConcurrentNetworkFetchStreams) {
+      throw Exception(
+        'error.rate_limited: too many active network fetch streams',
+      );
+    }
+
+    final publicArgs = Map<String, dynamic>.of(args)..remove(_streamIdKey);
+    final request = await _prepareNetworkRequest(publicArgs);
+    if (_pendingNetworkFetchCancellations.remove(streamId)) {
+      return {'completed': false, 'cancelled': true};
+    }
+
+    final abort = Completer<void>();
+    final cancellation = Completer<void>();
+    StreamIterator<String>? iterator;
+    var cancelled = false;
+    var expired = false;
+    Future<void> cancel() async {
+      cancelled = true;
+      if (!abort.isCompleted) abort.complete();
+      if (!cancellation.isCompleted) cancellation.complete();
+      await iterator?.cancel();
+    }
+
+    _activeNetworkFetchStreams[streamId] = cancel;
+    final deadline = Timer(request.timeout, () {
+      expired = true;
+      unawaited(cancel());
+    });
+    var sequence = 0;
+    try {
+      final response = await Future.any<PluginNetworkFetchStreamResponse?>([
+        _fetchService
+            .fetchStream(
+              request.uri,
+              method: request.method,
+              headers: request.headers,
+              body: request.body,
+              abortTrigger: abort.future,
+            )
+            .then<PluginNetworkFetchStreamResponse?>((value) => value),
+        cancellation.future.then<PluginNetworkFetchStreamResponse?>(
+          (_) => null,
+        ),
+      ]);
+      if (response == null) {
+        if (expired) throw TimeoutException('Network stream timed out');
+        return {'completed': false, 'cancelled': true};
+      }
+
+      await eventSink(_networkFetchStreamEvent, {
+        'streamId': streamId,
+        'chunk': {
+          'sequence': sequence++,
+          'type': 'response',
+          'status': response.status,
+          'ok': response.ok,
+          'headers': response.headers,
+        },
+      });
+
+      iterator = StreamIterator<String>(response.body);
+      while (!cancelled && await iterator.moveNext()) {
+        final body = iterator.current;
+        if (body.isEmpty) continue;
+        for (final fragment in _splitNetworkFetchChunk(body)) {
+          if (cancelled) break;
+          await eventSink(_networkFetchStreamEvent, {
+            'streamId': streamId,
+            'chunk': {
+              'sequence': sequence++,
+              'type': 'data',
+              'body': fragment,
+            },
+          });
+        }
+      }
+      if (expired) throw TimeoutException('Network stream timed out');
+      return {
+        'completed': !cancelled,
+        'cancelled': cancelled,
+        'chunks': sequence,
+      };
+    } on http.RequestAbortedException {
+      if (expired) throw TimeoutException('Network stream timed out');
+      if (cancelled) return {'completed': false, 'cancelled': true};
+      rethrow;
+    } finally {
+      deadline.cancel();
+      _activeNetworkFetchStreams.remove(streamId);
+      await iterator?.cancel();
+    }
+  }
+
+  Map<String, dynamic> _cancelPluginNetworkFetch(String streamId) {
+    if (!_streamIdPattern.hasMatch(streamId)) {
+      throw Exception('error.invalid_params: invalid internal stream id');
+    }
+    final cancel = _activeNetworkFetchStreams[streamId];
+    if (cancel == null) {
+      if (_pendingNetworkFetchCancellations.length < 16) {
+        _pendingNetworkFetchCancellations.add(streamId);
+      }
+      return {'cancelled': false};
+    }
+    unawaited(cancel());
+    return {'cancelled': true};
+  }
+
+  Iterable<String> _splitNetworkFetchChunk(String value) sync* {
+    var start = 0;
+    while (start < value.length) {
+      var end = math.min(
+        start + _maxNetworkFetchChunkCodeUnits,
+        value.length,
+      );
+      if (end < value.length &&
+          _isHighSurrogate(value.codeUnitAt(end - 1)) &&
+          _isLowSurrogate(value.codeUnitAt(end))) {
+        end--;
+      }
+      yield value.substring(start, end);
+      start = end;
+    }
+  }
+
+  bool _isHighSurrogate(int codeUnit) =>
+      codeUnit >= 0xD800 && codeUnit <= 0xDBFF;
+
+  bool _isLowSurrogate(int codeUnit) =>
+      codeUnit >= 0xDC00 && codeUnit <= 0xDFFF;
 }

@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -72,5 +75,73 @@ void main() {
     expect(result.status, 404);
     expect(result.ok, isFalse);
     expect(result.body, 'nope');
+  });
+
+  test('timeout מותאם מגביל גם את זמן ההמתנה לתשובה', () async {
+    final service = PluginNetworkFetchService(
+      client: MockClient((req) async {
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        return http.Response('late', 200);
+      }),
+    );
+
+    await expectLater(
+      service.fetch(
+        Uri.parse('https://api.example.com/slow'),
+        timeout: const Duration(milliseconds: 5),
+      ),
+      throwsA(isA<TimeoutException>()),
+    );
+  });
+
+  test('fetchStream מזרים UTF-8 תקין גם כשהתו נחצה בין מקטעים', () async {
+    final responseBody = StreamController<List<int>>();
+    final service = PluginNetworkFetchService(
+      client: MockClient.streaming((request, bodyStream) async {
+        return http.StreamedResponse(
+          responseBody.stream,
+          206,
+          headers: {'content-type': 'application/x-ndjson'},
+        );
+      }),
+    );
+
+    final response = await service.fetchStream(
+      Uri.parse('https://api.example.com/stream'),
+    );
+    final chunks = response.body.toList();
+    final encoded = utf8.encode('א\nב');
+    responseBody
+      ..add(encoded.sublist(0, 1))
+      ..add(encoded.sublist(1, 3))
+      ..add(encoded.sublist(3));
+    await responseBody.close();
+
+    expect(response.status, 206);
+    expect(response.ok, isTrue);
+    expect(response.headers['content-type'], 'application/x-ndjson');
+    expect((await chunks).join(), 'א\nב');
+  });
+
+  test('fetchStream משתמש בבקשה שניתנת לביטול', () async {
+    final abort = Completer<void>();
+    final requestStarted = Completer<void>();
+    final service = PluginNetworkFetchService(
+      client: MockClient.streaming((request, bodyStream) async {
+        final abortable = request as http.AbortableRequest;
+        requestStarted.complete();
+        await abortable.abortTrigger;
+        throw http.RequestAbortedException(request.url);
+      }),
+    );
+
+    final response = service.fetchStream(
+      Uri.parse('https://api.example.com/stream'),
+      abortTrigger: abort.future,
+    );
+    await requestStarted.future;
+    abort.complete();
+
+    await expectLater(response, throwsA(isA<http.RequestAbortedException>()));
   });
 }

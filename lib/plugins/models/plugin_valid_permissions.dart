@@ -9,6 +9,7 @@ const Map<String, String> apiCallToPermissionHint = {
   // library.*
   'library.findBooks': 'library.books.read',
   'library.getBookMetadata': 'library.books.read',
+  'library.resolveBooks': 'library.books.read',
   'library.listRecentBooks': 'library.books.read',
   'library.getTree': 'library.books.read',
   'library.getBookContent': 'library.content.read',
@@ -85,8 +86,7 @@ const pluginBackgroundKeepAlivePermission = 'app.background_keep_alive';
 
 /// שם ההרשאה לתרומות עלייה דקלרטיביות (`contributes.startup` במניפסט):
 /// פקדים, פריטי תפריט הקשר ונתונים שנטענים ע"י Flutter בלי מנוע JS,
-/// והפעלה עצלה של מופע הרקע בלחיצה/אירוע. ברירת מחדל: דלוקה — לא רץ
-/// קוד תוסף בעלייה, רק פרסינג JSON מוולד.
+/// והפעלה עצלה של מופע הרקע בלחיצה/אירוע. ברירת המחדל כבויה.
 const pluginStartupContributionsPermission = 'app.startup_contributions';
 
 /// שם ההרשאה לגישה לאינטרנט. מטופלת בנפרד בממשק: במצב 'מנותק' היא מתחילה
@@ -125,6 +125,9 @@ const pluginValidPermissions = <String>[
   // ===== חיפוש =====
   /// ביצוע חיפוש טקסט מלא
   'search.fulltext.read',
+
+  /// הוספת שורות סטטיות לדיאלוג החיפוש.
+  'search.dialog',
 
   // ===== קורא =====
   /// פתיחת ספרים במצב קריאה
@@ -230,6 +233,9 @@ const pluginValidPermissions = <String>[
 
   /// הרשמה לאירועי שינוי תאריך בלוח השנה
   'events.subscribe:calendar.date_changed',
+
+  /// הרשמה לאירועי שינוי העיר הנבחרת בלוח השנה
+  'events.subscribe:calendar.city_changed',
 
   /// הרשמה לאירועי שינוי סביבת עבודה
   'events.subscribe:workspace.changed',

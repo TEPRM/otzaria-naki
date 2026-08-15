@@ -209,6 +209,7 @@ void main() {
           'index.html': '<html lang="he" dir="rtl"></html>',
           'app.js':
               "Otzaria.call('network.fetch', {url: 'x'});"
+              "Otzaria.call('network.fetchStream', {url: 'x'});"
               "Otzaria.call('network.download', {url: 'y'});",
         },
       );
@@ -223,7 +224,7 @@ void main() {
       );
     });
 
-    test('network.localhost מספיקה ל-network.fetch ללא network.access', () {
+    test('network.localhost מספיקה ל-fetch ול-fetchStream', () {
       final report = _runOn(
         tempDir,
         manifestOverride: _baseManifest(
@@ -236,12 +237,20 @@ void main() {
         files: {
           'index.html': '<html lang="he" dir="rtl"></html>',
           'app.js':
-              "Otzaria.call('network.fetch', {url: 'http://127.0.0.1:11434/api/tags'});",
+              "Otzaria.call('network.fetch', {url: 'http://127.0.0.1:11434/api/tags'});"
+              "Otzaria.call('network.fetchStream', {url: 'http://127.0.0.1:11434/api/tags'});",
         },
       );
       expect(
         report.warnings.any(
           (w) => w.contains('network.fetch') && w.contains('network.access'),
+        ),
+        isFalse,
+      );
+      expect(
+        report.warnings.any(
+          (w) =>
+              w.contains('network.fetchStream') && w.contains('network.access'),
         ),
         isFalse,
       );
@@ -676,6 +685,42 @@ void main() {
       },
     );
 
+    test('font-size ב-px מותר בסלקטור פס הכותרת בלבד', () {
+      // DESIGN_GUIDE מחייב גדלים קשיחים ב-px בפס הכותרת (שלא יתנפח עם גופן
+      // הקריאה של המשתמש) — ולכן שם px מותר, ובכל שאר הכללים אסור.
+      final ok = _runOn(
+        tempDir,
+        files: {
+          'index.html': '<html lang="he" dir="rtl"></html>',
+          'styles.css': '''
+            header.topbar { height: 56px; }
+            header.topbar .brand { font-size: 16px; }
+          ''',
+        },
+      );
+      expect(
+        ok.design.violations.any((v) => v.contains('font-size')),
+        isFalse,
+        reason: ok.design.violations.join(' | '),
+      );
+
+      final flagged = _runOn(
+        tempDir,
+        files: {
+          'index.html': '<html lang="he" dir="rtl"></html>',
+          'styles.css': '''
+            .topbar { font-size: 16px; }
+            .card { font-size: 18px; }
+          ''',
+        },
+      );
+      expect(
+        flagged.design.violations.any((v) => v.contains('font-size')),
+        isTrue,
+        reason: 'כלל שאינו פס הכותרת חייב להיפסל',
+      );
+    });
+
     test('flags hex colors that are NOT inside CSS variable declarations', () {
       final report = _runOn(
         tempDir,
@@ -749,6 +794,27 @@ void main() {
   });
 
   group('minAppVersion vs גרסת ה-API (שגיאה חוסמת)', () {
+    test('network.fetchStream דורש minAppVersion 0.9.97', () {
+      PluginValidationReport run(String minAppVersion) => _runOn(
+        tempDir,
+        manifestOverride: _baseManifest(
+          permissions: const ['network.access'],
+          minAppVersion: minAppVersion,
+          network: const {
+            'enabled': true,
+            'allowlist': ['https://example.com'],
+          },
+        ),
+        files: const {
+          'index.html': '<!doctype html><html lang="he" dir="rtl"></html>',
+          'app.js': "Otzaria.call('network.fetchStream', {url: 'x'});",
+        },
+      );
+
+      expect(run('0.9.96').errors, contains(contains('0.9.97')));
+      expect(run('0.9.97').errors, isEmpty);
+    });
+
     test('שגיאה כשמשתמשים ב-API חדש מ-minAppVersion שהוצהר', () {
       final report = _runOn(
         tempDir,

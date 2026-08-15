@@ -543,8 +543,8 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
         link: link,
         globalPosition: globalPosition,
         hoverMode: true,
-        removeNikud: state.removeNikud,
-        removePunctuation: state.removePunctuation,
+        removeNikud: state.commentaryRemoveNikud,
+        removePunctuation: state.commentaryRemovePunctuation,
         onOpen: () => _openAnchorTarget(link),
       );
     });
@@ -634,8 +634,8 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
         link: link,
         globalPosition: globalPosition,
         hoverMode: true,
-        removeNikud: state.removeNikud,
-        removePunctuation: state.removePunctuation,
+        removeNikud: state.commentaryRemoveNikud,
+        removePunctuation: state.commentaryRemovePunctuation,
         onOpen: () => _openAnchorTarget(link),
         onDismissed: anchor == null ? null : () => _setActiveAnchor(null, null),
       );
@@ -1005,12 +1005,12 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
       return;
     }
 
-    final shouldRebuild = shouldRebuildSelectionAreaOnExternalChange(
+    final shouldClear = shouldClearSelectionOnExternalChange(
       activeOwner: controller.activeOwner,
       selfOwner: _selectionOwner,
       hasOwnSelection: _savedSelectedText != null,
     );
-    if (!shouldRebuild) {
+    if (!shouldClear) {
       return;
     }
 
@@ -1177,6 +1177,16 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
     return segmentIndexForLine(state.readingSegments, lineIndex);
   }
 
+  /// מצב הניקוד של הטור. טור מפרש אינו תנ"ך, ולכן חל עליו מצב המפרשים
+  /// ולא הפטור שהתנ"ך מקבל מהגדרת "הצג ניקוד בתנ"ך".
+  bool _removeNikud(TextBookLoaded state) =>
+      widget.isMainText ? state.removeNikud : state.commentaryRemoveNikud;
+
+  /// מצב הפיסוק של הטור, באותו היגיון של [_removeNikud].
+  bool _removePunctuation(TextBookLoaded state) => widget.isMainText
+      ? state.removePunctuation
+      : state.commentaryRemovePunctuation;
+
   RenderSettings _selectionRenderSettings({
     required TextBookLoaded state,
     required SettingsState settingsState,
@@ -1184,7 +1194,7 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
   }) {
     return RenderSettings(
       removeNikud: removeNikud,
-      removePunctuation: state.removePunctuation,
+      removePunctuation: _removePunctuation(state),
       removeTeamim: !settingsState.showTeamim,
       replaceHolyNames: settingsState.replaceHolyNames,
       searchText: widget.isMainText ? state.searchText : '',
@@ -1256,8 +1266,7 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
     }
 
     final settingsState = context.read<SettingsBloc>().state;
-    // מצב הניקוד של הטאב חל גם על טורי המפרשים (isMainText=false).
-    final removeNikud = textBookState.removeNikud;
+    final removeNikud = _removeNikud(textBookState);
     final sourceIndices = _selectionSourceIndices();
     final renderSettings = _selectionRenderSettings(
       state: textBookState,
@@ -1597,8 +1606,8 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
         sortedLinks.map(
           (link) => buildLinkContextMenuEntry(
             link: link,
-            removeNikud: state.removeNikud,
-            removePunctuation: state.removePunctuation,
+            removeNikud: state.commentaryRemoveNikud,
+            removePunctuation: state.commentaryRemovePunctuation,
             onTap: () async {
               final tab = await buildLinkTargetTab(link);
               if (!mounted) return;
@@ -1727,8 +1736,8 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
       final siblingEntry = _siblingController!.buildEntry(
         lineIndex: index,
         sourceLink: sourceLink,
-        removeNikud: state.removeNikud,
-        removePunctuation: state.removePunctuation,
+        removeNikud: state.commentaryRemoveNikud,
+        removePunctuation: state.commentaryRemovePunctuation,
         onNavigate: (link) async {
           final tab = await buildLinkTargetTab(link);
           if (!mounted) return;
@@ -1804,7 +1813,7 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
         final selectionSettings = _selectionRenderSettings(
           state: state,
           settingsState: menuContext.read<SettingsBloc>().state,
-          removeNikud: state.removeNikud,
+          removeNikud: _removeNikud(state),
         );
         final renderedLine = renderSelectionLine(
           rawText: widget.content[sectionIndex],
@@ -1898,14 +1907,14 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
       service.buildCommentariesEntry(
         link: targetLink,
         onNavigate: navigate,
-        removeNikud: state.removeNikud,
-        removePunctuation: state.removePunctuation,
+        removeNikud: state.commentaryRemoveNikud,
+        removePunctuation: state.commentaryRemovePunctuation,
       ),
       service.buildLinksEntry(
         link: targetLink,
         onNavigate: navigate,
-        removeNikud: state.removeNikud,
-        removePunctuation: state.removePunctuation,
+        removeNikud: state.commentaryRemoveNikud,
+        removePunctuation: state.commentaryRemovePunctuation,
       ),
     ];
   }
@@ -2142,9 +2151,9 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
     final settingsState = context.read<SettingsBloc>().state;
     final textBookState = context.read<TextBookBloc>().state;
 
-    // ההעתקה משקפת את התצוגה: מצב הניקוד של הטאב חל גם על טורי המפרשים.
+    // ההעתקה משקפת את התצוגה, ולכן עוברת באותו מסלול ניקוד.
     final removeNikud =
-        textBookState is TextBookLoaded && textBookState.removeNikud;
+        textBookState is TextBookLoaded && _removeNikud(textBookState);
     final processedText = removeNikud ? utils.removeVolwels(text) : text;
 
     final plainText = utils.stripHtmlIfNeeded(processedText);
@@ -2546,7 +2555,7 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
       }
       if (isCommentaryHighlighted || isSelected) {
         // צבע הדגשה למפרש קשור - כמו השורה הנבחרת
-        return theme.colorScheme.primary.withAlpha((0.08 * 255).round());
+        return AppSurfaces.paragraphSelectionBackground(theme.colorScheme);
       }
       return null;
     }();
@@ -2741,8 +2750,8 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
                   highlightSourceText: widget.isMainText ? data : null,
                   widgetKey: ValueKey('html_simple_text_$primaryLineIndex'),
                   settings: RenderSettings(
-                    removeNikud: state.removeNikud,
-                    removePunctuation: state.removePunctuation,
+                    removeNikud: _removeNikud(state),
+                    removePunctuation: _removePunctuation(state),
                     removeTeamim: !settingsState.showTeamim,
                     replaceHolyNames: settingsState.replaceHolyNames,
                     searchText: searchText,
@@ -2945,7 +2954,7 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
       final backgroundColor = state.highlightedLine == lineIndex
           ? colorScheme.secondaryContainer.withAlpha((0.4 * 255).round())
           : state.selectedIndices.contains(lineIndex)
-          ? colorScheme.primary.withAlpha((0.08 * 255).round())
+          ? AppSurfaces.paragraphSelectionBackground(colorScheme)
           : null;
       final style = backgroundColor == null
           ? baseTextStyle
@@ -3017,8 +3026,8 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
         : SearchMode.exact;
 
     final renderSettings = RenderSettings(
-      removeNikud: state.removeNikud,
-      removePunctuation: state.removePunctuation,
+      removeNikud: _removeNikud(state),
+      removePunctuation: _removePunctuation(state),
       removeTeamim: !settingsState.showTeamim,
       replaceHolyNames: settingsState.replaceHolyNames,
       searchText: searchText,

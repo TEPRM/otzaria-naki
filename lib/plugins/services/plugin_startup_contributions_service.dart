@@ -1,12 +1,15 @@
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:otzaria/plugins/declarative/compiler/declarative_toolbar_template_compiler.dart';
 import 'package:otzaria/plugins/models/installed_plugin.dart';
 import 'package:otzaria/plugins/models/plugin_startup_contributions.dart';
 import 'package:otzaria/plugins/models/plugin_valid_permissions.dart';
 import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
 import 'package:otzaria/plugins/services/context_menu_registry.dart';
+import 'package:otzaria/plugins/services/plugin_external_editions_registry.dart';
 import 'package:otzaria/plugins/services/plugin_lazy_activation_service.dart';
+import 'package:otzaria/plugins/services/plugin_search_dialog_registry.dart';
 import 'package:otzaria/plugins/services/plugin_toolbar_registry.dart';
 import 'package:otzaria/plugins/storage/plugin_system_database.dart';
 
@@ -23,6 +26,8 @@ class PluginStartupContributionsService {
   PluginStartupContributionsService._()
     : _toolbar = PluginToolbarRegistry.instance,
       _contextMenu = ContextMenuRegistry.instance,
+      _searchDialog = PluginSearchDialogRegistry.instance,
+      _externalEditions = PluginExternalEditionsRegistry.instance,
       _lazyActivation = PluginLazyActivationService.instance;
 
   @visibleForTesting
@@ -30,12 +35,20 @@ class PluginStartupContributionsService {
     required PluginToolbarRegistry toolbarRegistry,
     required ContextMenuRegistry contextMenuRegistry,
     required PluginLazyActivationService activationService,
+    PluginSearchDialogRegistry? searchDialogRegistry,
+    PluginExternalEditionsRegistry? externalEditionsRegistry,
   }) : _toolbar = toolbarRegistry,
        _contextMenu = contextMenuRegistry,
+       _searchDialog =
+           searchDialogRegistry ?? PluginSearchDialogRegistry.instance,
+       _externalEditions =
+           externalEditionsRegistry ?? PluginExternalEditionsRegistry.instance,
        _lazyActivation = activationService;
 
   final PluginToolbarRegistry _toolbar;
   final ContextMenuRegistry _contextMenu;
+  final PluginSearchDialogRegistry _searchDialog;
+  final PluginExternalEditionsRegistry _externalEditions;
   final PluginLazyActivationService _lazyActivation;
   Future<void> _syncTail = Future<void>.value();
 
@@ -49,6 +62,8 @@ class PluginStartupContributionsService {
   /// התוסף) ולצורך reapply אחרי reload של תוסף פיתוח.
   final Map<String, List<Map<String, dynamic>>> _appliedToolbar = {};
   final Map<String, List<Map<String, dynamic>>> _appliedContextMenu = {};
+  final Map<String, List<Map<String, dynamic>>> _appliedSearchDialog = {};
+  final Map<String, List<Map<String, dynamic>>> _appliedExternalEditions = {};
 
   /// תוספים שסונכרנו עם תרומות פעילות בסשן הנוכחי — מאפשר לדלג על ניקוי DB
   /// עבור שאר התוספים (הרוב), שלא נזרע להם דבר.
@@ -107,11 +122,15 @@ class PluginStartupContributionsService {
       }
       _managedPlugins.add(plugin.pluginId);
 
-      if (startup.toolbarItems.isNotEmpty &&
-          granted.contains('reader.toolbar')) {
+      final legacyToolbarItems = startup.toolbarItems
+          .where(
+            (item) => !DeclarativeToolbarTemplateCompiler.isDeclarative(item),
+          )
+          .toList();
+      if (legacyToolbarItems.isNotEmpty && granted.contains('reader.toolbar')) {
         _applyItems(
           plugin.pluginId,
-          startup.toolbarItems,
+          legacyToolbarItems,
           applied: _appliedToolbar,
           register: (id, item) => _toolbar.registerPayload(id, item),
           removeItem: _toolbar.remove,
@@ -134,6 +153,46 @@ class PluginStartupContributionsService {
           plugin.pluginId,
           _appliedContextMenu,
           _contextMenu.remove,
+        );
+      }
+
+      if (startup.searchDialogItems.isNotEmpty &&
+          granted.contains('search.dialog')) {
+        _applyItems(
+          plugin.pluginId,
+          startup.searchDialogItems,
+          applied: _appliedSearchDialog,
+          register: (id, item) => _searchDialog.registerPayload(id, item),
+          removeItem: _searchDialog.remove,
+        );
+      } else {
+        _removeApplied(
+          plugin.pluginId,
+          _appliedSearchDialog,
+          _searchDialog.remove,
+        );
+      }
+
+      // תרומת מהדורות חיצוניות משתמשת ב-DB של התוסף ובפתרון ספרים —
+      // דורשת את שתי ההרשאות שהמנוע הגנרי נשען עליהן.
+      if (startup.externalEditions.isNotEmpty &&
+          granted.contains('database.read') &&
+          granted.contains('library.books.read')) {
+        _applyItems(
+          plugin.pluginId,
+          startup.externalEditions,
+          applied: _appliedExternalEditions,
+          register: (_, item) => _externalEditions.registerPayload(
+            plugin,
+            item,
+          ),
+          removeItem: _externalEditions.remove,
+        );
+      } else {
+        _removeApplied(
+          plugin.pluginId,
+          _appliedExternalEditions,
+          _externalEditions.remove,
         );
       }
 
@@ -202,6 +261,13 @@ class PluginStartupContributionsService {
         pluginId,
         item,
         (id, i) => _contextMenu.registerPayload(id, i),
+      );
+    }
+    for (final item in _appliedSearchDialog[pluginId] ?? const []) {
+      _tryRegister(
+        pluginId,
+        item,
+        (id, i) => _searchDialog.registerPayload(id, i),
       );
     }
   }
@@ -421,6 +487,12 @@ class PluginStartupContributionsService {
     _managedPlugins.remove(pluginId);
     _removeApplied(pluginId, _appliedToolbar, _toolbar.remove);
     _removeApplied(pluginId, _appliedContextMenu, _contextMenu.remove);
+    _removeApplied(pluginId, _appliedSearchDialog, _searchDialog.remove);
+    _removeApplied(
+      pluginId,
+      _appliedExternalEditions,
+      _externalEditions.remove,
+    );
     _lazyActivation.removePlugin(pluginId);
     await _removeSeededData(pluginId, repository);
   }

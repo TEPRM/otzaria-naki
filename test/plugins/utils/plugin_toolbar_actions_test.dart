@@ -1,9 +1,13 @@
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:otzaria/plugins/declarative/models/declarative_program.dart';
 import 'package:otzaria/plugins/models/plugin_toolbar_item.dart';
 import 'package:otzaria/plugins/utils/plugin_toolbar_actions.dart';
 import 'package:otzaria/widgets/misc/app_popup_menu.dart';
+import 'package:otzaria/widgets/navigation/responsive_action_bar.dart';
 import 'package:otzaria/widgets/controls/bar_button.dart';
+import 'package:otzaria/widgets/controls/bar_split_button.dart';
 
 void main() {
   Future<Map<String, dynamic>> emptyLocation() async => const {};
@@ -27,6 +31,66 @@ void main() {
     expect(action.widget, isA<BarButton>());
     expect(action.onPressed, isNotNull);
     expect(action.submenuItems, isNull);
+  });
+
+  test('buildOrderedPluginOverflowActions מחזיר רק overflow עם המשקל', () {
+    const items = [
+      ('a', PluginToolbarItem(id: 'bar', title: 'Bar', placement: 'primary')),
+      (
+        'a',
+        PluginToolbarItem(
+          id: 'mid',
+          title: 'Mid',
+          placement: 'overflow',
+          order: 55,
+        ),
+      ),
+      ('b', PluginToolbarItem(id: 'end', title: 'End', placement: 'overflow')),
+    ];
+
+    final ordered = buildOrderedPluginOverflowActions(
+      records: items,
+      context: 'reader-text',
+      compact: false,
+      locationPayload: emptyLocation,
+    );
+
+    expect(ordered.map((entry) => (entry.$1, entry.$2.tooltip)), [
+      (55, 'Mid'),
+      (PluginToolbarItem.defaultOrder, 'End'),
+    ]);
+  });
+
+  test('mergeOrderedMenuActions משבץ פריט תוסף לפני "הדפסה" ושומר יציבות', () {
+    ActionButtonData action(String tooltip) => ActionButtonData(
+      widget: const SizedBox.shrink(),
+      icon: FluentIcons.circle_24_regular,
+      tooltip: tooltip,
+      onPressed: null,
+    );
+
+    final merged = mergeOrderedMenuActions(
+      [
+        (10, action('סימניות')),
+        (60, action('הדפסה')),
+        (70, action('אודות')),
+      ],
+      [
+        (55, action('תוסף לפני הדפסה')),
+        (1000, action('תוסף בלי order')),
+        // שוויון משקלים: המובנה קודם, ותוספים לפי סדר הרישום.
+        (60, action('תוסף שווה להדפסה')),
+      ],
+    );
+
+    expect(merged.map((item) => item.tooltip), [
+      'סימניות',
+      'תוסף לפני הדפסה',
+      'הדפסה',
+      'תוסף שווה להדפסה',
+      'אודות',
+      'תוסף בלי order',
+    ]);
   });
 
   test('unknown icon name falls back to the puzzle piece icon', () {
@@ -76,6 +140,35 @@ void main() {
     expect(action.submenuItems!.first.onPressed, isNotNull);
   });
 
+  test('builds a split button whose overflow starts with the main action', () {
+    const item = PluginToolbarItem(
+      id: 'split',
+      type: 'split',
+      title: 'Open edition',
+      icon: 'book_24_regular',
+      children: [
+        PluginToolbarItem(id: 'other', title: 'Other edition'),
+      ],
+    );
+
+    final action = buildPluginToolbarActions(
+      records: const [('marker', item)],
+      context: 'reader-text',
+      compact: false,
+      locationPayload: emptyLocation,
+    ).single;
+
+    expect(action.tooltip, 'Open edition');
+    expect(action.widget, isA<BarSplitButton<int>>());
+    expect(action.onPressed, isNotNull);
+    expect(
+      action.submenuItems!.map((child) => child.tooltip),
+      ['Open edition', 'Other edition'],
+    );
+    final split = action.widget as BarSplitButton<int>;
+    expect(split.entries.map((entry) => entry.label), ['Other edition']);
+  });
+
   test('filters top-level items and menu children by reader context', () {
     const textOnly = PluginToolbarItem(
       id: 'text-only',
@@ -123,5 +216,44 @@ void main() {
       textActions.last.submenuItems!.map((child) => child.tooltip),
       ['Both'],
     );
+  });
+
+  test('פעולת Host אינה בונה payload ואינה נשלחת למנוע התוסף', () async {
+    const hostAction = CompiledDeclarativeAction(
+      type: 'reader.openBook',
+      args: {
+        'identity': {'id': 10},
+      },
+      requiredPermission: 'reader.open',
+      contextSignature: 'book-7',
+      programGeneration: 7,
+    );
+    const item = PluginToolbarItem(
+      id: 'open-default',
+      title: 'Open default',
+      icon: 'book_24_regular',
+      hostAction: hostAction,
+    );
+    var locationCalls = 0;
+    final dispatched = <CompiledDeclarativeAction>[];
+    final action = buildPluginToolbarActions(
+      records: const [('marker', item)],
+      context: 'reader-text',
+      compact: false,
+      locationPayload: () async {
+        locationCalls++;
+        throw StateError('legacy payload must not be built');
+      },
+      hostActionDispatcher: (pluginId, action) async {
+        expect(pluginId, 'marker');
+        dispatched.add(action);
+      },
+    ).single;
+
+    action.onPressed!();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(dispatched, [hostAction]);
+    expect(locationCalls, 0);
   });
 }

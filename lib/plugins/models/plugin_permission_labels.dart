@@ -63,6 +63,12 @@ List<String> pluginBackgroundActivationReasons(PluginManifest manifest) {
       reasons.add('עליית אוצריא');
       continue;
     }
+    // אירוע ממוקד של ספק חיפוש חיצוני — אין לו הרשאת subscribe ולכן גם
+    // לא תווית ברשימת ההרשאות.
+    if (topic == 'search.external.requested') {
+      reasons.add('בקשת חיפוש ממסך החיפוש המובנה');
+      continue;
+    }
     reasons.add(
       _permissionLabels['events.subscribe:$topic']?.label ?? 'האירוע $topic',
     );
@@ -90,6 +96,7 @@ bool pluginPermissionDefaultGrant(
   required bool isOfflineMode,
 }) {
   if (permission == pluginRunOnStartupPermission ||
+      permission == pluginStartupContributionsPermission ||
       permission == pluginBackgroundKeepAlivePermission) {
     return false;
   }
@@ -103,9 +110,10 @@ List<String> orderedPluginPermissions(
 }) {
   int rank(String permission) => switch (permission) {
     pluginRunOnStartupPermission => 0,
-    pluginBackgroundKeepAlivePermission => 1,
-    pluginNetworkAccessPermission when isOfflineMode => 2,
-    _ => 3,
+    pluginStartupContributionsPermission => 1,
+    pluginBackgroundKeepAlivePermission => 2,
+    pluginNetworkAccessPermission when isOfflineMode => 3,
+    _ => 4,
   };
   final indexed = permissions.indexed.toList();
   indexed.sort((a, b) {
@@ -143,9 +151,10 @@ const Map<String, PluginPermissionInfo> _permissionLabels = {
         'את צריכת הזיכרון והמעבד; אשר רק לתוסף מהימן שחייב להאזין ברציפות.',
   ),
   'app.startup_contributions': PluginPermissionInfo(
-    label: 'פקדים ונתונים בעליית האפליקציה',
+    label: 'הוספת רכיבים לתוכנה',
     description:
-        'הלחצנים, פריטי התפריט והנתונים שהתוסף הגדיר יופיעו מיד עם עליית אוצריא, בלי להריץ את התוסף עצמו. בלי הרשאת ריצה ברקע, לחיצה על פקד תפתח את דף התוסף.',
+        'מאפשר לתוסף להוסיף פקדים, פריטי תפריט ונתונים שמנוהלים בידי אוצריא. '
+        'פעולות מובנות עשויות להתבצע בלי לפתוח את דף התוסף.',
   ),
 
   // ===== ספרייה =====
@@ -162,6 +171,10 @@ const Map<String, PluginPermissionInfo> _permissionLabels = {
   'search.fulltext.read': PluginPermissionInfo(
     label: 'חיפוש טקסט מלא',
     description: 'ביצוע חיפושי טקסט ברחבי כל הספרייה',
+  ),
+  'search.dialog': PluginPermissionInfo(
+    label: 'רכיבים בחלון החיפוש',
+    description: 'הוספת שורות סטטיות לדיאלוג החיפוש, ללא הפעלת קוד התוסף ברקע',
   ),
 
   // ===== קורא =====
@@ -292,6 +305,10 @@ const Map<String, PluginPermissionInfo> _permissionLabels = {
   'events.subscribe:calendar.date_changed': PluginPermissionInfo(
     label: 'אירועי שינוי תאריך',
     description: 'קבלת עדכון בכל פעם שמשתמש מחליף תאריך בלוח השנה',
+  ),
+  'events.subscribe:calendar.city_changed': PluginPermissionInfo(
+    label: 'אירועי שינוי עיר',
+    description: 'קבלת עדכון בכל פעם שמשתמש מחליף את העיר הנבחרת בלוח השנה',
   ),
   'events.subscribe:workspace.changed': PluginPermissionInfo(
     label: 'אירועי סביבת עבודה',

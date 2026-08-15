@@ -46,7 +46,7 @@
 // Shared types
 // ---------------------------------------------------------------------------
 
-/** Response envelope returned by every `Otzaria.call()` invocation. */
+/** Response envelope returned by non-streaming `Otzaria.call()` invocations. */
 export interface OtzariaResponse<T = unknown> {
   success: boolean;
   data: T | null;
@@ -150,9 +150,14 @@ export interface PermissionSnapshot {
 }
 
 export interface BookMeta {
+  id?: number | null;
   bookId: string;
   title: string;
+  type?: 'text' | 'pdf' | 'docx' | 'epub' | 'external' | null;
+  source?: 'library' | 'user' | 'external' | null;
   topics?: string[];
+  categoryPath?: string | null;
+  external?: { provider: 'hebrewbooks' | 'otzar'; id: number | string };
 }
 
 export interface SearchResult {
@@ -167,6 +172,7 @@ export interface BookIdentity {
   bookId?: string;
   type?: 'text' | 'pdf' | 'docx' | 'epub' | 'external' | null;
   source?: 'library' | 'user' | 'external' | null;
+  external?: { provider: 'hebrewbooks' | 'otzar'; id: number | string };
 }
 
 export type SearchMode = 'exact' | 'advanced' | 'fuzzy';
@@ -218,18 +224,27 @@ export interface SearchQueryParams {
 
 export interface SearchQueryHit extends BookIdentity {
   book: string;
+  categoryPath?: string | null;
   reference: string;
   text: string;
   index: number;
   mergedCount: number;
   merged?: Array<
-    BookIdentity & { book: string; reference: string; index: number }
+    BookIdentity & {
+      book: string;
+      categoryPath?: string | null;
+      reference: string;
+      index: number;
+    }
   >;
 }
 
-export interface SearchQueryResponse {
+export interface SearchQueryChunk {
+  /** מספר ה-chunk, החל מ-0. */
+  sequence: number;
   results: SearchQueryHit[];
-  total: number;
+  /** זמין מה-chunk הראשון; null רק אם המנוע טרם החזיר ספירה. */
+  total: number | null;
   groupCount: number | null;
   /** `true` = שאילתה רחבה מדי; התוצאות והספירה חלקיות. */
   truncated: boolean;
@@ -252,6 +267,31 @@ export interface SearchOptionsCatalog {
   fuzzyMaxDistance: number;
   defaultLimit: number;
 }
+
+export interface NetworkFetchParams {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  /** ברירת מחדל 30,000; מקסימום 120,000 מילישניות. */
+  timeoutMs?: number;
+}
+
+export type NetworkFetchStreamChunk =
+  | {
+      sequence: number;
+      type: 'response';
+      status: number;
+      ok: boolean;
+      /** שמות הכותרות מוחזרים באותיות קטנות. */
+      headers: Record<string, string>;
+    }
+  | {
+      sequence: number;
+      type: 'data';
+      /** מקטע UTF-8; גבול המקטע אינו בהכרח גבול שורה. */
+      body: string;
+    };
 
 export interface TocEntry {
   text: string;
@@ -299,6 +339,35 @@ export interface CalendarEvent {
   /** ISO 8601 */
   date: string;
   description: string;
+}
+
+/** Arguments for `calendar.getDailyTimes` and `calendar.getHalachicTimes`. */
+export interface CalendarTimesArgs {
+  /** ISO 8601 date. Defaults to the calendar's selected date. */
+  date?: string;
+  /** A city returned by `calendar.getCities`. Mutually exclusive with coordinates. */
+  city?: string;
+  /** Latitude. Must be supplied together with `lng`. */
+  lat?: number;
+  /** Longitude. Must be supplied together with `lat`. */
+  lng?: number;
+  /** Elevation in metres. Defaults to 0. */
+  elevation?: number;
+  /** IANA time-zone identifier. */
+  timezone?: string;
+  /** Whether to use the Israel holiday calendar. */
+  inIsrael?: boolean;
+}
+
+/** A city supported by the built-in calendar. */
+export interface CityInfo {
+  name: string;
+  country: string;
+  lat: number;
+  lng: number;
+  elevation: number;
+  timezone: string;
+  inIsrael: boolean;
 }
 
 export interface ReaderState {
@@ -654,13 +723,14 @@ export interface ContextMenuColorClickedEvent {
 export type ToolbarContext = 'reader-text' | 'reader-pdf';
 
 /**
- * A reader-toolbar registration: a single button or a dropdown menu whose
- * children are buttons. A plugin may register at most two top-level items;
+ * A reader-toolbar registration: a single button, a dropdown menu whose
+ * children are buttons, or a split button (a main action plus an arrow that
+ * opens the children). A plugin may register at most two top-level items;
  * replacing the same `id` does not consume another slot. Available from 0.9.97.
  */
 export interface ToolbarItem {
   id: string;
-  type?: 'button' | 'menu';
+  type?: 'button' | 'menu' | 'split';
   /** Tooltip on the visible button and label in the overflow menu. */
   title: string;
   /** FluentUI icon name. Required on top-level items, optional on children. */
@@ -670,7 +740,7 @@ export interface ToolbarItem {
   contexts?: ToolbarContext[];
   /** Custom event dispatched only to the owning plugin. */
   onClickEvent?: string;
-  /** Menu children (`type: 'menu'` only, up to 20 buttons, no nesting). */
+  /** Children (`type: 'menu'` or `'split'`, up to 20 buttons, no nesting). */
   children?: ToolbarItem[];
   /** When true, clicking opens the plugin page and the click event is
    * delivered to it after boot. */
@@ -778,6 +848,8 @@ export interface OtzariaEventMap {
   };
   /** Selected calendar date changed. */
   'calendar.date_changed': { date: string };
+  /** Selected calendar city changed. */
+  'calendar.city_changed': { city: string };
   /** Active workspace changed. */
   'workspace.changed': { workspaceId: string };
   /** A whitelisted app setting changed. */
@@ -805,6 +877,28 @@ export interface OtzariaEventMap {
   };
   /** The plugin page was opened via `plugin.openSelf`. Carries the param passed to the call. */
   'plugin.page_opened': { param: unknown };
+  /** A checked static search row routed submission to its owning plugin. */
+  'search.requested': { itemId: string; request: SearchQueryParams };
+  /** External-search page request sent only to the plugin owning `provider`. */
+  'search.external.requested': {
+    requestId: string;
+    provider: string;
+    query: string;
+    mode: 'exact' | 'advanced' | 'fuzzy';
+    distance: number;
+    offset: number;
+    limit: number;
+    ids?: number[];
+    /** The host consumes `[id, hits, categoryPath, title]` index entries. */
+    indexTitles?: boolean;
+  };
+  /** In-book search request sent only to the plugin owning `provider`. */
+  'reader.inBookSearch.requested': {
+    requestId: string;
+    provider: string;
+    externalId: number | string;
+    query: string;
+  };
   /** Standard context-menu click event. Sent only to the owning plugin. */
   'contextMenu.itemClicked': ContextMenuItemClickedEvent;
   /** Standard color-row click event. Sent only to the owning plugin. */
@@ -956,6 +1050,7 @@ export type OtzariaMethod =
   | 'app.openUrl'
   | 'library.findBooks'
   | 'library.getBookMetadata'
+  | 'library.resolveBooks'
   | 'library.listRecentBooks'
   | 'library.getBookContent'
   | 'library.getBookToc'
@@ -966,6 +1061,11 @@ export type OtzariaMethod =
   | 'search.getOptions'
   | 'reader.openBook'
   | 'reader.openBookAtRef'
+  | 'reader.registerInBookSearchProvider'
+  | 'reader.respondInBookSearch'
+  | 'reader.openSearchTab'
+  | 'reader.registerExternalSearchProvider'
+  | 'reader.respondExternalSearch'
   | 'reader.getCurrentState'
   | 'reader.getCurrentRef'
   | 'reader.getSelection'
@@ -991,6 +1091,7 @@ export type OtzariaMethod =
   | 'calendar.getSelectedDate'
   | 'calendar.getDailyTimes'
   | 'calendar.getHalachicTimes'
+  | 'calendar.getCities'
   | 'calendar.getJewishDate'
   | 'calendar.getEvents'
   | 'publishedData.upsert'
@@ -1013,6 +1114,7 @@ export type OtzariaMethod =
   | 'database.query'
   | 'database.batchQuery'
   | 'network.fetch'
+  | 'network.fetchStream'
   | 'network.download'
   | 'shortcut.create'
   | 'plugin.openSelf'
@@ -1035,6 +1137,18 @@ export type OtzariaMethod =
 // ---------------------------------------------------------------------------
 
 export interface OtzariaGlobal {
+  /** חיפוש מלא שמזרים chunks ככל שהם מתקבלים מהמנוע. */
+  call(
+    method: 'search.query',
+    payload: SearchQueryParams
+  ): AsyncIterable<SearchQueryChunk>;
+
+  /** בקשת HTTP שמזרימה כותרות ומקטעי גוף עם הגעתם. */
+  call(
+    method: 'network.fetchStream',
+    payload: NetworkFetchParams
+  ): AsyncIterable<NetworkFetchStreamChunk>;
+
   /**
    * Call a Host API method.
    *

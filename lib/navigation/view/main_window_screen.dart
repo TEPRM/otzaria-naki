@@ -31,6 +31,7 @@ import 'package:otzaria/find_ref/bloc/find_ref_event.dart';
 import 'package:otzaria/find_ref/bloc/find_ref_state.dart';
 import 'package:otzaria/library/models/library.dart' as library_model;
 import 'package:otzaria/search/models/search_configuration.dart';
+import 'package:otzaria/search/search_defaults.dart';
 import 'package:otzaria/search/view/search_dialog.dart';
 import 'package:otzaria/library/view/library_browser.dart';
 import 'package:otzaria/tabs/reading_screen.dart';
@@ -45,6 +46,7 @@ import 'package:otzaria/tools/open_tool_tab.dart';
 import 'package:otzaria/tools/tools_launcher_controller.dart';
 import 'package:otzaria/tools/view/tools_launcher_panel.dart';
 import 'package:otzaria/shortcuts/keyboard_shortcuts.dart';
+import 'package:otzaria/shortcuts/shortcut_helper.dart';
 import 'package:otzaria/shortcuts/shortcut_validator.dart';
 import 'dart:async';
 import 'package:otzaria/update/my_update_widget.dart';
@@ -209,6 +211,17 @@ LibraryPageBuildDecision resolveLibraryPageBuildDecision({
       ? LibraryPageBuildDecision.buildRealPage
       : LibraryPageBuildDecision.usePlaceholder;
 }
+
+@visibleForTesting
+bool shouldDispatchHebrewBooksPathChange(
+  LibraryState current,
+) => current.changedHebrewBooksPath != null;
+
+@visibleForTesting
+Map<String, dynamic> hebrewBooksPathSettingsChangedPayload(String path) => {
+  'key': SettingsRepository.keyHebrewBooksPath,
+  'newValue': path,
+};
 
 /// אופן המעבר מהעמוד שה-PageController מציג כרגע אל עמוד היעד.
 enum PageTransitionKind { snap, slide, crossSlide }
@@ -597,10 +610,21 @@ class MainWindowScreenState extends State<MainWindowScreen>
     _setupFullscreenSync();
 
     // Listen to calendar changes for plugin dispatch
+    var lastDispatchedCity = _calendarCubit.state.selectedCity;
     _calendarCubit.stream.listen((state) {
       PluginRuntimeDispatcher.instance.dispatchEvent('calendar.date_changed', {
         'date': state.selectedGregorianDate.toIso8601String(),
       });
+      // שינוי העיר הנבחרת — אירוע נפרד, נשלח רק כשהעיר באמת משתנה
+      if (state.selectedCity != lastDispatchedCity) {
+        lastDispatchedCity = state.selectedCity;
+        PluginRuntimeDispatcher.instance.dispatchEvent(
+          'calendar.city_changed',
+          {
+            'city': state.selectedCity,
+          },
+        );
+      }
     });
 
     // NOTE: Background sync is now triggered by LibraryBloc listener
@@ -1197,9 +1221,11 @@ class MainWindowScreenState extends State<MainWindowScreen>
       query,
       initialConfiguration: mode == null
           ? null
-          : SearchConfiguration(
-              searchMode: mode,
-              distance: mode == SearchMode.fuzzy ? 2 : 0,
+          : SearchDefaults.withResultPreferences(
+              SearchConfiguration(
+                searchMode: mode,
+                distance: mode == SearchMode.fuzzy ? 2 : 0,
+              ),
             ),
     );
     context.read<HistoryBloc>().add(AddHistory(tab));
@@ -1357,8 +1383,9 @@ class MainWindowScreenState extends State<MainWindowScreen>
         tooltip: '',
         icon: Tooltip(
           preferBelow: false,
-          message: (ShortcutValidator.getShortcutValue(item.shortcutKey) ?? '')
-              .toUpperCase(),
+          message: ShortcutHelper.formatShortcutForDisplay(
+            ShortcutValidator.getShortcutValue(item.shortcutKey) ?? '',
+          ),
           child: _navigationIcon(item.icon),
         ),
         selectedIcon: _navigationIcon(item.iconFilled),
@@ -2351,6 +2378,18 @@ class MainWindowScreenState extends State<MainWindowScreen>
               }
             },
           ),
+          BlocListener<LibraryBloc, LibraryState>(
+            listenWhen: (previous, current) =>
+                shouldDispatchHebrewBooksPathChange(current),
+            listener: (context, state) {
+              PluginRuntimeDispatcher.instance.dispatchEvent(
+                'settings.changed',
+                hebrewBooksPathSettingsChangedPayload(
+                  state.changedHebrewBooksPath!,
+                ),
+              );
+            },
+          ),
           BlocListener<IndexingBloc, IndexingState>(
             listenWhen: (previous, current) =>
                 (previous is IndexingInProgress) !=
@@ -2441,7 +2480,8 @@ class MainWindowScreenState extends State<MainWindowScreen>
                   previous.replaceHolyNames != current.replaceHolyNames ||
                   previous.libraryViewMode != current.libraryViewMode ||
                   previous.copyWithHeaders != current.copyWithHeaders ||
-                  previous.copyHeaderFormat != current.copyHeaderFormat;
+                  previous.copyHeaderFormat != current.copyHeaderFormat ||
+                  previous.settingsLanguageCode != current.settingsLanguageCode;
             },
             listener: (context, current) {
               final previous = _prevSettingsState ?? SettingsState.initial();
@@ -2457,6 +2497,15 @@ class MainWindowScreenState extends State<MainWindowScreen>
 
               if (previous.isDarkMode != current.isDarkMode) {
                 dispatch(SettingsRepository.keyDarkMode, current.isDarkMode);
+              }
+              if (previous.settingsLanguageCode !=
+                  current.settingsLanguageCode) {
+                dispatch(
+                  SettingsRepository.keySettingsLanguage,
+                  pluginLocalePayload(
+                    code: current.settingsLanguageCode,
+                  )['language']!,
+                );
               }
               if (previous.followSystemTheme != current.followSystemTheme) {
                 dispatch(
@@ -2651,12 +2700,13 @@ class MainWindowScreenState extends State<MainWindowScreen>
             },
           ),
           // סנכרון רשימת הטאבים הפתוחים ל-Jump List של שורת המשימות (Windows).
-          // נדלק כשהכותרות או סדרן משתנים; השירות עצמו no-op מחוץ ל-Windows.
+          // נדלק כשרשימת הטאבים מוחלפת; השירות עצמו no-op מחוץ ל-Windows,
+          // ומסנן כותרות שלא השתנו.
           BlocListener<TabsBloc, TabsState>(
-            listenWhen: (previous, current) => !listEquals(
-              previous.tabs.map((tab) => tab.title).toList(),
-              current.tabs.map((tab) => tab.title).toList(),
-            ),
+            // הרשימה נשמרת כאובייקט זהה כשהיא לא משתנה, ולכן בדיקת הזהות
+            // מספיקה וחוסכת מיפוי של כל הכותרות בכל שינוי מצב.
+            listenWhen: (previous, current) =>
+                !identical(previous.tabs, current.tabs),
             listener: (context, state) => _jumpListService.sync(state.tabs),
           ),
           // settings.changed עבור selectedCity ו-calendarType —
@@ -2892,11 +2942,17 @@ class MainWindowScreenState extends State<MainWindowScreen>
                         Column(
                           children: [
                             if (!isImmersive)
-                              CustomTitleBar(
-                                onReadingSettingsPressed:
-                                    _toggleReadingSettingsPanel,
-                                isReadingSettingsPanelOpen:
-                                    _isReadingSettingsPanelOpen,
+                              // מסגרת החלון יושבת מעל ה-scrim של פאנל הכלים;
+                              // Listener פסיבי סוגר בלי לחטוף את הלחיצה.
+                              Listener(
+                                behavior: HitTestBehavior.translucent,
+                                onPointerDown: (_) => _closeToolsLauncher(),
+                                child: CustomTitleBar(
+                                  onReadingSettingsPressed:
+                                      _toggleReadingSettingsPanel,
+                                  isReadingSettingsPanelOpen:
+                                      _isReadingSettingsPanelOpen,
+                                ),
                               ),
                             Expanded(
                               child: OrientationBuilder(
@@ -2927,7 +2983,9 @@ class MainWindowScreenState extends State<MainWindowScreen>
                                         onClose: _closeToolsLauncher,
                                         alignment:
                                             AlignmentDirectional.centerStart,
-                                        width: 400,
+                                        // רחב מספיק שארבע הקוביות שבשורה יהיו
+                                        // מרווחות, ועדיין לא חמש.
+                                        width: 440,
                                         deferChildBuildOnOpen: true,
                                         child: ToolsLauncherPanel(
                                           onClose: _closeToolsLauncher,
@@ -3508,8 +3566,9 @@ class MainWindowScreenState extends State<MainWindowScreen>
     final item = _navData[index];
     final isSelected =
         selectedOverride ?? (_getActiveNavigationIndex(currentScreen) == index);
-    final tooltip = (ShortcutValidator.getShortcutValue(item.shortcutKey) ?? '')
-        .toUpperCase();
+    final tooltip = ShortcutHelper.formatShortcutForDisplay(
+      ShortcutValidator.getShortcutValue(item.shortcutKey) ?? '',
+    );
 
     final step = _tourCubit.state.currentStep;
     final isTourHighlighted = _isTourNavigationItemHighlighted(

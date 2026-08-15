@@ -64,12 +64,26 @@ class AppSurfaces {
   static Color cardSelectionOverlay(BuildContext context) =>
       Theme.of(context).colorScheme.secondaryContainer.withValues(alpha: 0.3);
 
+  /// רקע כפתור סרגל במצב נבחר (BarButton, BarSplitButton).
+  static Color barButtonSelected(ColorScheme cs) =>
+      cs.onSurface.withValues(alpha: 0.12);
+
   /// רקע פריט נבחר ברשימת ניווט (TOC, מפרשים וכד').
   ///
   /// 30% primaryContainer — מספק הדגשה עדינה שמסמנת בחירה
   /// מבלי לכבות את הנוסח על גביה.
   static Color selectedItem(ColorScheme cs) =>
       cs.primaryContainer.withValues(alpha: 0.3);
+
+  /// רקע הפסקה הנבחרת במסך העיון — השורה הפעילה בספר.
+  ///
+  /// ברירת מחדל: 8% primary — רמז עדין של הצבע הראשי. בערכת "לבן"
+  /// (מצב בהיר, מזוהה ע"י surface לבן מוחלט שהוגדר ב-createColorScheme)
+  /// הרקע בהיר יותר — F8FAFC — כדי שהבחירה תהיה עדינה וקרובה ללבן.
+  static Color paragraphSelectionBackground(ColorScheme cs) =>
+      cs.surface == Colors.white
+      ? const Color(0xFFF8FAFC)
+      : cs.primary.withValues(alpha: 0.08);
 
   /// רקע הדגשה לשורה שמעליה מרחפים בגרירה (drag target).
   ///
@@ -108,13 +122,10 @@ class AppSurfaces {
       ? cs.primary.withValues(alpha: 0.55)
       : cs.outlineVariant.withValues(alpha: 0.35);
 
-  /// צל כרטיס החלונית — מרים אותה מעל הרקע בלי קו מפריד.
-  static Color paneCardShadow(ColorScheme cs, {required bool isActive}) =>
-      cs.shadow.withValues(alpha: isActive ? 0.16 : 0.08);
-
   /// ידית המפריד בין חלוניות — נראית רק בהצבעה, בגרירה או בפוקוס.
+  /// ההיעלמות היא באלפא של אותו גוון, כדי שהדהייה תהיה שקיפות בלבד.
   static Color paneDividerHandle(ColorScheme cs, {required bool isActive}) =>
-      isActive ? cs.primary : Colors.transparent;
+      isActive ? cs.primary : cs.primary.withValues(alpha: 0);
 
   /// רקע רצועת [PanelOpenHandle] — מתפוגג מעט במצב רגיל, אטום יותר ב-hover.
   static Color panelOpenHandle(ColorScheme cs, {required bool isHovering}) =>

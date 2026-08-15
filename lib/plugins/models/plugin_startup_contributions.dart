@@ -2,7 +2,8 @@
 ///
 /// נקראות ומופעלות ע"י Flutter בלי להרים מנוע JS. דורשות את ההרשאה
 /// `app.startup_contributions`, וכל קטגוריה כפופה גם להרשאת התחום שלה
-/// (`reader.toolbar` / `reader.context_menu` / `published_data.write`).
+/// (`reader.toolbar` / `reader.context_menu` / `search.dialog` /
+/// `published_data.write`).
 class PluginStartupContributions {
   /// נושא הפעלה מדומה ב-[activationEvents]: מרים את מופע הרקע של התוסף
   /// זמן קצר אחרי שעליית התוכנה הסתיימה (ולא כחלק ממנה).
@@ -18,6 +19,17 @@ class PluginStartupContributions {
   /// המפתח נשמר עם קידומת `manifest:` — רשומות אלו בבעלות המניפסט.
   final List<Map<String, dynamic>> publishedData;
 
+  /// תכניות חישוב שה-Host מריץ ללא מנוע JavaScript.
+  final List<Map<String, dynamic>> programs;
+
+  /// שורות סטטיות שמוצגות בתחתית דיאלוג החיפוש.
+  final List<Map<String, dynamic>> searchDialogItems;
+
+  /// קונפיגורציות מהדורות מקבילות חיצוניות — טבלת מיפוי של מקור נתונים
+  /// מוכרז שמקשרת מזהי ספק חיצוני לספרי אוצריא (ראו
+  /// PluginExternalEditionsRegistry).
+  final List<Map<String, dynamic>> externalEditions;
+
   /// נושאי אירועים שמעירים את מופע הרקע של התוסף בעצלנות (בלי מנוע חי
   /// עד שאירוע כזה קורה בפועל), או [startupActivationTopic].
   final List<String> activationEvents;
@@ -30,6 +42,9 @@ class PluginStartupContributions {
     this.toolbarItems = const [],
     this.contextMenuItems = const [],
     this.publishedData = const [],
+    this.programs = const [],
+    this.searchDialogItems = const [],
+    this.externalEditions = const [],
     this.activationEvents = const [],
     this.keepAlive = false,
   });
@@ -38,6 +53,9 @@ class PluginStartupContributions {
       toolbarItems.isEmpty &&
       contextMenuItems.isEmpty &&
       publishedData.isEmpty &&
+      programs.isEmpty &&
+      searchDialogItems.isEmpty &&
+      externalEditions.isEmpty &&
       activationEvents.isEmpty;
 
   /// האם קיימת פעולה שבאמת עשויה להרים את מנוע הרקע.
@@ -47,14 +65,23 @@ class PluginStartupContributions {
       contextMenuItems.any(_contextMenuItemActivatesBackground);
 
   static bool _toolbarItemActivatesBackground(Map<String, dynamic> item) {
-    if (item['type'] == 'menu') {
+    if (item.containsKey('binding') ||
+        item.containsKey('action') ||
+        item.containsKey('childrenBinding')) {
+      return false;
+    }
+    final type = item['type'];
+    if (type == 'menu' || type == 'split') {
       final children = item['children'];
-      return children is List &&
+      final childActivates =
+          children is List &&
           children.whereType<Map>().any(
             (child) => _toolbarItemActivatesBackground(
               Map<String, dynamic>.from(child),
             ),
           );
+      // בלחצן מפוצל גם הפעולה הראשית עצמה מגיעה למנוע התוסף.
+      return childActivates || (type == 'split' && item['openPlugin'] != true);
     }
     return item['openPlugin'] != true;
   }
@@ -97,6 +124,9 @@ class PluginStartupContributions {
       toolbarItems: mapList('toolbarItems'),
       contextMenuItems: mapList('contextMenuItems'),
       publishedData: mapList('publishedData'),
+      programs: mapList('programs'),
+      searchDialogItems: mapList('searchDialogItems'),
+      externalEditions: mapList('externalEditions'),
       activationEvents: events is List
           ? [
               for (final entry in events)
@@ -111,6 +141,9 @@ class PluginStartupContributions {
     if (toolbarItems.isNotEmpty) 'toolbarItems': toolbarItems,
     if (contextMenuItems.isNotEmpty) 'contextMenuItems': contextMenuItems,
     if (publishedData.isNotEmpty) 'publishedData': publishedData,
+    if (programs.isNotEmpty) 'programs': programs,
+    if (searchDialogItems.isNotEmpty) 'searchDialogItems': searchDialogItems,
+    if (externalEditions.isNotEmpty) 'externalEditions': externalEditions,
     if (activationEvents.isNotEmpty) 'activationEvents': activationEvents,
     if (keepAlive) 'keepAlive': true,
   };

@@ -6,6 +6,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:flutter_spinbox/flutter_spinbox.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
 import 'package:otzaria/bookmarks/models/bookmark.dart';
 import 'package:otzaria/history/bloc/history_bloc.dart';
 import 'package:otzaria/history/bloc/history_event.dart';
@@ -20,12 +21,19 @@ import 'package:otzaria/models/books.dart';
 import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
 import 'package:otzaria/navigation/bloc/navigation_event.dart';
 import 'package:otzaria/navigation/bloc/navigation_state.dart';
+import 'package:otzaria/plugins/services/plugin_search_dialog_registry.dart';
+import 'package:otzaria/plugins/services/plugin_search_selection_preferences.dart';
 import 'package:otzaria/search/bloc/search_event.dart';
 import 'package:otzaria/search/models/search_configuration.dart';
 import 'package:otzaria/search/search_defaults.dart';
 import 'package:otzaria/search/view/search_dialog.dart';
 import 'package:otzaria/search/view/search_scope_menu.dart';
+import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
+import 'package:otzaria/tabs/bloc/tabs_event.dart';
+import 'package:otzaria/tabs/bloc/tabs_state.dart';
 import 'package:otzaria/tabs/models/searching_tab.dart';
+import 'package:otzaria_search_engine/otzaria_search_engine.dart'
+    show ResultsOrder;
 
 import '../support/search_engine_test_init.dart';
 import '../test_helpers/memory_cache_provider.dart';
@@ -41,6 +49,10 @@ class MockNavigationBloc extends MockBloc<NavigationEvent, NavigationState>
 
 class MockLibraryBloc extends MockBloc<LibraryEvent, LibraryState>
     implements LibraryBloc {}
+
+class MockTabsBloc extends MockBloc<TabsEvent, TabsState> implements TabsBloc {}
+
+class _FakeTabsEvent extends Fake implements TabsEvent {}
 
 /// LibraryBloc מדומה עם ספרייה ריקה — מספיק ל-parseCategoryQuery בדיאלוג.
 MockLibraryBloc _stubLibraryBloc() {
@@ -79,9 +91,355 @@ Future<void> main() async {
   // ה-Rust; הטסטים המסומנים מדולגים כשאין build נייטיבי זמין.
   final engineReady = await tryInitSearchEngine();
 
-  setUpAll(() async {
+  setUpAll(() => registerFallbackValue(_FakeTabsEvent()));
+
+  // מחסן טרי לכל טסט: טסט ששומר העדפת תצוגת תוצאות אחרת מזליג אותה לכל
+  // טאב חיפוש שייבנה אחריו בקובץ.
+  setUp(() async {
     await Settings.init(cacheProvider: MemoryCacheProvider());
   });
+
+  // בחירת שורת תוסף נשמרת בין דיאלוגים — בלי איפוס, טסט אחד מזליג לשני.
+  setUp(() async {
+    await PluginSearchSelectionPreferences.save(const {});
+  });
+
+  testWidgets(
+    'תרומה סטטית של תוסף מופיעה רק במצבים המותרים ומשביתה אפשרויות שהוגדרו',
+    (WidgetTester tester) async {
+      final historyBloc = MockHistoryBloc();
+      final indexingBloc = MockIndexingBloc();
+      final navigationBloc = MockNavigationBloc();
+      final registry = PluginSearchDialogRegistry.forTesting();
+      registry.registerPayload('test.plugin', {
+        'id': 'include-external',
+        'type': 'checkbox',
+        'title': 'חפש גם במקור חיצוני',
+        'defaultValue': true,
+        'visibleInModes': ['exact', 'advanced'],
+        'disabledSearchOptions': {
+          'advanced': ['word.partial'],
+        },
+      });
+      final theme = ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFB85C38)),
+      );
+
+      whenListen(
+        historyBloc,
+        const Stream<HistoryState>.empty(),
+        initialState: HistoryLoaded([]),
+      );
+      whenListen(
+        indexingBloc,
+        const Stream<IndexingState>.empty(),
+        initialState: IndexingInitial(),
+      );
+      whenListen(
+        navigationBloc,
+        const Stream<NavigationState>.empty(),
+        initialState: const NavigationState(currentScreen: Screen.search),
+      );
+
+      addTearDown(() async {
+        await tester.binding.setSurfaceSize(null);
+        registry.dispose();
+        await historyBloc.close();
+        await indexingBloc.close();
+        await navigationBloc.close();
+      });
+
+      await tester.binding.setSurfaceSize(const Size(1400, 900));
+      await tester.pumpWidget(
+        _buildDialogHarness(
+          theme: theme,
+          historyBloc: historyBloc,
+          indexingBloc: indexingBloc,
+          navigationBloc: navigationBloc,
+          dialog: SearchDialog(
+            initialSearchMode: SearchMode.exact,
+            pluginSearchDialogRegistry: registry,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final contribution = find.byKey(
+        const ValueKey('plugin-search-dialog-test.plugin-include-external'),
+      );
+      expect(contribution, findsOneWidget);
+      expect(tester.widget<CheckboxListTile>(contribution).value, isTrue);
+
+      await tester.tap(find.text('מתקדם').first);
+      await tester.pumpAndSettle();
+      expect(contribution, findsOneWidget);
+
+      final partialChip = find.byWidgetPredicate(
+        (widget) =>
+            widget is FilterChip && (widget.label as Text).data == 'חלק ממילה',
+      );
+      expect(tester.widget<FilterChip>(partialChip).onSelected, isNull);
+
+      await tester.ensureVisible(contribution);
+      await tester.tap(contribution);
+      await tester.pumpAndSettle();
+      expect(tester.widget<FilterChip>(partialChip).onSelected, isNotNull);
+
+      final fuzzyMode = find.text('מקורב').first;
+      await tester.ensureVisible(fuzzyMode);
+      await tester.tap(fuzzyMode);
+      await tester.pumpAndSettle();
+      expect(contribution, findsNothing);
+
+      await tester.pumpWidget(
+        _buildDialogHarness(
+          theme: theme,
+          historyBloc: historyBloc,
+          indexingBloc: indexingBloc,
+          navigationBloc: navigationBloc,
+          dialog: SearchDialog(
+            initialSearchMode: SearchMode.exact,
+            pluginSearchDialogRegistry: registry,
+            onSearch: (_, _, _, _, _, _) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(contribution, findsNothing);
+    },
+  );
+
+  testWidgets('שורת תוסף נצמדת לכרטיס האפשרויות במצב מדויק', (
+    WidgetTester tester,
+  ) async {
+    final historyBloc = MockHistoryBloc();
+    final indexingBloc = MockIndexingBloc();
+    final navigationBloc = MockNavigationBloc();
+    final registry = PluginSearchDialogRegistry.forTesting();
+    registry.registerPayload('test.plugin', {
+      'id': 'include-external',
+      'type': 'checkbox',
+      'title': 'חפש גם במקור חיצוני',
+      'visibleInModes': ['exact'],
+    });
+
+    whenListen(
+      historyBloc,
+      const Stream<HistoryState>.empty(),
+      initialState: HistoryLoaded([]),
+    );
+    whenListen(
+      indexingBloc,
+      const Stream<IndexingState>.empty(),
+      initialState: IndexingInitial(),
+    );
+    whenListen(
+      navigationBloc,
+      const Stream<NavigationState>.empty(),
+      initialState: const NavigationState(currentScreen: Screen.search),
+    );
+
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+      registry.dispose();
+      await historyBloc.close();
+      await indexingBloc.close();
+      await navigationBloc.close();
+    });
+
+    await tester.binding.setSurfaceSize(const Size(1400, 900));
+    await tester.pumpWidget(
+      _buildDialogHarness(
+        theme: ThemeData(useMaterial3: true),
+        historyBloc: historyBloc,
+        indexingBloc: indexingBloc,
+        navigationBloc: navigationBloc,
+        dialog: SearchDialog(
+          initialSearchMode: SearchMode.exact,
+          pluginSearchDialogRegistry: registry,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final optionsCard = tester.getRect(
+      find
+          .ancestor(
+            of: find.text('אפשרויות מילה'),
+            matching: find.byType(Container),
+          )
+          .first,
+    );
+    final contribution = tester.getRect(
+      find.byKey(
+        const ValueKey('plugin-search-dialog-test.plugin-include-external'),
+      ),
+    );
+
+    expect(contribution.top - optionsCard.bottom, lessThan(24));
+  });
+
+  testWidgets('בחירת שורת תוסף נזכרת בדיאלוג הבא', (
+    WidgetTester tester,
+  ) async {
+    final historyBloc = MockHistoryBloc();
+    final indexingBloc = MockIndexingBloc();
+    final navigationBloc = MockNavigationBloc();
+    final registry = PluginSearchDialogRegistry.forTesting();
+    registry.registerPayload('test.plugin', {
+      'id': 'include-external',
+      'type': 'checkbox',
+      'title': 'חפש גם במקור חיצוני',
+      'defaultValue': true,
+      'visibleInModes': ['exact'],
+    });
+
+    whenListen(
+      historyBloc,
+      const Stream<HistoryState>.empty(),
+      initialState: HistoryLoaded([]),
+    );
+    whenListen(
+      indexingBloc,
+      const Stream<IndexingState>.empty(),
+      initialState: IndexingInitial(),
+    );
+    whenListen(
+      navigationBloc,
+      const Stream<NavigationState>.empty(),
+      initialState: const NavigationState(currentScreen: Screen.search),
+    );
+
+    addTearDown(() async {
+      await tester.binding.setSurfaceSize(null);
+      registry.dispose();
+      await historyBloc.close();
+      await indexingBloc.close();
+      await navigationBloc.close();
+    });
+
+    Future<void> pumpDialog(Key key) async {
+      await tester.pumpWidget(
+        _buildDialogHarness(
+          theme: ThemeData(useMaterial3: true),
+          historyBloc: historyBloc,
+          indexingBloc: indexingBloc,
+          navigationBloc: navigationBloc,
+          dialog: SearchDialog(
+            key: key,
+            initialSearchMode: SearchMode.exact,
+            pluginSearchDialogRegistry: registry,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    await tester.binding.setSurfaceSize(const Size(1400, 900));
+    await pumpDialog(const ValueKey('first'));
+
+    final contribution = find.byKey(
+      const ValueKey('plugin-search-dialog-test.plugin-include-external'),
+    );
+    expect(tester.widget<CheckboxListTile>(contribution).value, isTrue);
+
+    await tester.ensureVisible(contribution);
+    await tester.tap(contribution);
+    await tester.pumpAndSettle();
+    expect(tester.widget<CheckboxListTile>(contribution).value, isFalse);
+
+    await pumpDialog(const ValueKey('second'));
+    expect(tester.widget<CheckboxListTile>(contribution).value, isFalse);
+  });
+
+  testWidgets(
+    'אישור שורת תוסף מנתב אליו payload מלא במקום לפתוח טאב חיפוש',
+    (
+      WidgetTester tester,
+    ) async {
+      final historyBloc = MockHistoryBloc();
+      final indexingBloc = MockIndexingBloc();
+      final navigationBloc = MockNavigationBloc();
+      final registry = PluginSearchDialogRegistry.forTesting();
+      final tab = SearchingTab(
+        'חיפוש',
+        'חכמה בינה',
+        initialConfiguration: const SearchConfiguration(
+          searchMode: SearchMode.exact,
+          distance: 4,
+        ),
+      );
+      tab.globalSearchOptions['קידומות דקדוקיות'] = true;
+      final launches = <(String, Map<String, dynamic>)>[];
+
+      registry.registerPayload('test.plugin', {
+        'id': 'include-external',
+        'type': 'checkbox',
+        'title': 'חפש גם במקור חיצוני',
+        'defaultValue': true,
+        'openPluginOnSubmit': true,
+        'visibleInModes': ['exact'],
+      });
+      whenListen(
+        historyBloc,
+        const Stream<HistoryState>.empty(),
+        initialState: HistoryLoaded([]),
+      );
+      whenListen(
+        indexingBloc,
+        const Stream<IndexingState>.empty(),
+        initialState: IndexingInitial(),
+      );
+      whenListen(
+        navigationBloc,
+        const Stream<NavigationState>.empty(),
+        initialState: const NavigationState(currentScreen: Screen.search),
+      );
+
+      addTearDown(() async {
+        registry.dispose();
+        tab.dispose();
+        await historyBloc.close();
+        await indexingBloc.close();
+        await navigationBloc.close();
+      });
+
+      await tester.pumpWidget(
+        _buildDialogHarness(
+          theme: ThemeData(useMaterial3: true),
+          historyBloc: historyBloc,
+          indexingBloc: indexingBloc,
+          navigationBloc: navigationBloc,
+          dialog: SearchDialog(
+            existingTab: tab,
+            pluginSearchDialogRegistry: registry,
+            pluginSearchSubmitLauncher: (pluginId, payload) {
+              launches.add((pluginId, payload));
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('חפש'));
+      await tester.pump();
+
+      expect(launches, hasLength(1));
+      expect(launches.single.$1, 'test.plugin');
+      expect(launches.single.$2['itemId'], 'include-external');
+      final request = launches.single.$2['request'] as Map<String, dynamic>;
+      expect(request['query'], 'חכמה בינה');
+      expect(request['mode'], 'exact');
+      expect(request['distance'], 4);
+      expect(request['facets'], ['/']);
+      expect(request['wordOptions'], {
+        'חכמה_0': {'קידומות דקדוקיות': true},
+        'בינה_1': {'קידומות דקדוקיות': true},
+      });
+    },
+    skip: !engineReady,
+  );
 
   testWidgets('תפריט ההיסטוריה משתמש ברקע של הדיאלוג', (
     WidgetTester tester,
@@ -895,4 +1253,104 @@ Future<void> main() async {
       reason: 'סיומות כלליות בלעדיות למצב המתקדם',
     );
   });
+
+  // המסלול הראשי של המשתמש: דיאלוג → "חפש" → טאב חדש. הטאב נבנה כאן עם
+  // configuration מפורשת, ולכן העדפות תצוגת התוצאות חייבות להיות מוזרקות בו
+  // במפורש — ברירת המחדל של הבנאי אינה חלה על מסלול זה.
+  testWidgets(
+    'טאב שנפתח מהדיאלוג נושא את המיון והאיחוד השמורים',
+    (WidgetTester tester) async {
+      final historyBloc = MockHistoryBloc();
+      final indexingBloc = MockIndexingBloc();
+      final navigationBloc = MockNavigationBloc();
+      final tabsBloc = MockTabsBloc();
+      final theme = ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFB85C38)),
+      );
+
+      whenListen(
+        historyBloc,
+        const Stream<HistoryState>.empty(),
+        initialState: HistoryLoaded([]),
+      );
+      whenListen(
+        indexingBloc,
+        const Stream<IndexingState>.empty(),
+        initialState: IndexingInitial(),
+      );
+      whenListen(
+        navigationBloc,
+        const Stream<NavigationState>.empty(),
+        initialState: const NavigationState(currentScreen: Screen.search),
+      );
+      whenListen(
+        tabsBloc,
+        const Stream<TabsState>.empty(),
+        initialState: const TabsState(tabs: [], currentTabIndex: 0),
+      );
+
+      addTearDown(() async {
+        await tester.binding.setSurfaceSize(null);
+        await historyBloc.close();
+        await indexingBloc.close();
+        await navigationBloc.close();
+        await tabsBloc.close();
+      });
+
+      SearchDefaults.saveResultGroupingDefault(ResultGroupingMode.sameSection);
+      SearchDefaults.saveSortOrderDefault(ResultsOrder.relevance);
+
+      await tester.binding.setSurfaceSize(const Size(1400, 900));
+      await tester.pumpWidget(
+        MultiBlocProvider(
+          providers: [
+            BlocProvider<HistoryBloc>.value(value: historyBloc),
+            BlocProvider<IndexingBloc>.value(value: indexingBloc),
+            BlocProvider<NavigationBloc>.value(value: navigationBloc),
+            BlocProvider<LibraryBloc>.value(value: _stubLibraryBloc()),
+            BlocProvider<TabsBloc>.value(value: tabsBloc),
+          ],
+          child: MaterialApp(
+            theme: theme,
+            home: Scaffold(
+              body: Builder(
+                builder: (context) => Center(
+                  child: ElevatedButton(
+                    onPressed: () => showDialog<void>(
+                      context: context,
+                      builder: (_) => const SearchDialog(),
+                    ),
+                    child: const Text('פתח'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('פתח'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).first, 'חכמה בינה');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('חפש'));
+      await tester.pumpAndSettle();
+
+      final captured = verify(() => tabsBloc.add(captureAny())).captured;
+      final addedTabs = captured.whereType<AddTab>().toList();
+      expect(addedTabs, hasLength(1));
+      final tab = addedTabs.single.tab as SearchingTab;
+      addTearDown(tab.dispose);
+
+      expect(
+        tab.searchBloc.state.resultGrouping,
+        ResultGroupingMode.sameSection,
+      );
+      expect(tab.searchBloc.state.sortBy, ResultsOrder.relevance);
+      // העטיפה מוסיפה להעדפות ואינה מחליפה את מה שנבחר בדיאלוג.
+      expect(tab.searchBloc.state.currentFacets, isNotEmpty);
+    },
+    skip: !engineReady,
+  );
 }

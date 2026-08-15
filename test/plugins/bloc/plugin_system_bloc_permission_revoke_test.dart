@@ -8,8 +8,13 @@ import 'package:otzaria/plugins/models/plugin_permission_grant.dart';
 import 'package:otzaria/plugins/models/plugin_toolbar_item.dart';
 import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
 import 'package:otzaria/plugins/services/context_menu_registry.dart';
+import 'package:otzaria/plugins/services/plugin_external_search_service.dart';
+import 'package:otzaria/plugins/services/plugin_in_book_search_service.dart';
 import 'package:otzaria/plugins/services/plugin_lazy_activation_service.dart';
 import 'package:otzaria/plugins/services/plugin_toolbar_registry.dart';
+import 'package:otzaria/plugins/declarative/models/declarative_program.dart';
+import 'package:otzaria/plugins/declarative/services/declarative_plugin_host_service.dart';
+import 'package:otzaria/models/books.dart';
 
 class _FakeRepo implements PluginRegistryRepository {
   @override
@@ -29,6 +34,28 @@ class _FakeRepo implements PluginRegistryRepository {
   dynamic noSuchMethod(Invocation i) => super.noSuchMethod(i);
 }
 
+class _FakeDeclarativeHost implements DeclarativePluginHost {
+  final removed = <String>[];
+
+  @override
+  void removePlugin(String pluginId) => removed.add(pluginId);
+
+  @override
+  Future<void> syncPlugins(List<InstalledPlugin> plugins) async {}
+
+  @override
+  Future<void> readerBookChanged(Book? book, {required String context}) async {}
+
+  @override
+  Future<void> dispatchAction(
+    String pluginId,
+    CompiledDeclarativeAction action,
+  ) async {}
+
+  @override
+  void dispose() {}
+}
+
 void main() {
   const toolbarItem = PluginToolbarItem(
     id: 'button',
@@ -41,6 +68,8 @@ void main() {
     PluginToolbarRegistry.instance.removeAll('p1');
     ContextMenuRegistry.instance.removeAll('p1');
     PluginLazyActivationService.instance.removePlugin('p1');
+    PluginExternalSearchService.instance.removePlugin('p1');
+    PluginInBookSearchService.instance.removePlugin('p1');
     PluginLazyActivationService.instance.backgroundDeactivator = null;
   });
 
@@ -81,6 +110,42 @@ void main() {
 
     expect(PluginToolbarRegistry.instance.getAll(), hasLength(1));
     expect(ContextMenuRegistry.instance.getAll(), hasLength(1));
+  });
+
+  test('כל שינוי הרשאה מבטל מיד תרומה דקלרטיבית פעילה', () async {
+    final host = _FakeDeclarativeHost();
+    final bloc = PluginSystemBloc(
+      repository: _FakeRepo(),
+      declarativeHost: host,
+    );
+    addTearDown(bloc.close);
+
+    bloc.add(
+      const SetPluginPermissionRequested(
+        pluginId: 'p1',
+        permission: 'reader.open',
+        granted: false,
+      ),
+    );
+    await expectLater(bloc.stream, emitsThrough(isA<PluginSystemLoaded>()));
+
+    expect(host.removed, ['p1']);
+  });
+
+  test('שלילת reader.open מסירה ספקי חיפוש של התוסף', () async {
+    PluginExternalSearchService.instance.register('external-p1', 'p1');
+    PluginInBookSearchService.instance.register('in-book-p1', 'p1');
+
+    await revoke('reader.open');
+
+    expect(
+      PluginExternalSearchService.instance.hasProvider('external-p1'),
+      isFalse,
+    );
+    expect(
+      PluginInBookSearchService.instance.hasProvider('in-book-p1'),
+      isFalse,
+    );
   });
 
   for (final permission in [

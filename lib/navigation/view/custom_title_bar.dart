@@ -11,6 +11,7 @@ import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
+import 'package:otzaria/shortcuts/shortcut_helper.dart';
 import 'package:otzaria/navigation/bloc/navigation_state.dart';
 import 'package:otzaria/navigation/view/reading_tab_strip.dart';
 import 'package:otzaria/theme/app_surfaces.dart';
@@ -79,6 +80,13 @@ const double _kTabCloseHideBelowWidth = 80.0;
 /// כשהחלוקה השווה יורדת מתחת לזה, שאר הטאבים מתחלקים ביתרה.
 const double _kTabSelectedMinWidth = 60.0;
 
+/// מתחת לרוחב הזה הריפודים בולעים את כל רוחב הכרטיסיה ולא נותר בה פיקסל
+/// לכותרת, לאייקונים או ל-X — ולכן התוכן שלה אינו נבנה כלל.
+const double _kTabContentMinWidth = 12.0;
+
+/// גובה גוף הכרטיסיה, בלי המפריד שלצדה.
+const double _kTabBodyHeight = 32.0;
+
 /// רוחבי הטאבים בשורה: הנבחר עשוי להיות רחב מהשאר (ראה [_kTabSelectedMinWidth]).
 typedef _TabWidths = ({double selected, double unselected});
 
@@ -107,6 +115,10 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
 
   // הבחירה נדחית לשחרור כדי שתחילת גרירה לא תחליף את התצוגה.
   OpenedTab? _pendingTabSelection;
+
+  // הטאב שהעכבר מעליו. שדה ולא משתנה מקומי ב-_buildTab: rebuild של ההורה היה
+  // מאפס אותו, וה-X שמוצג רק בריחוף היה נמחק מתחת לסמן לפני שהלחיצה נורית.
+  OpenedTab? _hoveredTab;
 
   /// המקש שמפעיל בחירה מרובה: Ctrl בכל הפלטפורמות, Command במק.
   bool get _isMultiSelectModifierPressed {
@@ -344,21 +356,23 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
                 IconButton(
                   key: tourTitleBarHistoryButtonTargetKey,
                   icon: const Icon(FluentIcons.history_24_regular, size: 18),
-                  tooltip: 'הצג היסטוריה (${historyShortcut.toUpperCase()})',
+                  tooltip:
+                      'הצג היסטוריה (${ShortcutHelper.formatShortcutForDisplay(historyShortcut)})',
                   onPressed: () => _showHistoryDialog(context),
                   style: _kIconButtonStyle,
                 ),
                 IconButton(
                   key: tourTitleBarBookmarkButtonTargetKey,
                   icon: const Icon(FluentIcons.bookmark_24_regular, size: 18),
-                  tooltip: 'הצג סימניות (${bookmarksShortcut.toUpperCase()})',
+                  tooltip:
+                      'הצג סימניות (${ShortcutHelper.formatShortcutForDisplay(bookmarksShortcut)})',
                   onPressed: () => _showBookmarksDialog(context),
                   style: _kIconButtonStyle,
                 ),
                 IconButton(
                   icon: const Icon(FluentIcons.add_square_24_regular, size: 18),
                   tooltip:
-                      'החלף שולחן עבודה (${workspaceShortcut.toUpperCase()})',
+                      'החלף שולחן עבודה (${ShortcutHelper.formatShortcutForDisplay(workspaceShortcut)})',
                   onPressed: () => _showSaveWorkspaceDialog(context),
                   style: _kIconButtonStyle,
                 ),
@@ -559,7 +573,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
         behavior: HitTestBehavior.opaque,
         child: SizedBox(
           width: tabWidth,
-          child: _buildTab(context, tab, state, tabWidth),
+          child: _buildTab(context, tab, index, state, tabWidth),
         ),
       ),
     );
@@ -744,19 +758,130 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
     }
   }
 
-  Widget _buildTab(
+  /// רקע הכרטיסיה: סימון בחירה מרובה, ואחריו הכרטיסיה הפעילה.
+  CustomPainter? _tabBackgroundPainter(
     BuildContext context,
     OpenedTab tab,
+    TabsState state, {
+    required bool isSelected,
+  }) {
+    final colorScheme = Theme.of(context).colorScheme;
+    if (state.selectedTabs.contains(tab)) {
+      return _TabBackgroundPainter(colorScheme.secondaryContainer);
+    }
+    return isSelected
+        ? _TabBackgroundPainter(AppSurfaces.topBarBackground(context))
+        : null;
+  }
+
+  /// הצללת הריחוף, שמצוירת מעל הרקע.
+  CustomPainter? _tabHoverPainter(
+    BuildContext context, {
+    required bool isHovered,
+    required bool isSelected,
+  }) {
+    if (!isHovered || isSelected) return null;
+    return _TabBackgroundPainter(
+      Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.08),
+    );
+  }
+
+  /// כרטיסיה שהצטמצמה מתחת ל-[_kTabContentMinWidth]. כל שכבות האינטראקציה
+  /// נשמרות; רק התוכן — שאין לו כאן ולו פיקסל אחד — אינו נבנה.
+  Widget _buildNarrowTab(
+    BuildContext context,
+    OpenedTab tab,
+    int index,
     TabsState state,
     double tabWidth,
   ) {
-    final index = state.tabs.indexOf(tab);
+    final isSelected = index == state.currentTabIndex;
+    final showLeadingDivider = index == 0
+        ? !isSelected
+        : !isSelected && index - 1 != state.currentTabIndex;
+    bool isTabHovered = identical(_hoveredTab, tab);
+
+    return _wrapWithTabPointer(
+      context,
+      tab,
+      index,
+      state,
+      child: AppContextMenuRegion(
+        menuBuilder: (menuCtx, _) =>
+            _buildTabContextMenuEntries(menuCtx, tab, state),
+        child: StatefulBuilder(
+          builder: (context, setLocalState) => MouseRegion(
+            onEnter: (_) => setLocalState(() {
+              isTabHovered = true;
+              _hoveredTab = tab;
+            }),
+            onExit: (_) => setLocalState(() {
+              isTabHovered = false;
+              if (identical(_hoveredTab, tab)) _hoveredTab = null;
+            }),
+            child: Row(
+              children: [
+                if (showLeadingDivider)
+                  Container(
+                    // ברוחב שברירי המפריד עצמו רחב מהכרטיסיה כולה, וקו קבוע
+                    // של 1 היה גולש ממנה.
+                    width: math.min(1.0, tabWidth),
+                    height: 24,
+                    margin: const EdgeInsets.only(top: 6, bottom: 6),
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                  ),
+                Expanded(
+                  child: Container(
+                    constraints: const BoxConstraints(
+                      maxHeight: _kTabBodyHeight,
+                    ),
+                    padding: EdgeInsets.only(
+                      left: 3,
+                      right: index == 0 ? 0 : 3,
+                    ),
+                    // הגובה מפורש: ל-CustomPaint ללא ילד אין גודל טבעי, והוא
+                    // היה מתכווץ לאפס — גם הציור וגם שטח הלחיצה.
+                    child: CustomPaint(
+                      size: const Size.fromHeight(_kTabBodyHeight),
+                      painter: _tabBackgroundPainter(
+                        context,
+                        tab,
+                        state,
+                        isSelected: isSelected,
+                      ),
+                      foregroundPainter: _tabHoverPainter(
+                        context,
+                        isHovered: isTabHovered,
+                        isSelected: isSelected,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTab(
+    BuildContext context,
+    OpenedTab tab,
+    int index,
+    TabsState state,
+    double tabWidth,
+  ) {
+    if (tabWidth < _kTabContentMinWidth) {
+      return _buildNarrowTab(context, tab, index, state, tabWidth);
+    }
+
     final isSelected = index == state.currentTabIndex;
     final closeTabShortcut =
         Settings.getValue<String>('key-shortcut-close-tab') ?? 'ctrl+w';
 
     bool isTabActive(int tabIndex) => tabIndex == state.currentTabIndex;
-    bool isTabHovered = false;
+    bool isTabHovered = identical(_hoveredTab, tab);
 
     // כותרת בשורה אחת שמוצגת מההתחלה (RTL: מימין) ונדהית רק בקצה הסוף, כמו
     // כרום. TextOverflow.fade/clip של פלאטר מציג בעברית את *סוף* הכותרת
@@ -911,7 +1036,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
           // שתתכווץ ותטושטש לקראת הסוף. ה-X/נעץ מוצגים רק אם נשאר להם מקום.
           Expanded(
             child: Container(
-              constraints: const BoxConstraints(maxHeight: 32),
+              constraints: const BoxConstraints(maxHeight: _kTabBodyHeight),
               padding: EdgeInsets.only(
                 left: outerPad,
                 right: index == 0 ? 0 : outerPad,
@@ -919,18 +1044,17 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
               child: CustomPaint(
                 // טאב בבחירה מרובה נצבע ב-secondaryContainer כדי לסמן שהוא
                 // חלק מהקבוצה שתיסגר יחד.
-                painter: state.selectedTabs.contains(tab)
-                    ? _TabBackgroundPainter(colorScheme.secondaryContainer)
-                    : isSelected
-                    ? _TabBackgroundPainter(
-                        AppSurfaces.topBarBackground(context),
-                      )
-                    : null,
-                foregroundPainter: isTabHovered && !isSelected
-                    ? _TabBackgroundPainter(
-                        colorScheme.onSurface.withValues(alpha: 0.08),
-                      )
-                    : null,
+                painter: _tabBackgroundPainter(
+                  context,
+                  tab,
+                  state,
+                  isSelected: isSelected,
+                ),
+                foregroundPainter: _tabHoverPainter(
+                  context,
+                  isHovered: isTabHovered,
+                  isSelected: isSelected,
+                ),
                 child: Tab(
                   child: Padding(
                     padding: EdgeInsets.symmetric(horizontal: innerPad),
@@ -965,7 +1089,9 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
                           if (showClose)
                             Tooltip(
                               preferBelow: false,
-                              message: closeTabShortcut.toUpperCase(),
+                              message: ShortcutHelper.formatShortcutForDisplay(
+                                closeTabShortcut,
+                              ),
                               child: MetaData(
                                 metaData: _kTabCloseButtonHitMarker,
                                 child: IconButton(
@@ -1002,12 +1128,49 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
       );
     }
 
+    return _wrapWithTabPointer(
+      context,
+      tab,
+      index,
+      state,
+      child: AppContextMenuRegion(
+        menuBuilder: (menuCtx, _) =>
+            _buildTabContextMenuEntries(menuCtx, tab, state),
+        child: StatefulBuilder(
+          builder: (context, setLocalState) {
+            return MouseRegion(
+              // setLocalState מצייר מחדש את הטאב הזה בלבד; השדה שומר את המצב
+              // כך שישרוד rebuild של שורת הטאבים.
+              onEnter: (_) => setLocalState(() {
+                isTabHovered = true;
+                _hoveredTab = tab;
+              }),
+              onExit: (_) => setLocalState(() {
+                isTabHovered = false;
+                if (identical(_hoveredTab, tab)) _hoveredTab = null;
+              }),
+              child: buildTabAppearance(setLocalState),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  /// עוטף כרטיסיה בטיפול הלחיצות שלה.
+  ///
+  /// בחירת הטאב על pointer-down: לחצן אמצעי סוגר, לחצן ראשי (או תחילת גרירה)
+  /// בוחר. לחצן ימני אינו בוחר — אחרת הבחירה גוררת rebuild שהורס את
+  /// ה-AppContextMenuRegion לפני שתפריט ההקשר נפתח. משתמשים ב-Listener פסיבי
+  /// כי הגרירה המיידית (ReorderableDragStartListener) זוכה ב-arena וחוסמת onTap.
+  Widget _wrapWithTabPointer(
+    BuildContext context,
+    OpenedTab tab,
+    int index,
+    TabsState state, {
+    required Widget child,
+  }) {
     return Listener(
-      // בחירת הטאב על pointer-down: לחצן אמצעי סוגר, לחצן ראשי (או תחילת
-      // גרירה) בוחר. לחצן ימני אינו בוחר — אחרת הבחירה גוררת rebuild שהורס את
-      // ה-AppContextMenuRegion לפני שתפריט ההקשר נפתח. משתמשים ב-Listener
-      // פסיבי כי הגרירה המיידית (ReorderableDragStartListener) זוכה ב-arena
-      // וחוסמת onTap.
       onPointerUp: (_) {
         final pending = _pendingTabSelection;
         _pendingTabSelection = null;
@@ -1048,19 +1211,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
           _pendingTabSelection = tab;
         }
       },
-      child: AppContextMenuRegion(
-        menuBuilder: (menuCtx, _) =>
-            _buildTabContextMenuEntries(menuCtx, tab, state),
-        child: StatefulBuilder(
-          builder: (context, setLocalState) {
-            return MouseRegion(
-              onEnter: (_) => setLocalState(() => isTabHovered = true),
-              onExit: (_) => setLocalState(() => isTabHovered = false),
-              child: buildTabAppearance(setLocalState),
-            );
-          },
-        ),
-      ),
+      child: child,
     );
   }
 

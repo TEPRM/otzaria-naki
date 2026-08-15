@@ -8,7 +8,6 @@ import 'package:otzaria/shortcuts/shortcut_helper.dart';
 import 'package:otzaria/models/link_types.dart';
 import 'package:otzaria/text_book/utils/commentary_type_filter.dart';
 import 'package:otzaria/text_book/utils/commentator_group_builder.dart';
-import 'package:otzaria/text_book/utils/per_book_display_settings.dart';
 import 'package:otzaria/text_book/utils/toc_unit_label.dart';
 import 'package:otzaria/theme/app_surfaces.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
@@ -36,6 +35,7 @@ import 'package:otzaria/widgets/lists/commentators_selection_panel.dart';
 import 'package:otzaria/settings/engine/settings_bloc.dart';
 import 'package:otzaria/settings/engine/settings_state.dart';
 import 'package:otzaria/widgets/layout/adaptive_side_pane.dart';
+import 'package:otzaria/widgets/layout/reading_area_width.dart';
 import 'package:otzaria/widgets/layout/split_pane_content_inset.dart';
 import 'package:otzaria/widgets/navigation/responsive_action_bar.dart';
 import 'package:otzaria/widgets/navigation/app_top_bar.dart';
@@ -286,16 +286,24 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
     navExpandedChapter: _navExpandedChapter,
   );
 
-  void _toggleAndSaveNikud(BuildContext context, TextBookLoaded state) {
-    final newValue = !state.removeNikud;
-    context.read<TextBookBloc>().add(ToggleNikud(newValue));
-    savePerBookDisplaySettings(context, state, removeNikud: newValue);
+  /// הכפתורים שולטים במצב המפרשים. הבחירה אינה נשמרת פר-ספר — קובץ ההגדרות
+  /// משותף עם כרטיסיית הטקסט, ושמירה כאן הייתה דורסת את הטקסט הראשי שם.
+  void _toggleCommentaryNikud(BuildContext context, TextBookLoaded state) {
+    context.read<TextBookBloc>().add(
+      ToggleNikud(!state.commentaryRemoveNikud, applyToCommentaries: true),
+    );
   }
 
-  void _toggleAndSavePunctuation(BuildContext context, TextBookLoaded state) {
-    final newValue = !state.removePunctuation;
-    context.read<TextBookBloc>().add(TogglePunctuation(newValue));
-    savePerBookDisplaySettings(context, state, removePunctuation: newValue);
+  void _toggleCommentaryPunctuation(
+    BuildContext context,
+    TextBookLoaded state,
+  ) {
+    context.read<TextBookBloc>().add(
+      TogglePunctuation(
+        !state.commentaryRemovePunctuation,
+        applyToCommentaries: true,
+      ),
+    );
   }
 
   /// מחיל מצב חדש שחושב ע"י אחד הרדוסרים הטהורים (ראה [reduceChevronTap]
@@ -446,6 +454,9 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
 
   @override
   void dispose() {
+    if (!widget.tab.bloc.isClosed) {
+      widget.tab.bloc.add(const ResetCommentaryDisplayOverrides());
+    }
     FocusRepository().unregisterTabContentFocusRequester(widget.tab);
     _navTabController.dispose();
     _typeSelection.dispose();
@@ -657,7 +668,10 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
                     prev.links != curr.links ||
                     prev.availableCommentators != curr.availableCommentators ||
                     prev.removeNikud != curr.removeNikud ||
-                    prev.removePunctuation != curr.removePunctuation;
+                    prev.commentaryRemoveNikud != curr.commentaryRemoveNikud ||
+                    prev.removePunctuation != curr.removePunctuation ||
+                    prev.commentaryRemovePunctuation !=
+                        curr.commentaryRemovePunctuation;
               }
               return true;
             },
@@ -814,14 +828,11 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
       builder: (context, constraints) {
         return BlocBuilder<SettingsBloc, SettingsState>(
           builder: (context, settingsState) {
-            // אותו חישוב כמו בתצוגת הטקסט הראשית (combined_book_screen):
-            // ערך שלילי = רמה (95%/90%/...), ערך 0 = ללא הגבלה.
-            var textMaxWidth = settingsState.textMaxWidth;
-            if (textMaxWidth < 0) {
-              final level = (-textMaxWidth).toInt();
-              final widthPercent = 1.0 - (level * 0.05);
-              textMaxWidth = constraints.maxWidth * widthPercent;
-            }
+            final textMaxWidth = textColumnMaxWidthOf(
+              context,
+              setting: settingsState.textMaxWidth,
+              availableWidth: constraints.maxWidth,
+            );
 
             if (textMaxWidth > 0) {
               // יישור לראש (topCenter) ולא Center — אחרת כשהמפרשים מכווצים
@@ -1033,38 +1044,43 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
               // ניקוד
               ActionButtonData(
                 widget: BarButton.icon(
-                  tooltip: state.removeNikud ? 'הצג ניקוד' : 'הסתר ניקוד',
-                  icon: state.removeNikud
+                  tooltip: state.commentaryRemoveNikud
+                      ? 'הצג ניקוד'
+                      : 'הסתר ניקוד',
+                  icon: state.commentaryRemoveNikud
                       ? OtzariaIcons.alef_with_score_24_regular
                       : OtzariaIcons.alef_deletion_24_regular,
                   compact: context.read<SettingsBloc>().state.compactMenuMode,
-                  onPressed: () => _toggleAndSaveNikud(context, state),
+                  onPressed: () => _toggleCommentaryNikud(context, state),
                 ),
-                icon: state.removeNikud
+                icon: state.commentaryRemoveNikud
                     ? OtzariaIcons.alef_with_score_24_regular
                     : OtzariaIcons.alef_deletion_24_regular,
-                tooltip: state.removeNikud ? 'הצג ניקוד' : 'הסתר ניקוד',
-                onPressed: () => _toggleAndSaveNikud(context, state),
+                tooltip: state.commentaryRemoveNikud
+                    ? 'הצג ניקוד'
+                    : 'הסתר ניקוד',
+                onPressed: () => _toggleCommentaryNikud(context, state),
               ),
-              // פיסוק (רק אם לא תנ"ך)
-              if (!state.isTanach)
-                ActionButtonData(
-                  widget: BarButton.icon(
-                    tooltip: state.removePunctuation
-                        ? 'הצג פיסוק'
-                        : 'הסתר פיסוק',
-                    icon: state.removePunctuation
-                        ? OtzariaIcons.alef_with_punctuation_24_regular
-                        : OtzariaIcons.alef_with_eraser_24_regular,
-                    compact: context.read<SettingsBloc>().state.compactMenuMode,
-                    onPressed: () => _toggleAndSavePunctuation(context, state),
-                  ),
-                  icon: state.removePunctuation
+              // פיסוק — מוצג גם בתנ"ך, כי התוכן כאן הוא מפרשים
+              ActionButtonData(
+                widget: BarButton.icon(
+                  tooltip: state.commentaryRemovePunctuation
+                      ? 'הצג פיסוק'
+                      : 'הסתר פיסוק',
+                  icon: state.commentaryRemovePunctuation
                       ? OtzariaIcons.alef_with_punctuation_24_regular
                       : OtzariaIcons.alef_with_eraser_24_regular,
-                  tooltip: state.removePunctuation ? 'הצג פיסוק' : 'הסתר פיסוק',
-                  onPressed: () => _toggleAndSavePunctuation(context, state),
+                  compact: context.read<SettingsBloc>().state.compactMenuMode,
+                  onPressed: () => _toggleCommentaryPunctuation(context, state),
                 ),
+                icon: state.commentaryRemovePunctuation
+                    ? OtzariaIcons.alef_with_punctuation_24_regular
+                    : OtzariaIcons.alef_with_eraser_24_regular,
+                tooltip: state.commentaryRemovePunctuation
+                    ? 'הצג פיסוק'
+                    : 'הסתר פיסוק',
+                onPressed: () => _toggleCommentaryPunctuation(context, state),
+              ),
               // הדפסת המפרשים המוצגים
               ActionButtonData(
                 widget: BarButton.icon(

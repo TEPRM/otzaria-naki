@@ -10,6 +10,8 @@ import 'package:otzaria/widgets/layout/split_pane_content_inset.dart';
 
 export 'pane_drop_geometry.dart'
     show
+        kMinPaneExtent,
+        kMinPaneRatio,
         kPaneCardMargin,
         kPaneDividerThickness,
         kPaneDividerThicknessTouch,
@@ -23,9 +25,6 @@ const double _kDividerHandleLength = 40;
 
 /// עיגול פינות כרטיס החלונית.
 const double kPaneCardRadius = 10;
-
-/// סכום ה-flex בין שתי החלוניות.
-const int _kFlexResolution = 1000;
 
 /// כמה זז המפריד בכל הקשה על חץ.
 const double _kKeyboardNudge = 24;
@@ -122,15 +121,6 @@ class PaneCard extends StatelessWidget {
                 color: AppSurfaces.paneCardBorder(cs, isActive: isActive),
               )
             : null,
-        boxShadow: isSplit
-            ? [
-                BoxShadow(
-                  color: AppSurfaces.paneCardShadow(cs, isActive: isActive),
-                  blurRadius: isActive ? 10 : 6,
-                  offset: const Offset(0, 1),
-                ),
-              ]
-            : null,
       ),
       child: ClipRRect(borderRadius: radius, child: child),
     );
@@ -199,11 +189,11 @@ class _SplitNodeState extends State<_SplitNode> {
     final availableExtent = _availableExtent;
     if (availableExtent == null) return;
 
-    // הגבול בפיקסלים שומר על חלונית קריאה בכל רוחב מסך.
-    final minRatio = (kMinPaneExtent / availableExtent).clamp(0.0, 0.5);
+    final minRatio = minPaneRatioFor(availableExtent);
     // אין לשנות יחס כשאין מקום לשתי חלוניות קריאות.
     if (minRatio >= 0.5) return;
-    _ratioNotifier.value = (_ratio + delta / availableExtent).clamp(
+    final effectiveRatio = _ratio.clamp(minRatio, 1 - minRatio);
+    _ratioNotifier.value = (effectiveRatio + delta / availableExtent).clamp(
       minRatio,
       1 - minRatio,
     );
@@ -227,14 +217,19 @@ class _SplitNodeState extends State<_SplitNode> {
     _commitDebounce = Timer(_kKeyboardCommitDelay, _commit);
   }
 
-  /// היחס שיושג בהזזה אחת, לדיווח לקורא מסך.
-  double _ratioAfterNudge({required bool towardFirst}) {
-    final extent = _availableExtent;
-    if (extent == null) return _ratio;
-    final minRatio = (kMinPaneExtent / extent).clamp(0.0, 0.5);
-    if (minRatio >= 0.5) return _ratio;
+  /// היחס שיושג בהזזה אחת מ-[from], לדיווח לקורא מסך.
+  /// [extent] מגיע מה-layout ולא מ-[_availableExtent], שאין לו מידה בבנייה
+  /// הראשונה — ואז המחוון היה מדווח יחס שלא ניתן להגיע אליו.
+  double _ratioAfterNudge(
+    double extent,
+    double from, {
+    required bool towardFirst,
+  }) {
+    if (extent <= 0) return from;
+    final minRatio = minPaneRatioFor(extent);
+    if (minRatio >= 0.5) return from;
     final delta = (towardFirst ? -_kKeyboardNudge : _kKeyboardNudge) / extent;
-    return (_ratio + delta).clamp(minRatio, 1 - minRatio);
+    return (from + delta).clamp(minRatio, 1 - minRatio);
   }
 
   void _commit() {
@@ -267,30 +262,52 @@ class _SplitNodeState extends State<_SplitNode> {
     return ValueListenableBuilder<double>(
       valueListenable: _ratioNotifier,
       builder: (context, ratio, _) {
-        // חלוקה ב-flex נמנעת מבניית תת-העץ בזמן layout.
-        final firstFlex = (ratio * _kFlexResolution).round().clamp(
-          1,
-          _kFlexResolution - 1,
-        );
+        return LayoutBuilder(
+          // גבול בין החלוניות על שבר פיקסל: חיתוך הכרטיס (hardEdge) מקצר את
+          // הרוחב לפיקסל שלם ומוחק את קו המסגרת של החלונית הפעילה.
+          builder: (context, constraints) {
+            final available = constraints.maxWidth - widget.thickness;
+            // גם יחס שנשמר לפני הרצפה היחסית לא יצייר רצועה במקום חלונית.
+            final minRatio = minPaneRatioFor(available);
+            final effectiveRatio = ratio.clamp(minRatio, 1 - minRatio);
+            final firstWidth = available > 0
+                ? (available * effectiveRatio).roundToDouble().clamp(
+                    0.0,
+                    available,
+                  )
+                : 0.0;
 
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(flex: firstFlex, child: firstChild),
-            _PaneDivider(
-              thickness: widget.thickness,
-              isTouch: widget.thickness == kPaneDividerThicknessTouch,
-              ratio: ratio,
-              increasedRatio: _ratioAfterNudge(towardFirst: false),
-              decreasedRatio: _ratioAfterNudge(towardFirst: true),
-              onDragStart: () => _dragging = true,
-              onDragUpdate: _onDragUpdate,
-              onDragEnd: _commit,
-              onReset: _resetRatio,
-              onNudge: (towardFirst) => _nudge(towardFirst: towardFirst),
-            ),
-            Expanded(flex: _kFlexResolution - firstFlex, child: secondChild),
-          ],
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // הילדים נבנים מחוץ ל-builder, ולכן פריסה מחדש אינה בונה
+                // מחדש את תצוגות הספרים.
+                SizedBox(width: firstWidth, child: firstChild),
+                _PaneDivider(
+                  thickness: widget.thickness,
+                  isTouch: widget.thickness == kPaneDividerThicknessTouch,
+                  // המחוון מדווח את היחס המצויר, לא יחס שמור שנחסם ברצפה.
+                  ratio: effectiveRatio,
+                  increasedRatio: _ratioAfterNudge(
+                    available,
+                    effectiveRatio,
+                    towardFirst: false,
+                  ),
+                  decreasedRatio: _ratioAfterNudge(
+                    available,
+                    effectiveRatio,
+                    towardFirst: true,
+                  ),
+                  onDragStart: () => _dragging = true,
+                  onDragUpdate: _onDragUpdate,
+                  onDragEnd: _commit,
+                  onReset: _resetRatio,
+                  onNudge: (towardFirst) => _nudge(towardFirst: towardFirst),
+                ),
+                Expanded(child: secondChild),
+              ],
+            );
+          },
         );
       },
     );
@@ -362,10 +379,11 @@ class _PaneDividerState extends State<_PaneDivider> {
     final colorScheme = Theme.of(context).colorScheme;
     final active = _hovering || _dragging || _focused;
 
+    // הגרירה אינה תובעת פוקוס: הוא היה נשאר על המפריד גם אחריה, והחצים
+    // ו-Home היו מזיזים אותו במקום לגלול את הספר.
     void handleDragStart(DragStartDetails _) {
+      _focusNode.unfocus();
       _setDragging(true);
-      // החצים ממשיכים לשלוט במפריד שנגרר.
-      _focusNode.requestFocus();
       widget.onDragStart();
     }
 
@@ -433,23 +451,20 @@ class _PaneDividerState extends State<_PaneDivider> {
             child: SizedBox(
               width: widget.thickness,
               child: Center(
-                child: AnimatedOpacity(
+                // דהייה בצבע ולא ב-AnimatedOpacity: אטימות חיה הופכת את המפריד
+                // ל-repaint boundary, ומסגרת החלונית שמצוירת אחריו נעלמת.
+                child: AnimatedContainer(
                   duration: const Duration(milliseconds: 140),
                   curve: Curves.easeOut,
-                  opacity: active ? 1 : 0,
-                  child: SizedBox(
-                    width: _kDividerHandleThickness,
-                    height: _kDividerHandleLength,
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        color: AppSurfaces.paneDividerHandle(
-                          colorScheme,
-                          isActive: active,
-                        ),
-                        borderRadius: BorderRadius.circular(
-                          _kDividerHandleThickness / 2,
-                        ),
-                      ),
+                  width: _kDividerHandleThickness,
+                  height: _kDividerHandleLength,
+                  decoration: BoxDecoration(
+                    color: AppSurfaces.paneDividerHandle(
+                      colorScheme,
+                      isActive: active,
+                    ),
+                    borderRadius: BorderRadius.circular(
+                      _kDividerHandleThickness / 2,
                     ),
                   ),
                 ),

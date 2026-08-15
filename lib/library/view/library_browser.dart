@@ -16,12 +16,14 @@ import 'package:otzaria/tools/calendar/helpers/daf_yomi_navigation.dart';
 import 'package:otzaria/library_update/bloc/library_update_bloc.dart';
 import 'package:otzaria/library/view/library_daf_yomi.dart';
 import 'package:otzaria/settings/services/custom_folders/bloc/custom_folders_bloc.dart';
+import 'package:otzaria/widgets/feedback/edge_scrollbar_behavior.dart';
 import 'package:otzaria/widgets/lists/filter_chips_widget.dart';
 import 'package:otzaria/navigation/view/main_window_screen.dart';
 import 'package:otzaria/library/view/grid_items.dart';
 import 'package:otzaria/library/view/otzar_book_dialog.dart';
 import 'package:otzaria/library/view/book_preview_panel.dart';
 import 'package:otzaria/library/view/library_empty_state_widget.dart';
+import 'package:otzaria/search/models/search_configuration.dart';
 import 'package:otzaria/search/view/search_dialog.dart';
 import 'package:otzaria/tabs/models/searching_tab.dart';
 import 'package:otzaria/library/view/library_panel_controller.dart';
@@ -875,7 +877,14 @@ class _LibraryBrowserState extends State<LibraryBrowser>
           // אין ספרייה — התצוגה המקדימה סגורה כפויה (אין ספרים להציג).
           isOpen: !isLibraryEmpty && _isPreviewPanelVisible(settingsState),
           alignment: AlignmentDirectional.centerStart, // שמאל בעברית (RTL)
-          mainContent: RepaintBoundary(child: mainContent),
+          // פס הגלילה של הספרייה בקצה ימין: ברירת המחדל בעברית היא הקצה
+          // השמאלי, שם נפגש התוכן עם חלונית התצוגה המקדימה.
+          mainContent: RepaintBoundary(
+            child: ScrollConfiguration(
+              behavior: const EdgeScrollbarBehavior.right(),
+              child: mainContent,
+            ),
+          ),
           paneContent: _buildPreviewPane(settingsState),
           paneWidth: previewPaneWidths.paneWidth,
           minMainContentWidth: 200,
@@ -1095,7 +1104,11 @@ class _LibraryBrowserState extends State<LibraryBrowser>
 
   void _openSearchDialog(BuildContext context, {String? searchQuery}) {
     final tab = searchQuery != null && searchQuery.isNotEmpty
-        ? SearchingTab('חיפוש', searchQuery)
+        ? SearchingTab(
+            'חיפוש',
+            searchQuery,
+            initialConfiguration: const SearchConfiguration(),
+          )
         : null;
     showDialog(
       context: context,

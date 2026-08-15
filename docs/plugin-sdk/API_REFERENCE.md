@@ -92,6 +92,8 @@ if (response.success) {
 | `app.getConnectivity` | 0.9.96 |
 | `library.findBooks` | 0.9.89 |
 | `library.getBookMetadata` | 0.9.89 |
+| `library.resolveBooks` | 0.9.97 |
+| `library.resolveCategoryPaths` | 0.9.97 |
 | `library.listRecentBooks` | 0.9.89 |
 | `library.getBookContent` | 0.9.89 |
 | `library.getBookToc` | 0.9.89 |
@@ -99,6 +101,7 @@ if (response.success) {
 | `library.getBookAltToc` | 0.9.96 |
 | `library.getTree` | 0.9.93 |
 | `network.fetch` | 0.9.93 |
+| `network.fetchStream` | 0.9.97 |
 | `network.download` | 0.9.93 |
 | `search.fullText` | 0.9.89 |
 | `search.query` | 0.9.97 |
@@ -161,10 +164,11 @@ if (response.success) {
 | `settings.get` | 0.9.89 |
 | `settings.getMany` | 0.9.89 |
 | `calendar.getSelectedDate` | 0.9.89 |
-| `calendar.getDailyTimes` | 0.9.89 |
-| `calendar.getHalachicTimes` | 0.9.89 |
+| `calendar.getDailyTimes` | 0.9.97 |
+| `calendar.getHalachicTimes` | 0.9.97 |
 | `calendar.getJewishDate` | 0.9.89 |
 | `calendar.getEvents` | 0.9.89 |
+| `calendar.getCities` | 0.9.97 |
 | `publishedData.upsert` | 0.9.89 |
 | `publishedData.remove` | 0.9.89 |
 | `publishedData.listOwn` | 0.9.89 |
@@ -235,12 +239,53 @@ const { data } = await Otzaria.call('app.getTheme');
 > **גופנים מוטמעים אוטומטית:** השמות שמגיעים ב-`typography.fontFamily` ו-`typography.commentatorsFontFamily` (כגון `FrankRuhlCLM`, `Shofar`, `NotoRashiHebrew`) נטענים אוטומטית ב-WebView של התוסף כ-`@font-face` עוד לפני ה-`plugin.boot`. אין צורך לארוז את קבצי הגופן בתוסף — מספיק להפנות לשם שהתקבל ב-CSS: `font-family: 'FrankRuhlCLM', serif;`. אם המשתמש בחר גופן מערכת (לא מובנה), ההזרקה האוטומטית מדלגת עליו וה-WebView ייפול חזרה ל-fallback של מערכת ההפעלה.
 
 ### `app.getLocale`
-מחזיר את השפה וכיוון הטקסט.
+מחזיר את שפת הממשק שבחר המשתמש (או שפת המערכת, בזיהוי אוטומטי) ואת כיוון
+הטקסט שלה. עד 0.9.96 הוחזר תמיד `he-IL`; מ-0.9.97 הערך משקף את הגדרת השפה
+באפליקציה, ונוסף שדה `language` עם קוד השפה הנקי.
 
 ```javascript
 const { data } = await Otzaria.call('app.getLocale');
-// { locale: "he-IL", textDirection: "rtl" }
+// { locale: "he-IL", language: "he", textDirection: "rtl" }
+// באנגלית: { locale: "en", language: "en", textDirection: "ltr" }
 ```
+
+אותם שדות מגיעים גם ב-`payload.app` של אירוע `plugin.boot`. שינוי שפה תוך
+כדי ריצה נמסר באירוע `settings.changed` עם המפתח `key-settings-language` ועם
+קוד השפה האפקטיבי (`he` או `en`) ב-`newValue` — גם כאשר בחירת המשתמש היא
+`system` (ראו § תוסף רב-לשוני).
+
+### תוסף רב-לשוני (i18n)
+
+עברית היא שפת הבסיס של אוצריא — תוסף כותב את ממשקו בעברית, ומוסיף תרגום
+לכל שפה שירצה. העיקרון:
+
+1. **קובץ תרגום לכל שפה**, מוטמע בתוסף (ללא רשת), למשל `i18n/en.js` הרושם
+   מילון תחת `window.TRANSLATIONS.en`. המפתחות הם מחרוזות המקור בעברית:
+
+   ```javascript
+   // i18n/en.js
+   window.TRANSLATIONS = window.TRANSLATIONS || {};
+   window.TRANSLATIONS.en = {
+     'הגדרות': 'Settings',
+     'הצג': 'Show',
+   };
+   ```
+
+2. **בחירת השפה** — מ-`payload.app.language` שבאירוע `plugin.boot` (או
+   `app.getLocale`). אם אין מילון לשפה — נשארים בעברית:
+
+   ```javascript
+   const dict = window.TRANSLATIONS[payload.app.language] || null;
+   const t = s => (dict && dict[s]) || s;   // נפילה טבעית לעברית
+   ```
+
+3. **כיוון** — כש-`textDirection` הוא `ltr`, קבעו
+   `document.documentElement.dir = 'ltr'` בזמן ריצה (ה-HTML הסטטי נשאר
+   `dir="rtl"`, כדרישת ולידציית העיצוב).
+
+4. **עדכון חי** — האזינו ל-`settings.changed` (הרשאת
+   `events.subscribe:settings.changed`) ובדקו `key === 'key-settings-language'`;
+   או הסתפקו בשפה שנקבעה ב-boot.
 
 ### `app.getUserEmail`
 **הרשאה נדרשת:** `app.user_email.read`
@@ -347,7 +392,37 @@ const { data } = await Otzaria.call('library.findBooks', {
 const { data } = await Otzaria.call('library.getBookMetadata', {
   bookId: 'בראשית'
 });
-// { bookId: "בראשית", title: "בראשית", topics: ["תנ\"ך", "תורה"] }
+// { id: 1, bookId: "בראשית", title: "בראשית", categoryPath: "/תנך/תורה", topics: [...] }
+```
+
+### `library.resolveBooks`
+**הרשאה:** `library.books.read`
+
+פותר עד 100 זהויות ספר באצווה, לרבות זהות חיצונית, בלי לחשוף נתיבים. סדר
+התשובות זהה לסדר הקלט; זהות שאינה קיימת או אינה חד־משמעית מוחזרת כ־`null`.
+
+```javascript
+const { data } = await Otzaria.call('library.resolveBooks', {
+  items: [
+    { id: 183, type: 'text' },
+    { external: { provider: 'hebrewbooks', id: 42 } }
+  ]
+});
+// [{ id, type, source, bookId, title, categoryPath, external? }, ...]
+```
+
+### `library.resolveCategoryPaths`
+**הרשאה:** `library.books.read`
+
+נתיב הקטגוריה בעץ הספרייה לכל מזהה ספר, באצווה של עד 20,000 מזהים —
+מסלול bulk לסיווג אינדקס שלם של ספק תוצאות חיצוני בקריאה אחת. סדר
+התשובות זהה לסדר הקלט; מזהה לא מוכר מוחזר כ־`null`.
+
+```javascript
+const { data } = await Otzaria.call('library.resolveCategoryPaths', {
+  ids: [183, 42, 9999]
+});
+// ["/תנך/תורה", "/הלכה", null]
 ```
 
 ### `library.listRecentBooks`
@@ -467,8 +542,50 @@ const { data } = await Otzaria.call('library.getBookAltToc', {
 
 > כל גישת רשת מוגבלת לרשימת ההיתר של אוצריא — ראו [⚠️ הרשאת `network.access`](#️-הרשאת-networkaccess--דרישה-מיוחדת-pr-לאוצריא).
 
+### `network.fetchStream`
+**הרשאה:** `network.access` (או `network.localhost` ליעד מקומי) · **מגרסה:** 0.9.97
+
+מבצעת בקשת HTTP בצד אוצריא ומחזירה `AsyncIterable` מיד עם קבלת כותרות
+התשובה. הפרמטרים זהים ל-`network.fetch`: `url`, `method`, `headers`, `body`
+ו-`timeoutMs`. חסם הזמן חל על הבקשה כולה, כולל קריאת הגוף; ברירת המחדל היא
+30,000 והמקסימום 120,000 מילישניות.
+
+הפריט הראשון הוא תמיד `{ type: "response", sequence, status, ok, headers }`.
+אחריו מתקבלים פריטי `{ type: "data", sequence, body }`. כל `body` הוא מקטע
+UTF-8 תקין, אך גבול המקטע אינו מבטיח סוף שורה או אובייקט JSON שלם. יציאה
+מוקדמת מ-`for await` מבטלת את בקשת ה-HTTP. יש לצרוך את האיטרטור ברציפות;
+תור של 256 מקטעים מגן מפני צרכן תקוע, ולאחריו הזרם נכשל והבקשה מבוטלת.
+
+```javascript
+const chunks = Otzaria.call('network.fetchStream', {
+  url: 'http://127.0.0.1:5000/search',
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ query: 'בראשית' }),
+  timeoutMs: 120000
+});
+
+let pending = '';
+for await (const chunk of chunks) {
+  if (chunk.type === 'response') {
+    if (!chunk.ok) throw new Error(`HTTP ${chunk.status}`);
+    continue;
+  }
+  pending += chunk.body;
+  const lines = pending.split('\n');
+  pending = lines.pop() ?? '';
+  for (const line of lines) {
+    if (line.trim()) consumeResult(JSON.parse(line));
+  }
+}
+if (pending.trim()) consumeResult(JSON.parse(pending));
+```
+
 ### `network.fetch`
 **הרשאה:** `network.access` (או `network.localhost` ליעד מקומי — ראו [שירותים מקומיים](#שירותים-מקומיים-localhost--הרשאת-networklocalhost))
+
+> **מיושן — מוסר ב-0.9.98:** השתמשו ב-`network.fetchStream`. ה-API הישן
+> ממתין לכל גוף התשובה ומחזיר אותו כמחרוזת אחת.
 
 שליפת תוכן מ-URL מותר (ללא מעקב אחר redirects). מחזירה את גוף התשובה כטקסט.
 
@@ -479,7 +596,8 @@ const { data } = await Otzaria.call('library.getBookAltToc', {
 (במיוחד `POST`) יש להשתמש בו ולא ב-`fetch()` ישיר.
 
 פרמטרים: `url` (חובה), `method` (ברירת מחדל `GET`), `headers` (אובייקט,
-אופציונלי), `body` (מחרוזת, אופציונלי).
+אופציונלי), `body` (מחרוזת, אופציונלי), `timeoutMs` (מספר שלם חיובי;
+ברירת מחדל 30,000 ומקסימום 120,000 מילישניות).
 
 ```javascript
 // GET פשוט
@@ -493,7 +611,8 @@ const res = await Otzaria.call('network.fetch', {
   url: 'https://api.example.com/endpoint',
   method: 'POST',
   headers: { 'Content-Type': 'application/json;charset=UTF-8' },
-  body: JSON.stringify({ key: 'value' })
+  body: JSON.stringify({ key: 'value' }),
+  timeoutMs: 120000
 });
 if (res.success && res.data.ok) {
   const parsed = JSON.parse(res.data.body);
@@ -575,7 +694,7 @@ const { data } = await Otzaria.call('search.fullText', {
 נפתחות בטאב.
 
 ```javascript
-const { data } = await Otzaria.call('search.query', {
+const chunks = Otzaria.call('search.query', {
   query: 'ואהבת לרעך',
   mode: 'advanced',       // 'exact' (ברירת מחדל) | 'advanced' | 'fuzzy'
   distance: 2,            // מרווח מילים מותר במצב מתקדם/מקורב
@@ -586,6 +705,11 @@ const { data } = await Otzaria.call('search.query', {
   options: { 'קידומות דקדוקיות': true },
   includeBookCounts: true
 });
+
+for await (const chunk of chunks) {
+  appendResults(chunk.results);
+  updateTotal(chunk.total);
+}
 ```
 
 **פרמטרים**
@@ -623,21 +747,26 @@ const { data } = await Otzaria.call('search.query', {
 היקפים מאותו סוג מתחברים ב-OR; סוגים שונים מתחברים ב-AND (למשל `eras` + `categories`
 = ספרי אותה תקופה שבאותה קטגוריה).
 
-**פלט**
+**פלט — `AsyncIterable` של chunks**
+
+הקריאה אינה מחזירה `Promise` ואינה ממתינה לכל התוצאות. משתמשים ב־`for await`;
+הפסקת הלולאה (`break` או `return`) מבטלת את החיפוש בצד אוצריא. ה־chunk הראשון
+נושא את הספירות, והבאים נושאים עד 50 תוצאות כל אחד.
 
 ```javascript
 {
+  sequence: 0,
   results: [{
     id: 183, type: 'text', bookId: 'ויקרא', source: 'library',
-    book: 'ויקרא',
+    book: 'ויקרא', categoryPath: '/הלכה/משנה תורה',
     reference: 'ויקרא, פרק יט',
     text: 'ואהבת לרעך כמוך...',
     index: 1234,          // אינדקס השורה/עמוד לפתיחה עם reader.openBook
     mergedCount: 1,       // מספר התוצאות שאוחדו לכרטיס (במצב grouping)
-    merged: [{ id, type, bookId, source, book, reference, index }]
-                            // רק כשיש איחוד; לכל אח זהות ספר מלאה
+    merged: [{ id, type, bookId, source, book, categoryPath, reference, index }]
+                            // רק כשיש איחוד; לכל אח זהות וקטגוריה מלאות
   }],
-  total: 812,             // סך ההתאמות (לא רק העמוד הנוכחי)
+  total: 812,             // סך ההתאמות; זמין מה-chunk הראשון
   groupCount: null,       // מספר הקבוצות כש-grouping פעיל, אחרת null
   truncated: false,       // true = שאילתה רחבה מדי, התוצאות והספירה חלקיות
   limit: 100, offset: 0,
@@ -645,6 +774,10 @@ const { data } = await Otzaria.call('search.query', {
   bookCounts: [{ id, type, bookId, source, title, count }]  // רק עם includeBookCounts
 }
 ```
+
+אין לצבור את כל התוצאות לפני ציור המסך: יש להוסיף כל `results` מיד עם הגעת
+ה־chunk. אם החיפוש נכשל, האיטרטור זורק שגיאה; chunks שכבר התקבלו נשארים בידי
+התוסף.
 
 **מפתחות פר-מילה** — `wordOptions`, `alternativeWords` ו-`customSpacing` נבדקים
 מול פיצול המילים של השאילתה: מפתח `"{מילה}_{אינדקס}"` שאינו תואם, אינדקס מחוץ
@@ -710,12 +843,152 @@ await Otzaria.call('reader.openBook', {
   type: 'text',         // אופציונלי — מוודא שמדובר בסוג הנכון
   index: 0,             // אופציונלי, ברירת מחדל: 0
   searchQuery: '',      // אופציונלי, הדגשת טקסט
-  navigateToPositionIfReused: false  // אופציונלי — אם הטאב פתוח, נווט אליו
+  navigateToPositionIfReused: false, // אופציונלי — אם הטאב פתוח, נווט אליו
+  openInSidePane: false, // אופציונלי — הצג בטאב הנוכחי כחלונית לצד הספר
+  matchPages: [8, 12],   // אופציונלי (PDF) — עמודי התאמה של חיפוש חיצוני
+  matchedTerms: ['שבת']  // אופציונלי — המונחים שנמצאו, לתצוגה בסרגל ההתאמות
 });
 // true — פתח בהצלחה; false — הספר לא נמצא או הזהות לא תואמת
 ```
 
+עם `openInSidePane: true` הספר אינו מחליף את מסך הקריאה אלא נפתח כחלונית
+נוספת בטאב הנוכחי, לצד הספר שכבר פתוח (כמו "הצג לצד"). כשהטאב הנוכחי כבר
+מפוצל, או כשאין טאב פתוח, הספר נפתח ככרטיסייה רגילה.
+
+עם `matchPages` (בספר PDF) קורא ה-PDF מציג סרגל "עמודי התאמה" עם ניווט
+מופע קודם/הבא בין העמודים שסופקו — למשל תוצאות חיפוש של מנוע חיצוני שהתוסף
+מפעיל. העמודים מבוססי-1; רשימה ריקה או ערכים לא חיוביים נדחים.
+
 **כאשר נשלחים מספר שדות זהות (id + bookId + type), כולם חייבים להתאים לאותו ספר. אי-התאמה מחזירה `false`.**
+
+### `reader.registerInBookSearchProvider`
+**הרשאה:** `reader.open`
+
+רושם את התוסף כספק חיפוש-בתוך-ספר לספרים חיצוניים של `provider`
+(למשל `hebrewbooks`). מאותו רגע, כשהמשתמש מחפש בסרגל ההתאמות של קורא
+ה-PDF בספר חיצוני של אותו provider, אוצריא שולחת לתוסף אירוע ממוקד
+`reader.inBookSearch.requested` עם `{ requestId, provider, externalId, query }`.
+התוסף מריץ את החיפוש במנוע שלו ועונה עם `reader.respondInBookSearch`.
+שם ספק שייך לתוסף הראשון שרשם אותו; ניסיון של תוסף אחר לרשום אותו נדחה
+עם `error.conflict`.
+
+```javascript
+await Otzaria.call('reader.registerInBookSearchProvider', {
+  provider: 'hebrewbooks',
+});
+
+window.addEventListener('reader.inBookSearch.requested', async (event) => {
+  const { requestId, externalId, query } = event.detail;
+  const result = await searchInMyEngine(externalId, query);
+  await Otzaria.call('reader.respondInBookSearch', {
+    requestId,
+    pages: result.pages,          // עמודי התאמה מבוססי-1
+    matchedTerms: result.terms,   // אופציונלי
+    query,
+  });
+});
+```
+
+### `reader.respondInBookSearch`
+**הרשאה:** `reader.open`
+
+תשובת הספק לאירוע `reader.inBookSearch.requested`. חובה להעביר את
+`requestId` מהאירוע; בכישלון מעבירים `error` עם הודעה קצרה במקום `pages`.
+בקשה שלא נענתה בתוך 30 שניות נכשלת בצד הקורא.
+התשובה מתקבלת רק מהתוסף שאליו הבקשה נשלחה.
+
+### `reader.registerExternalSearchProvider`
+**הרשאה:** `reader.open`
+
+רושם את התוסף כספק תוצאות חיצוני לטאב החיפוש המובנה. הספק מופעל דרך שורת
+דיאלוג חיפוש (`searchDialogItems`) שמצהירה `resultsProvider` עם אותו שם:
+כשהמשתמש מסמן את השורה ומחפש, נפתח טאב חיפוש רגיל ובראשו מדור תוצאות
+מהתוסף (בכותרת `resultsTitle`), לצד תוצאות המנוע המובנה. אוצריא שולחת
+לתוסף אירוע ממוקד `search.external.requested` עם
+`{ requestId, provider, query, mode, distance, offset, limit }` — ובבקשת
+העמוד הראשון גם `indexTitles` — והתוסף עונה עם
+`reader.respondExternalSearch`.
+שם ספק שייך לתוסף הראשון שרשם אותו; ניסיון של תוסף אחר לרשום אותו נדחה
+עם `error.conflict`.
+
+```javascript
+await Otzaria.call('reader.registerExternalSearchProvider', {
+  provider: 'hebrewbooks',
+});
+
+window.addEventListener('search.external.requested', async (event) => {
+  const { requestId, query, offset, limit } = event.detail;
+  const page = await searchMyEngine(query, offset, limit);
+  await Otzaria.call('reader.respondExternalSearch', {
+    requestId,
+    results: page.items.map((item) => ({
+      title: item.name,          // חובה
+      meta: item.byline,         // אופציונלי — מחבר · מקום · שנה
+      snippet: item.snippet,     // אופציונלי — טקסט רגיל; ההדגשה בצד אוצריא
+      hitCount: item.hits,
+      firstPage: item.firstPage, // מבוסס-1
+      externalId: item.id,       // זהות חיצונית לפתיחת הספר
+    })),
+    totalBooks: page.totalBooks,
+    totalHits: page.totalHits,
+    hasMore: page.hasMore,
+  });
+});
+```
+
+לחיצה על תוצאה פותחת את הספר במציג המובנה לפי הזהות החיצונית
+(`external: { provider, id }`) — מקומית כשהקובץ קיים, אחרת בדפדפן — ועם
+עמודי ההתאמה כשהתוסף רשום גם כספק חיפוש-בתוך-ספר.
+
+### `reader.respondExternalSearch`
+**הרשאה:** `reader.open`
+
+תשובת הספק לאירוע `search.external.requested`. חובה להעביר את `requestId`;
+בכישלון מעבירים `error` במקום `results`. מגבלות: עד 50 תוצאות לעמוד,
+כותרת עד 300 תווים, קטע טקסט עד 600.
+התשובה מתקבלת רק מהתוסף שאליו הבקשה נשלחה.
+
+**הזרמה:** מותר לענות כמה פעמים לאותה בקשה עם `done: false` — כל תשובה
+כזו היא עדכון חלקי שמחליף את חלון העמוד במדור (הספירות נחשבות רף-תחתון),
+והבקשה נשארת פתוחה. התשובה האחרונה נשלחת בלי `done` (או `done: true`)
+וסוגרת את הבקשה. הטיימאוט (45 שניות) הוא חוסר-פעילות ומתאפס בכל עדכון
+חלקי.
+
+**אינדקס קטגוריות (אופציונלי):** על בקשת העמוד הראשון הספק יכול לצרף
+`index` — מערך תמציתי של **כלל** תוצאות החיפוש (עד 20,000 רשומות), כל
+רשומה `[id, hits]`, `[id, hits, categoryPath]` או
+`[id, hits, categoryPath, title]` כשהנתיב הוא קטגוריית אוצריא משוערת
+(מתחיל ב-'/', עד 200 תווים; מחרוזת ריקה כשיש שם בלי סיווג) והשם הוא שם
+הספר (עד 300 תווים). אוצריא בונה מהאינדקס ספירות בעץ הקטגוריות של טאב
+החיפוש, מעדנת מול קטלוג ההשוואות המקומי, ומציגה דלי "עוד מ<resultsTitle>"
+לתוצאות ללא סיווג — ועם השמות הדלי נפתח לרשימת הספרים שבו, ולחיצה על ספר
+מסננת אליו. עדכון בלי `index` אינו מוחק אינדקס שכבר נשלח באותה בקשה.
+
+שלחו רשומות בנות ארבעה איברים **רק** כשהבקשה נשאה `indexTitles: true`:
+מארח ותיק אינו מכיר את השם וזורק רשומה כזו בסניטציה, ואיתה כל הסיווג.
+הדגל מגיע רק בבקשה שיכולה לשאת אינדקס (העמוד הראשון, בלי `ids`).
+
+**דפדוף לפי מזהים:** כשמסוננת קטגוריה בעץ, אוצריא שולחת בקשות
+`search.external.requested` עם שדה `ids` (עד 50 מזהים) במקום
+`offset`/`limit` — הספק מחזיר את הספרים הללו בסדרם (מהמטמון של אותו
+חיפוש; `hasMore: false`).
+
+### `reader.openSearchTab`
+**הרשאה:** `reader.open`
+
+פותח כרטיסיית חיפוש מובנית עם השאילתה — כך תוסף מפנה חיפוש שהתחיל אצלו אל
+מסך החיפוש הרגיל. `selectItems` (אופציונלי, עד 4 מזהים) מסמן שורות
+`searchDialogItems` של התוסף הקורא בכרטיסייה החדשה; יחד עם `resultsProvider`
+זה מפעיל בה את מדור התוצאות החיצוני. מפתחות הבחירה נגזרים תמיד מה-pluginId
+של הקורא — תוסף אינו יכול לסמן שורות של תוסף אחר.
+
+```javascript
+await Otzaria.call('reader.openSearchTab', {
+  query: 'ברכת המזון',
+  selectItems: ['include-hebrewbooks'],
+});
+// true
+```
 
 ### `reader.openBookAtRef`
 **הרשאה:** `reader.open`
@@ -1535,6 +1808,7 @@ const { data } = await Otzaria.call('settings.getMany', {
 - `key-line-height`
 - `key-selected-city`
 - `key-calendar-type`
+- `key-settings-language` (מ-0.9.97 — שפת הממשק שנבחרה, או `system`)
 - `key-show-teamim`
 - `key-default-nikud`
 - `key-remove-nikud-tanach`
@@ -1542,6 +1816,8 @@ const { data } = await Otzaria.call('settings.getMany', {
 - `key-library-view-mode`
 - `key-align-tabs-to-right`
 - `key-copy-with-headers`, `key-copy-header-format`
+- `key-hebrew-books-path` — נתיב ספרי HebrewBooks, או `null`/מחרוזת ריקה
+  כשלא הוגדר מיקום
 
 ---
 
@@ -1558,7 +1834,7 @@ const { data } = await Otzaria.call('calendar.getSelectedDate');
 ```
 
 ### `calendar.getDailyTimes`
-**הרשאה:** `calendar.read`
+**הרשאה:** `calendar.read` · **מגרסה:** 0.9.97
 
 קבלת זמנים הלכתיים ליום.
 
@@ -1567,14 +1843,57 @@ const { data } = await Otzaria.call('calendar.getDailyTimes');
 // { sunrise: "06:23", sunset: "19:11", tzet: "19:45", ... }
 ```
 
+מגרסה 0.9.97 אפשר לבקש זמנים לתאריך ולמיקום שרירותיים — עיר מתוך
+`calendar.getCities`, או קואורדינטות למקום שאינו ברשימה; בלי הפרמטרים
+מוחזרים זמני התאריך והעיר הנבחרים בלוח, כבגרסאות קודמות. עיר לא מוכרת או
+אזור זמן לא מוכר מחזירים שגיאה; אין להעביר גם `city` וגם `lat`/`lng`.
+
+```javascript
+// לפי עיר מרשימת הלוח
+const { data } = await Otzaria.call('calendar.getDailyTimes', {
+  date: '2026-08-14',      // אופציונלי — ברירת מחדל: התאריך הנבחר בלוח
+  city: 'ניו יורק',        // אופציונלי — ברירת מחדל: העיר הנבחרת בלוח
+});
+
+// לפי קואורדינטות (מקום שאינו ברשימת הערים)
+const { data } = await Otzaria.call('calendar.getDailyTimes', {
+  date: '2026-08-14',
+  lat: 43.6,               // חובה יחד עם lng
+  lng: -79.4,
+  elevation: 76,           // אופציונלי (מטרים; ברירת מחדל 0)
+  timezone: 'America/Toronto', // אופציונלי — מזהה IANA; בלעדיו נגזר אזור
+                               // נומינלי מקו האורך (Etc/GMT±n)
+  inIsrael: false,         // אופציונלי — לזמנים תלויי יו"ט שני
+});
+// בקואורדינטות: קידוש לבנה מושמט, הדלקת נרות לפי ברירת המחדל (30 דק'),
+// וחצות הלילה בקירוב (חצות היום + 12 שעות).
+```
+
 ### `calendar.getHalachicTimes`
-**הרשאה:** `calendar.read`
+**הרשאה:** `calendar.read` · **מגרסה:** 0.9.97
 
 קבלת זמנים הלכתיים מלאים ליום (זהה ל-`getDailyTimes`).
+
+מקבל את אותם הפרמטרים האופציונליים (`date`, `city`, או `lat` ו-`lng`) כמו
+`calendar.getDailyTimes`.
 
 ```javascript
 const { data } = await Otzaria.call('calendar.getHalachicTimes');
 // { sunrise: "06:23", sunset: "19:11", tzet: "19:45", ... }
+```
+
+### `calendar.getCities`
+**הרשאה:** `calendar.read` · **מגרסה:** 0.9.97
+
+רשימת הערים שהלוח מכיר — לשימוש עם `calendar.getDailyTimes { city }`.
+
+```javascript
+const { data } = await Otzaria.call('calendar.getCities');
+// [
+//   { name: "ירושלים", country: "ארץ ישראל", lat: 31.7784, lng: 35.2354,
+//     elevation: 800.0, timezone: "Asia/Jerusalem", inIsrael: true },
+//   ...
+// ]
 ```
 
 ### `calendar.getJewishDate`
@@ -1695,6 +2014,14 @@ API זה מאפשר לתוסף לקרוא נתונים ממסדי נתונים S
   }
 }
 ```
+
+בכל רשומת `databaseSources` מותרים רק `id`,‏ `label` ו־`required`. נתיב הקובץ
+וה־policy נקבעים בלעדית על ידי אוצריא; שדה כמו `path` יגרום לדחיית המניפסט.
+
+המקור המובנה `external_catalog` חושף לקריאה את טבלת ההתאמה
+`otzaria_hebrew_books` ואת העמודות `id_book`,‏ `title`,‏ `author` של
+`hebrew_books`. הוא מוגבל ל־20 שורות ול־join יחיד על
+`otzaria_hebrew_books.hb_id = hebrew_books.id_book`.
 
 ---
 
@@ -1914,6 +2241,7 @@ Otzaria.on('event.name', (data) => {
 - `reader.current_book_changed` - שינוי הספר/טאב הפעיל בלבד (הרשאה: `events.subscribe:reader.current_book_changed`)
 - `reader.current_ref_changed` - שינוי מיקום הקריאה הנוכחי (דף, פרק, סעיף) - **זה האירוע למעקב אחרי מיקום!** (הרשאה: `events.subscribe:reader.current_ref_changed`)
 - `calendar.date_changed` - שינוי התאריך בלוח השנה (הרשאה: `events.subscribe:calendar.date_changed`)
+- `calendar.city_changed` - שינוי העיר הנבחרת בלוח השנה; payload: `{ city: string }` (הרשאה: `events.subscribe:calendar.city_changed`, מגרסה 0.9.97)
 - `workspace.changed` - שינוי סביבת העבודה (הרשאה: `events.subscribe:workspace.changed`)
 - `settings.changed` - שינוי הגדרה (הרשאה: `events.subscribe:settings.changed`)
 - `plugin.permissions_changed` - שינוי הרשאות (מחזיר `{ permissions: string[] }` - רשימת כל ההרשאות המאושרות) (הרשאה: `events.subscribe:plugin.permissions_changed`)
@@ -2111,8 +2439,344 @@ async function scheduleReminder(title, body, dateTime) {
 | `toolbarItems` | זהה ל-`reader.addToolbarItem` | `reader.toolbar` |
 | `contextMenuItems` | זהה ל-`reader.addContextMenuItem` | `reader.context_menu` |
 | `publishedData` | `{type, key, payload, scope?}` | `published_data.write` |
+| `programs` | תכניות חישוב Host מוולדות | הרשאות הפקודות שבתכנית |
+| `searchDialogItems` | שורות checkbox סטטיות בדיאלוג החיפוש | `search.dialog` |
+| `externalEditions` | קונפיגורציית מהדורות מקבילות חיצוניות (טבלת מיפוי במקור DB מוכרז) | `database.read` וגם `library.books.read` |
 | `activationEvents` | שמות אירועים או `app.startup` | הרשאת ה-subscribe של כל נושא |
 | `keepAlive` | `boolean` (ברירת מחדל: `false`) | `app.background_keep_alive` וגם `app.run_on_startup` |
+
+### תכניות Host ללא WebView
+
+החל מ־`minAppVersion: 0.9.96`, `startup.programs` מאפשר לחשב תרומת UI מתוך
+הקשר הקורא וממקורות DB שאוצריא אישרה. התכנית עוברת קומפילציה ואימות ב־Dart,
+ואינה טוענת HTML או JavaScript. בגרסה הנוכחית ה־trigger הנתמך הוא
+`reader.activeBookChanged` בלבד.
+
+דוגמה שמוצאת מהדורות היברובוקס המקבילות לספר הטקסט הפעיל:
+
+```json
+{
+  "permissions": [
+    "app.startup_contributions",
+    "database.read",
+    "reader.toolbar",
+    "reader.open"
+  ],
+  "contributes": {
+    "databaseSources": [
+      {
+        "id": "external_catalog",
+        "label": "קטלוגים חיצוניים",
+        "required": true
+      }
+    ],
+    "startup": {
+      "programs": [
+        {
+          "id": "hebrewbooks-editions",
+          "version": 1,
+          "triggers": ["reader.activeBookChanged"],
+          "when": {
+            "op": "exists",
+            "value": { "$context": "reader.book.id" }
+          },
+          "commands": [
+            {
+              "id": "matches",
+              "type": "database.select",
+              "args": {
+                "sourceId": "external_catalog",
+                "from": {
+                  "table": "otzaria_hebrew_books",
+                  "alias": "m"
+                },
+                "select": [
+                  { "expr": "m.hb_id", "as": "hb_id" },
+                  { "expr": "m.is_best", "as": "is_best" },
+                  { "expr": "h.title", "as": "title" }
+                ],
+                "joins": [
+                  {
+                    "table": "hebrew_books",
+                    "alias": "h",
+                    "type": "left",
+                    "on": [
+                      {
+                        "left": "m.hb_id",
+                        "op": "=",
+                        "right": "h.id_book"
+                      }
+                    ]
+                  }
+                ],
+                "where": {
+                  "op": "=",
+                  "left": "m.otzaria_id",
+                  "value": { "$context": "reader.book.id" }
+                },
+                "orderBy": [
+                  { "expr": "m.is_best", "direction": "desc" }
+                ],
+                "limit": 20,
+                "rowFormat": "object"
+              }
+            },
+            {
+              "id": "editions",
+              "type": "data.map",
+              "args": {
+                "items": { "$result": "matches.rows" },
+                "maxItems": 20,
+                "template": {
+                  "title": { "$row": "title" },
+                  "identity": {
+                    "external": {
+                      "provider": "hebrewbooks",
+                      "id": { "$row": "hb_id" }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "id": "default-edition",
+              "type": "data.first",
+              "args": {
+                "items": { "$result": "editions" }
+              }
+            }
+          ],
+          "outputs": {
+            "defaultEdition": { "$result": "default-edition" },
+            "editions": { "$result": "editions" }
+          }
+        }
+      ],
+      "toolbarItems": [
+        {
+          "id": "open-default-hb",
+          "type": "button",
+          "title": "פתח במהדורת היברובוקס",
+          "icon": "book_24_regular",
+          "contexts": ["reader-text", "reader-pdf"],
+          "binding": {
+            "program": "hebrewbooks-editions",
+            "visibleOutput": "defaultEdition"
+          },
+          "action": {
+            "type": "reader.openBook",
+            "args": {
+              "identity": {
+                "$output": "defaultEdition.identity"
+              }
+            }
+          }
+        },
+        {
+          "id": "open-hb-edition",
+          "type": "menu",
+          "title": "בחר מהדורת היברובוקס",
+          "icon": "book_24_regular",
+          "contexts": ["reader-text", "reader-pdf"],
+          "binding": {
+            "program": "hebrewbooks-editions",
+            "visibleOutput": "editions"
+          },
+          "childrenBinding": {
+            "itemsOutput": "editions",
+            "maxItems": 20,
+            "itemTemplate": {
+              "id": {
+                "$concat": [
+                  "hb-",
+                  { "$item": "identity.external.id" }
+                ]
+              },
+              "title": { "$item": "title" },
+              "action": {
+                "type": "reader.openBook",
+                "args": {
+                  "identity": { "$item": "identity" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+#### פקודות חישוב
+
+| פקודה | הרשאה | תיאור הפלט |
+|---|---|---|
+| `database.select` | `database.read` | `{rows, columns, meta}`; בתכנית נדרש `rowFormat: "object"` |
+| `data.first` | — | האיבר הראשון ברשימה, או `null` |
+| `data.choose` | — | מ־0.9.97: מחזיר `whenTrue` או `whenFalse` לפי `condition` מובנה |
+| `data.map` | — | מיפוי של עד 20 רשומות בעזרת `template` ו־`$row` |
+| `library.resolveBooks` | `library.books.read` | זהות קנונית רק להתאמה יחידה; עמימות מוחזרת כאי־התאמה |
+| `library.parallelEditions` | `library.books.read` | מ־0.9.97: מהדורות מקבילות לזהות ספר — המהדורה המובנית בספרייה ואז מהדורות ספקים חיצוניים שנרשמו דרך `startup.externalEditions` ונפתחות מקומית; שורות `{title, isCompanion, identity}` |
+
+ערכים יכולים להפנות אל `$context`,‏ `$result` של פקודה קודמת, או `$row`
+בתוך תבנית שורה. `$concat` מחבר עד שמונה חלקים, ו־`$literal` מונע פירוש של
+אובייקט כ־reference. ההפניות הן לאחור בלבד; אין SQL חופשי, נתיב קובץ או URL.
+
+#### binding לשורת הפקדים
+
+- `binding.program` מפנה לתכנית באותו manifest.
+- `binding.visibleOutput` מציג את הפקד רק כשהפלט קיים ואינו ריק.
+- כפתור משתמש ב־`action` עם `reader.openBook`, או עם
+  `reader.openBookInSidePane` — אותם ארגומנטים ואותה הרשאה (`reader.open`),
+  אלא שהספר נפתח כחלונית לצד הספר הנוכחי במקום להחליף אותו. בטאב שכבר מפוצל
+  הפעולה יורדת לפתיחה ככרטיסייה רגילה.
+- תפריט משתמש ב־`childrenBinding.itemsOutput` וב־`itemTemplate`; בתוך התבנית
+  זמינה ההפניה `$item`.
+- לחצן מפוצל (`"type": "split"`) מצהיר על שניהם: `action` לפעולה הראשית
+  ו־`childrenBinding` לפריטי החץ.
+- לתוסף מותר להציג לכל היותר שני פקדים עליונים. הקבוצה מוחלפת אטומית: בתחילת
+  חישוב חדש שני הפקדים מוסתרים, ורק תוצאה מלאה ועדכנית מחזירה אותם.
+- `placement` (אופציונלי, על פריט עליון בלבד): `"primary"` (ברירת מחדל) —
+  בשורת הפקדים, נדחס לתפריט כשאין מקום; `"overflow"` — תמיד בתוך תפריט
+  "עוד פעולות" (שלוש נקודות), כתת-תפריט כשיש ילדים.
+- `order` (אופציונלי, מספר שלם 0–10000; דורש `"placement": "overflow"`, על
+  פריט עליון בלבד): משקל מיון בתוך תפריט שלוש הנקודות. הפריטים המובנים
+  תופסים משקלים קבועים, כך שפריט תוסף משתבץ ביניהם לפי ערכו; ללא `order`
+  הפריט מוצג אחרי כל המובנים. בשוויון משקלים המובנה קודם, ותוספים לפי סדר
+  הרישום. המשקלים המובנים —
+  מסך טקסט: סימניות 10, הערות אישיות 20, שמור וזכור 30, אפס הגדרות 40,
+  העתק קישור 45, ייצוא הספר 50, **הדפסה 60**, אודות הספר 70;
+  מסך PDF: הערות אישיות 10, הוסף הערה 20, סימניות 30, אפס הגדרות 40,
+  **הדפס 60**, העתק קישור 70, אודות הספר 80. לדוגמה, `"order": 55` ממקם
+  את הפריט מיד לפני "הדפסה" בשני המסכים.
+- ההרשאות נבדקות בקומפילציה, בזמן החישוב ושוב בלחיצה. הפעולה אינה עוברת דרך
+  `PluginRuntimeDispatcher`, אינה מפעילה WebView ואינה דורשת
+  `app.run_on_startup`.
+
+### שורות בדיאלוג החיפוש
+
+`startup.searchDialogItems` מוסיף שורות checkbox סטטיות בתחתית דיאלוג
+**החיפוש בספרייה**, מעל כפתורי "ביטול" ו"חפש". הן אינן מוצגות בחיפוש
+בתוך ספר, שחוזה התוצאות שלו אינו נושא בחירות תוסף. הן נבנות ישירות מהמניפסט: פתיחת
+הדיאלוג, החלפת מצב, ולחיצה על ה-checkbox **אינן** מפעילות WebView ואינן
+שולחות אירוע לתוסף.
+
+```json
+{
+  "permissions": [
+    "app.startup_contributions",
+    "search.dialog"
+  ],
+  "contributes": {
+    "startup": {
+      "searchDialogItems": [
+        {
+          "id": "include-external-source",
+          "type": "checkbox",
+          "title": "חפש גם במקור חיצוני",
+          "defaultValue": true,
+          "openPluginOnSubmit": true,
+          "visibleInModes": ["exact", "advanced"],
+          "disabledSearchOptions": {
+            "advanced": [
+              "word.partial",
+              "word.typo-tolerance"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+| שדה | חובה | תיאור |
+|---|---:|---|
+| `id` | כן | מזהה ייחודי בתוסף; אותיות ASCII, מספרים, `.`, `_`, `-`. |
+| `type` | כן | כעת רק `"checkbox"`. |
+| `title` | כן | הכיתוב המוצג למשתמש (עד 120 תווים). |
+| `defaultValue` | לא | ערך התחלתי, `false` כברירת מחדל. |
+| `openPluginOnSubmit` | לא | מגרסה 0.9.97: אם `true`, אישור חיפוש כשהשורה מסומנת פותח את דף התוסף ושולח אליו `search.requested`. |
+| `resultsProvider` | לא | שם ספק תוצאות חיצוני (אותיות קטנות, עד 64 תווים). כשהשורה מסומנת, טאב החיפוש מציג מדור תוצאות מהתוסף דרך `search.external.requested` (ראו `reader.registerExternalSearchProvider`). סותר את `openPluginOnSubmit`. |
+| `resultsTitle` | לא | כותרת מדור התוצאות בטאב החיפוש (עד 120 תווים); דורש `resultsProvider`. ברירת המחדל: `title`. |
+| `visibleInModes` | לא | מערך לא-ריק מתוך `"exact"`, `"advanced"`, `"fuzzy"`; ברירת המחדל היא כל המצבים. |
+| `disabledSearchOptions` | לא | אובייקט `מצב → מזהי אפשרויות מילה` להשבתה כשה-checkbox מסומן. |
+
+בלי `openPluginOnSubmit`, הבחירה נשמרת בקונפיגורציית טאב החיפוש במפתח
+`"<pluginId>/<itemId>"`. כשהשדה פעיל, פתיחת הדיאלוג והסימון עדיין סטטיים;
+רק לחיצה על "חפש" פותחת את התוסף ומוסרת `{itemId, request}`. `request` הוא
+חוזה חוקי של `search.query`, אחרי נרמול המצב והאפשרויות. אם כמה שורות פעילות
+מבקשות ניתוב, כל תוסף נפתח ומקבל את הבקשה. מצב `fuzzy` יכול פשוט להיעדר
+מ־`visibleInModes`.
+
+`disabledSearchOptions` משפיע רק על ממשק האפשרויות: הוא מאפיר את ה-chip
+ואת אותה אפשרות בתפריט ברירות המחדל, ואינו מוחק בחירה קיימת של המשתמש
+בחיפוש המקומי. ההשבתה פעילה רק כששורת אותו תוסף מסומנת. אין דרך לתוסף לשנות
+ערכים, להריץ קוד, או להשבית פקדים שאינם ברשימת היתר זו.
+
+מזהי האפשרויות המותרים כיום:
+
+| מזהה | אפשרות באוצריא |
+|---|---|
+| `word.grammatical-prefixes` | קידומות דקדוקיות |
+| `word.grammatical-suffixes` | סיומות דקדוקיות |
+| `word.prefixes` / `word.suffixes` | קידומות / סיומות |
+| `word.full-or-defective-spelling` | כתיב מלא/חסר |
+| `word.partial` | חלק ממילה |
+| `word.typo-tolerance` | שגיאות כתיב |
+| `word.aramaic-prefixes` / `word.aramaic-suffixes` | קידומות / סיומות ארמיות |
+| `word.ignore-quotes` | התעלם מגרשיים |
+| `word.aramaic-translation` | תרגום ארמי |
+| `word.acronyms` | ראשי תיבות |
+| `word.nikud` / `word.taamim` | ניקוד / טעמים |
+
+### מהדורות מקבילות חיצוניות (externalEditions)
+
+מגרסה 0.9.97, `startup.externalEditions` מצהיר על טבלת מיפוי במקור נתונים
+מוכרז (`contributes.databaseSources`) שמקשרת מזהי ספק חיצוני לספרי אוצריא.
+לחצן "מהדורה מקבילה" המובנה — ופקודת `library.parallelEditions` בתכניות
+Host — יצרפו את מהדורות הספק לספר הפתוח, אחרי המהדורה המובנית (טקסט↔PDF).
+נכללות רק מהדורות שנפתחות מקומית בקורא. הכול רץ ב-Dart בלי להעיר WebView,
+והשאילתות כפופות ל-policy של המקור. דורש את ההרשאות `database.read`
+ו-`library.books.read`. עד 2 תרומות לתוסף.
+
+```json
+{
+  "contributes": {
+    "startup": {
+      "externalEditions": [
+        {
+          "id": "hebrewbooks-editions",
+          "provider": "hebrewbooks",
+          "sourceId": "external_catalog",
+          "table": "otzaria_hebrew_books",
+          "externalIdColumn": "hb_id",
+          "otzariaIdColumn": "otzaria_id",
+          "orderBy": [
+            { "column": "is_best", "direction": "desc" },
+            { "column": "confidence", "direction": "desc" }
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+| שדה | חובה | תיאור |
+|---|---:|---|
+| `id` | כן | מזהה ייחודי בתוסף; אותיות ASCII, מספרים, `.`, `_`, `-`. |
+| `provider` | כן | שם הספק כפי שמופיע בזהות `external.provider` של ספריו (אותיות קטנות, עד 64 תווים). |
+| `sourceId` | כן | מקור נתונים שהוכרז ב-`contributes.databaseSources`. |
+| `table` | כן | טבלת המיפוי (חייבת להיות מותרת ב-policy של המקור). |
+| `externalIdColumn` | כן | עמודת מזהה הספק החיצוני. |
+| `otzariaIdColumn` | כן | עמודת מזהה ספר אוצריא. |
+| `orderBy` | לא | עד 4 עמודות מיון של איכות ההתאמה: `{column, direction: asc/desc}`. |
+
+כשהספר הפתוח שייך לספק (זהות חיצונית תואמת), המנוע מוצא את ספרי האוצריא
+הממופים אליו ומהם את שאר מהדורות הספק (שני צעדים); כשהספר הפתוח הוא ספר
+ספרייה, המיפוי ישיר. הספר הפתוח עצמו לעולם אינו מוחזר כמהדורה.
 
 ### הפעלה עצלה
 
@@ -2162,10 +2826,10 @@ async function scheduleReminder(title, body, dateTime) {
 3. **נתונים קבועים** (`publishedData.upsert` בעלייה) — העבירו אל `startup.publishedData`.
 4. **קוד שחייב לרוץ בעלייה** (בדיקת עדכונים וכד') — הצהירו `activationEvents: ["app.startup"]`; קובץ הרקע שלכם ייטען כמה שניות אחרי העלייה ויקבל `plugin.boot` כרגיל, כך שקוד קיים שמסתנן לפי `runMode === 'background'` עובד ללא שינוי.
 5. **האזנה מתמשכת לאירועים** — הצהירו את הנושאים ב-`activationEvents`; המופע יוער כשאירוע באמת קורה במקום לחיות כל הסשן.
-6. **עדכנו `minAppVersion` ל-0.9.97** ומעלה — הסעיף אינו מוכר בגרסאות ישנות יותר.
+6. **עדכנו `minAppVersion` ל-0.9.96** ומעלה — הסעיף אינו מוכר בגרסאות ישנות יותר.
 7. שימו לב לכיבוי האוטומטי אחרי חוסר פעילות (סעיף קודם) — בלי טיימרים ארוכים, state ששורד ב-`storage`.
 
-תוסף שהצהיר `contributes.startup` יוצא ממסלול הטעינה המיידית כבר ב-0.9.97 — אין מצב ביניים של ריצה כפולה.
+תוסף שהצהיר `contributes.startup` יוצא ממסלול הטעינה המיידית כבר ב-0.9.96 — אין מצב ביניים של ריצה כפולה.
 
 התיעוד שלהלן מתאר את המסלול הישן, לתחזוקת תוספים שטרם עברו. יש להסירו יחד עם המימוש הישן ב-0.9.98.
 
@@ -2458,8 +3122,8 @@ Otzaria.on('reader.context_menu_item_clicked', (data) => {
 
 **זמין מגרסה:** `0.9.97`
 
-רישום פקד בשורת הפקדים של מסך העיון (ספר טקסט ו-PDF) — לחצן בודד או
-תפריט נפתח, באותו מראה של הפקדים המובנים. כל תוסף יכול לרשום לכל היותר
+רישום פקד בשורת הפקדים של מסך העיון (ספר טקסט ו-PDF) — לחצן בודד,
+תפריט נפתח או לחצן מפוצל, באותו מראה של הפקדים המובנים. כל תוסף יכול לרשום לכל היותר
 **שני פקדים**; עדכון פקד קיים באותו `id` אינו צורך מקום נוסף במכסה.
 כשאין מקום בשורה, הפקד נבלע אוטומטית בתפריט "עוד פעולות" (overflow).
 
@@ -2484,12 +3148,28 @@ await Otzaria.call('reader.addToolbarItem', {
     { id: 'clear-marks', title: 'נקה סימונים', onClickEvent: 'marks.clear' }
   ]
 });
+
+// לחצן מפוצל — פעולה ראשית, ולצידה חץ שפותח את הילדים
+await Otzaria.call('reader.addToolbarItem', {
+  id: 'open-edition',
+  type: 'split',
+  title: 'פתח במהדורה המועדפת',   // הפעולה הראשית: לחיצה על האייקון
+  icon: 'book_24_regular',
+  param: 'default',
+  children: [
+    { id: 'edition-a', title: 'מהדורת ורשה' },
+    { id: 'edition-b', title: 'מהדורת וילנא' }
+  ]
+});
 // true
 ```
 
 **הערות:**
-- `type` יכול להיות `button` (ברירת מחדל) או `menu`. תפריט חייב `children`
-  (עד 20 ילדים, לחצנים בלבד — אין קינון תפריטים)
+- `type` יכול להיות `button` (ברירת מחדל), `menu` או `split`. תפריט ולחצן
+  מפוצל חייבים `children` (עד 20 ילדים, לחצנים בלבד — אין קינון תפריטים)
+- בלחצן מפוצל, לחיצה על החלק הראשי שולחת אירוע לחיצה של הפקד עצמו (עם ה-`id`
+  וה-`param` שלו), ולחיצה על חץ התפריט שולחת את האירוע של הילד שנבחר. בתפריט
+  ה-overflow הפקד מוצג כתת-תפריט שהפעולה הראשית היא פריטו הראשון
 - הפקדים נשמרים בזיכרון בלבד — יש לרשום מחדש בכל `plugin.boot`. לפקד קבוע
   שקיים גם בלי שהתוסף רץ, העדיפו רישום דקלרטיבי ב-`contributes.startup`
   (ראו "תרומות עלייה דקלרטיביות")

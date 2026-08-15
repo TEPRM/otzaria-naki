@@ -3,7 +3,6 @@ import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:otzaria/theme/theme_exports.dart';
 import 'package:otzaria/widgets/widgets_exports.dart';
 import 'package:otzaria/widgets/misc/app_menu_exports.dart';
-import 'package:otzaria/widgets/misc/rtl_icon.dart';
 
 /// מחשב כמה כפתורי פעולה ניתן להציג בסרגל הקריאה לפי רוחב המסך.
 ///
@@ -356,14 +355,6 @@ class _MenuIconActionRow extends StatelessWidget {
   /// מסתמך על סכום הגבהים כדי לבחור כיוון פתיחה.
   static const double rowHeight = _buttonSize + 8;
 
-  static Widget _buildIcon(IconData? icon) {
-    if (icon == FluentIcons.chevron_left_24_regular ||
-        icon == FluentIcons.chevron_right_24_regular) {
-      return RtlIcon(icon!, size: _iconSize);
-    }
-    return Icon(icon, size: _iconSize);
-  }
-
   @override
   Widget build(BuildContext context) {
     assert(
@@ -380,7 +371,7 @@ class _MenuIconActionRow extends StatelessWidget {
             IconButton(
               onPressed: action.onPressed,
               tooltip: action.tooltip,
-              icon: _buildIcon(action.icon),
+              icon: Icon(action.icon, size: _iconSize),
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(
                 minWidth: _buttonSize,
@@ -458,6 +449,55 @@ class ActionButtonData {
       icon: icon,
       tooltip: tooltip,
       onPressed: onPressed,
+    );
+  }
+
+  /// לחצן מפוצל: [onPressed] היא הפעולה הראשית, ו-[menuItems] נפתחים מהחץ
+  /// שלצידה. ב-overflow הפקד הופך לתת-תפריט שהפעולה הראשית היא פריטו הראשון.
+  factory ActionButtonData.split({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback? onPressed,
+    required List<ActionButtonData> menuItems,
+    required bool compact,
+    bool selected = false,
+    String? menuTooltip,
+    Key? key,
+  }) {
+    return ActionButtonData(
+      // הערך הוא אינדקס ולא ActionButtonData, כי השוואת ActionButtonData היא
+      // לפי tooltip ושני פריטים בעלי אותו כיתוב היו מפעילים את אותה פעולה.
+      widget: BarSplitButton<int>(
+        key: key,
+        icon: icon,
+        tooltip: tooltip,
+        compact: compact,
+        selected: selected,
+        onPressed: onPressed,
+        menuTooltip: menuTooltip ?? 'אפשרויות נוספות',
+        entries: [
+          for (var i = 0; i < menuItems.length; i++)
+            AppMenuEntry<int>(
+              value: i,
+              label: menuItems[i].tooltip ?? '',
+              icon: menuItems[i].icon,
+              enabled: menuItems[i].onPressed != null,
+            ),
+        ],
+        onSelected: (index) => menuItems[index].onPressed?.call(),
+      ),
+      icon: icon,
+      tooltip: tooltip,
+      onPressed: onPressed,
+      submenuItems: [
+        ActionButtonData(
+          widget: const SizedBox.shrink(),
+          icon: icon,
+          tooltip: tooltip,
+          onPressed: onPressed,
+        ),
+        ...menuItems,
+      ],
     );
   }
 

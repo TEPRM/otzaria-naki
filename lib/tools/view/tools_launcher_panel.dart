@@ -11,6 +11,7 @@ import 'package:otzaria/plugins/bloc/plugin_system_event.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_state.dart';
 import 'package:otzaria/plugins/view/plugin_actions.dart';
 import 'package:otzaria/plugins/view/plugin_settings_screen.dart';
+import 'package:otzaria/plugins/view/widgets/plugin_drop_zone.dart';
 import 'package:otzaria/settings/engine/settings_bloc.dart';
 import 'package:otzaria/settings/engine/settings_event.dart';
 import 'package:otzaria/settings/engine/settings_state.dart';
@@ -24,6 +25,7 @@ import 'package:otzaria/tools/built_in_tools_catalog.dart';
 import 'package:otzaria/tools/tool_catalog_entry.dart';
 import 'package:otzaria/tools/tool_order.dart';
 import 'package:otzaria/widgets/dialogs/dialogs_exports.dart';
+import 'package:otzaria/widgets/feedback/edge_scrollbar_behavior.dart';
 import 'package:otzaria/widgets/layout/app_card.dart';
 import 'package:otzaria/widgets/misc/app_popup_menu.dart';
 import 'package:otzaria/widgets/text/rtl_text_field.dart';
@@ -89,9 +91,9 @@ List<ToolCatalogEntry> orderedToolEntries(List<ToolCatalogEntry> entries) => [
   for (final group in groupToolEntries(entries)) ...group.entries,
 ];
 
-/// רוחב היעד לקובייה.
+/// רוחב היעד לקובייה — ברוחב הפאנל שבברירת מחדל נכנסות ארבע קוביות בשורה.
 @visibleForTesting
-const double kToolTileTargetWidth = 104;
+const double kToolTileTargetWidth = 88;
 
 /// המרווח בקצה ימין שמפנה מקום לפס הגלילה, כדי שלא יעלה על הקוביות.
 @visibleForTesting
@@ -506,19 +508,21 @@ class _ToolsLauncherPanelState extends State<ToolsLauncherPanel> {
     final openToolIds = _openToolIds(context.watch<TabsBloc>().state);
     _keyboardEntries = entries;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildHeader(),
-        const SizedBox(height: AppTokens.spaceSM),
-        _buildSearchField(entries),
-        const SizedBox(height: AppTokens.spaceMD),
-        Expanded(
-          child: entries.isEmpty
-              ? _buildEmptyState(settingsState.isOfflineMode, allEntries)
-              : _buildGrid(entries, openToolIds),
-        ),
-      ],
+    return PluginDropZone(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildHeader(),
+          const SizedBox(height: AppTokens.spaceSM),
+          _buildSearchField(entries),
+          const SizedBox(height: AppTokens.spaceMD),
+          Expanded(
+            child: entries.isEmpty
+                ? _buildEmptyState(settingsState.isOfflineMode, allEntries)
+                : _buildGrid(entries, openToolIds),
+          ),
+        ],
+      ),
     );
   }
 
@@ -626,7 +630,7 @@ class _ToolsLauncherPanelState extends State<ToolsLauncherPanel> {
           autofocus: false,
           onKeyEvent: (_, event) => _handleKey(event, entries, columns),
           child: ScrollConfiguration(
-            behavior: const _RightScrollbarBehavior(),
+            behavior: const EdgeScrollbarBehavior.right(),
             child: ListView(
               controller: _gridScrollController,
               // הרווח בימין שמור לפס הגלילה, כדי שלא יעלה על הקוביות.
@@ -746,35 +750,6 @@ class _ToolsLauncherPanelState extends State<ToolsLauncherPanel> {
         onTap: () => widget.onToolSelected(entry),
       ),
     );
-  }
-}
-
-/// פס הגלילה של רשת הכלים תמיד בקצה ימין, בתוך המרווח ששמור לו — כך אינו
-/// מצטייר על הקוביות ואינו מתנגש בידית שינוי הרוחב שבקצה שמאל.
-class _RightScrollbarBehavior extends MaterialScrollBehavior {
-  const _RightScrollbarBehavior();
-
-  @override
-  Widget buildScrollbar(
-    BuildContext context,
-    Widget child,
-    ScrollableDetails details,
-  ) {
-    if (axisDirectionToAxis(details.direction) != Axis.vertical) return child;
-    switch (getPlatform(context)) {
-      case TargetPlatform.linux:
-      case TargetPlatform.macOS:
-      case TargetPlatform.windows:
-        return Scrollbar(
-          controller: details.controller,
-          scrollbarOrientation: ScrollbarOrientation.right,
-          child: child,
-        );
-      case TargetPlatform.android:
-      case TargetPlatform.fuchsia:
-      case TargetPlatform.iOS:
-        return child;
-    }
   }
 }
 
@@ -1005,9 +980,25 @@ class _ToolDragFeedback extends StatelessWidget {
 
 /// קובייה בודדת ברשת הכלים.
 class ToolTile extends StatelessWidget {
-  static const double iconBoxSize = 32;
-  static const double iconSize = 16;
-  static const double menuButtonSize = 26;
+  static const double maxIconSize = 36;
+  static const double minIconSize = 20;
+  static const double menuButtonSize = 24;
+  static const double menuIconSize = 13;
+
+  /// התווית קטנה ובשתי שורות, כדי שרוב הקובייה תישאר לאייקון.
+  static const double labelFontSize = 11;
+  static const double labelLineHeight = 1.2;
+  static const double labelBlockHeight = labelFontSize * labelLineHeight * 2;
+
+  /// גודל האייקון לגובה הפנוי בקובייה: כל מה שנשאר אחרי שתי שורות התווית.
+  /// כך פאנל מצומצם מקטין את האייקון במקום לחתוך את הכתב.
+  static double iconSizeFor(double availableHeight) {
+    if (!availableHeight.isFinite) return maxIconSize;
+    return (availableHeight - AppTokens.spaceXS - labelBlockHeight).clamp(
+      minIconSize,
+      maxIconSize,
+    );
+  }
 
   final ToolCatalogEntry entry;
   final bool isOpen;
@@ -1049,40 +1040,36 @@ class ToolTile extends StatelessWidget {
             Center(
               child: Padding(
                 padding: const EdgeInsets.all(AppTokens.spaceXS),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Container(
-                      width: iconBoxSize,
-                      height: iconBoxSize,
-                      decoration: BoxDecoration(
-                        color: cs.secondaryContainer,
-                        borderRadius: AppTokens.borderRadiusAll,
-                      ),
-                      child: Center(child: _buildIcon(cs)),
-                    ),
-                    const SizedBox(height: AppTokens.spaceXS),
-                    Flexible(
-                      child: Text(
-                        entry.label,
-                        textAlign: TextAlign.center,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          fontWeight: FontWeight.w600,
-                          color: cs.onSurface,
+                child: LayoutBuilder(
+                  builder: (context, constraints) => Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      _buildIcon(cs, iconSizeFor(constraints.maxHeight)),
+                      const SizedBox(height: AppTokens.spaceXS),
+                      Flexible(
+                        child: Text(
+                          entry.label,
+                          textAlign: TextAlign.center,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            fontSize: labelFontSize,
+                            height: labelLineHeight,
+                            fontWeight: FontWeight.w600,
+                            color: cs.onSurface,
+                          ),
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
             if (actions.isNotEmpty)
               PositionedDirectional(
                 top: 0,
-                start: 0,
+                end: 0,
                 child: _buildMenuButton(cs),
               ),
             if (entry.isDevelopment)
@@ -1094,7 +1081,7 @@ class ToolTile extends StatelessWidget {
             if (isOpen)
               PositionedDirectional(
                 top: 4,
-                end: 4,
+                start: 4,
                 child: Icon(
                   FluentIcons.checkmark_circle_16_filled,
                   size: 12,
@@ -1115,7 +1102,7 @@ class ToolTile extends StatelessWidget {
         tooltip: 'אפשרויות נוספות',
         icon: Icon(
           FluentIcons.more_vertical_24_regular,
-          size: 15,
+          size: menuIconSize,
           color: cs.secondary,
         ),
         padding: EdgeInsets.zero,
@@ -1174,15 +1161,15 @@ class ToolTile extends StatelessWidget {
     );
   }
 
-  Widget _buildIcon(ColorScheme cs) {
+  Widget _buildIcon(ColorScheme cs, double iconSize) {
     if (entry.imageIcon != null) {
       return ImageIcon(
         AssetImage(entry.imageIcon!),
         size: iconSize,
-        color: cs.onSecondaryContainer,
+        color: cs.primary,
       );
     }
-    return Icon(entry.icon, size: iconSize, color: cs.onSecondaryContainer);
+    return Icon(entry.icon, size: iconSize, color: cs.primary);
   }
 }
 

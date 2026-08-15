@@ -1065,6 +1065,17 @@ String formatTextWithParentheses(String text) {
   int i = 0;
 
   while (i < text.length) {
+    // תגי HTML עוברים כמכלול - אחרת סוגריים בתוך attribute (למשל
+    // style="color:rgb(0,0,0)") נעטפים ב-<small> וההגדרה נהרסת.
+    if (text[i] == '<') {
+      final tagEnd = _htmlTagEnd(text, i);
+      if (tagEnd != -1) {
+        result.write(text.substring(i, tagEnd + 1));
+        i = tagEnd + 1;
+        continue;
+      }
+    }
+
     if (text[i] == '(') {
       // מחפשים את הסוגר הסוגר המתאים
       int openCount = 1;
@@ -1073,6 +1084,13 @@ String formatTextWithParentheses(String text) {
 
       // בודקים אם יש סוגר פותח נוסף בפנים
       while (j < text.length && openCount > 0) {
+        if (text[j] == '<') {
+          final tagEnd = _htmlTagEnd(text, j);
+          if (tagEnd != -1) {
+            j = tagEnd + 1;
+            continue;
+          }
+        }
         if (text[j] == '(') {
           if (innerOpenIndex == -1) {
             innerOpenIndex = j; // שומרים את המיקום של הסוגר הפנימי הראשון
@@ -1113,6 +1131,36 @@ String formatTextWithParentheses(String text) {
   }
 
   return result.toString();
+}
+
+int _htmlTagEnd(String text, int start) {
+  if (text.startsWith('<!--', start)) {
+    final commentEnd = text.indexOf('-->', start + 4);
+    return commentEnd == -1 ? -1 : commentEnd + 2;
+  }
+
+  if (start + 1 >= text.length) return -1;
+  final first = text[start + 1];
+  final firstCode = first.codeUnitAt(0);
+  final startsWithLetter =
+      (firstCode >= 65 && firstCode <= 90) ||
+      (firstCode >= 97 && firstCode <= 122);
+  if (!startsWithLetter && first != '!' && first != '/' && first != '?') {
+    return -1;
+  }
+
+  String? quote;
+  for (var i = start + 1; i < text.length; i++) {
+    final char = text[i];
+    if (quote != null) {
+      if (char == quote) quote = null;
+    } else if (char == '"' || char == "'") {
+      quote = char;
+    } else if (char == '>') {
+      return i;
+    }
+  }
+  return -1;
 }
 
 String replaceHolyNames(String s) {
@@ -1243,6 +1291,28 @@ List<String> hebrewTokenAlternatives(String token) {
     }
   }
   return [token];
+}
+
+/// האם [token] הוא ראשי-תיבות של [words] — כל מילה תורמת תחילית רצופה
+/// והצירוף שווה בדיוק לטוקן ("יוד" ← "יורה דעה", "אהע" ← "אבן העזר").
+/// הסף (3 תווים, שתי מילים לפחות) מונע מטוקן-מיקום קצר להיתפס ככותרת.
+bool hebrewAbbreviationMatchesWords(String token, List<String> words) {
+  if (token.length < 3 || words.length < 2) return false;
+
+  bool walk(int wordIndex, int pos) {
+    if (wordIndex == words.length) return pos == token.length;
+    final word = words[wordIndex];
+    final remaining = token.length - pos;
+    if (remaining <= 0) return false;
+    final maxLen = word.length < remaining ? word.length : remaining;
+    for (var len = 1; len <= maxLen; len++) {
+      if (word.codeUnitAt(len - 1) != token.codeUnitAt(pos + len - 1)) break;
+      if (walk(wordIndex + 1, pos + len)) return true;
+    }
+    return false;
+  }
+
+  return walk(0, 0);
 }
 
 /// מנתח טוקני-מיקום כציטוט דף בפורמט "מספר ואחריו עמוד אופציונלי" (אחרי הפשטת

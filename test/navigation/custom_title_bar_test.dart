@@ -17,6 +17,7 @@ import 'package:otzaria/navigation/bloc/navigation_event.dart';
 import 'package:otzaria/navigation/bloc/navigation_state.dart';
 import 'package:otzaria/navigation/view/custom_title_bar.dart';
 import 'package:otzaria/settings/engine/settings_bloc.dart';
+import 'package:otzaria/shortcuts/shortcut_helper.dart';
 import 'package:otzaria/settings/engine/settings_event.dart';
 import 'package:otzaria/settings/engine/settings_state.dart';
 import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
@@ -68,6 +69,59 @@ void main() {
     expect(find.byTooltip('ספר א, פרק א'), findsOneWidget);
   });
 
+  group('שורה עמוסה בכרטיסיות', () {
+    // ברוחב הזה כל כרטיסיה שאינה הנבחרת מקבלת פחות מ-12 פיקסל, כלומר אחרי
+    // הריפודים לא נותר בה מקום לתוכן.
+    Future<_TestTabsBloc> pumpCrowdedStrip(WidgetTester tester) async {
+      final tabs = [for (var i = 0; i < 200; i++) _makeTextTab('ספר $i')];
+      final tabsBloc = _TestTabsBloc(
+        TabsState(tabs: tabs, currentTabIndex: 0),
+      );
+      final navigationBloc = _TestNavigationBloc(
+        const NavigationState(currentScreen: Screen.reading),
+      );
+      final settingsBloc = _TestSettingsBloc(SettingsState.initial());
+
+      addTearDown(() async {
+        for (final tab in tabs) {
+          tab.dispose();
+        }
+        await tabsBloc.close();
+        await navigationBloc.close();
+        await settingsBloc.close();
+      });
+
+      await _setSurfaceSize(tester, const Size(1200, 800));
+      await _pumpTitleBar(
+        tester,
+        tabsBloc: tabsBloc,
+        navigationBloc: navigationBloc,
+        settingsBloc: settingsBloc,
+      );
+      return tabsBloc;
+    }
+
+    testWidgets('נבנה תוכן רק לכרטיסיות שיש בהן מקום להציגו', (tester) async {
+      await pumpCrowdedStrip(tester);
+
+      expect(find.text('ספר 0'), findsOneWidget);
+      expect(find.text('ספר 100'), findsNothing);
+    });
+
+    testWidgets('לחיצה על כרטיסיה צרה עדיין בוחרת אותה', (tester) async {
+      final tabsBloc = await pumpCrowdedStrip(tester);
+
+      // אמצע השורה — הרחק מהכרטיסיה הנבחרת שבקצה, כלומר בתוך הכרטיסיות הצרות.
+      final stripRect = tester.getRect(find.byType(ReadingTabStrip));
+      await tester.tapAt(stripRect.center);
+      await tester.pump();
+
+      final selection = tabsBloc.addedEvents.whereType<SetCurrentTab>();
+      expect(selection, isNotEmpty);
+      expect(selection.last.index, greaterThan(0));
+    });
+  });
+
   testWidgets('אייקון pin מוצג כשהכרטיסיה מוצמדת', (tester) async {
     final tab = _makeTextTab('ספר א');
     tab.isPinned = true;
@@ -100,6 +154,40 @@ void main() {
       ),
       findsOneWidget,
     );
+  });
+
+  testWidgets('ב-Mac ה-tooltip של כפתורי הכותרת מציג ⌘ ולא CTRL', (
+    tester,
+  ) async {
+    ShortcutHelper.isMacForTesting = true;
+    addTearDown(() => ShortcutHelper.isMacForTesting = null);
+
+    final tab = _makeTextTab('ספר א');
+    final tabsBloc = _TestTabsBloc(
+      TabsState(tabs: [tab], currentTabIndex: 0),
+    );
+    final navigationBloc = _TestNavigationBloc(
+      const NavigationState(currentScreen: Screen.reading),
+    );
+    final settingsBloc = _TestSettingsBloc(SettingsState.initial());
+
+    addTearDown(() async {
+      tab.dispose();
+      await tabsBloc.close();
+      await navigationBloc.close();
+      await settingsBloc.close();
+    });
+
+    await _setSurfaceSize(tester, const Size(1200, 800));
+    await _pumpTitleBar(
+      tester,
+      tabsBloc: tabsBloc,
+      navigationBloc: navigationBloc,
+      settingsBloc: settingsBloc,
+    );
+
+    expect(find.byTooltip('הצג היסטוריה (⌘ + H)'), findsOneWidget);
+    expect(find.byTooltip('הצג סימניות (⌘ + ⇧ + B)'), findsOneWidget);
   });
 
   testWidgets('אייקון pin מוסתר כשהכרטיסיה אינה מוצמדת', (tester) async {
@@ -807,6 +895,78 @@ void main() {
         closeButtons,
         lessThan(tabs.length),
         reason: 'X מתחבא בטאבים צרים שאינם נבחרים/תחת hover',
+      );
+    });
+
+    testWidgets('ה-X של טאב צר תחת ריחוף שורד בנייה מחדש של שורת הטאבים', (
+      tester,
+    ) async {
+      // בטאב צר שאינו נבחר ה-X מוצג רק בריחוף. כשמצב הריחוף לא שרד בנייה מחדש
+      // של השורה, ה-IconButton נמחק מתחת לסמן ולחיצה עליו לא סגרה את הטאב.
+      final tabs = List.generate(10, (i) => _makeTextTab('ספר מספר $i'));
+      final tabsBloc = _TestTabsBloc(
+        TabsState(tabs: tabs, currentTabIndex: 0),
+      );
+      final navigationBloc = _TestNavigationBloc(
+        const NavigationState(currentScreen: Screen.reading),
+      );
+      final settingsBloc = _TestSettingsBloc(SettingsState.initial());
+      final historyBloc = _TestHistoryBloc();
+
+      addTearDown(() async {
+        for (final t in tabs) {
+          t.dispose();
+        }
+        await tabsBloc.close();
+        await navigationBloc.close();
+        await settingsBloc.close();
+        await historyBloc.close();
+      });
+
+      await _setSurfaceSize(tester, const Size(900, 800));
+      await _pumpTitleBar(
+        tester,
+        tabsBloc: tabsBloc,
+        navigationBloc: navigationBloc,
+        settingsBloc: settingsBloc,
+        historyBloc: historyBloc,
+      );
+      await tester.pumpAndSettle();
+
+      final hoveredTab = find.ancestor(
+        of: find.text('ספר מספר 3'),
+        matching: find.byType(Tab),
+      );
+      final closeButton = find.descendant(
+        of: hoveredTab,
+        matching: find.byIcon(FluentIcons.dismiss_24_regular),
+      );
+      expect(closeButton, findsNothing, reason: 'בטאב צר לא-נבחר ה-X מוסתר');
+
+      final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.addPointer(location: tester.getCenter(hoveredTab));
+      addTearDown(gesture.removePointer);
+      await tester.pumpAndSettle();
+      expect(closeButton, findsOneWidget, reason: 'ריחוף חושף את ה-X');
+
+      // בנייה מחדש של השורה מסיבה חיצונית — כמו setState של המסך העוטף.
+      tester.element(find.byType(CustomTitleBar)).markNeedsBuild();
+      await tester.pumpAndSettle();
+
+      expect(
+        closeButton,
+        findsOneWidget,
+        reason: 'ה-X חייב להישאר תחת הסמן גם אחרי בנייה מחדש',
+      );
+      tester
+          .widget<IconButton>(
+            find.ancestor(of: closeButton, matching: find.byType(IconButton)),
+          )
+          .onPressed!();
+      await tester.pump();
+      expect(
+        tabsBloc.addedEvents.whereType<RemoveTab>().map((e) => e.tab),
+        contains(same(tabs[3])),
       );
     });
 

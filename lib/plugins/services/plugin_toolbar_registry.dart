@@ -1,6 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:otzaria/plugins/models/plugin_toolbar_item.dart';
 
+/// סוגי פקד שילדיהם הם פריטי תפריט.
+const _typesWithChildren = {'menu', 'split'};
+
 /// רישום פקדי שורת הפקדים שתוספים הוסיפו (reader.addToolbarItem).
 class PluginToolbarRegistry extends ChangeNotifier {
   static const int maxTopLevelItemsPerPlugin = 2;
@@ -75,6 +78,39 @@ class PluginToolbarRegistry extends ChangeNotifier {
     if (_items.remove(pluginId) != null) notifyListeners();
   }
 
+  /// מחליף קבוצת פריטים מנוהלת בעדכון יחיד, בלי לגעת בפריטים אחרים.
+  void replaceManagedItems(
+    String pluginId, {
+    required Set<String> managedIds,
+    required List<PluginToolbarItem> items,
+  }) {
+    if (items.any((item) => !managedIds.contains(item.id)) ||
+        items.map((item) => item.id).toSet().length != items.length) {
+      throw const PluginToolbarException(
+        'error.invalid_params',
+        'managed toolbar items must have unique declared ids',
+      );
+    }
+    final next = [
+      for (final item in _items[pluginId] ?? const <PluginToolbarItem>[])
+        if (!managedIds.contains(item.id)) item,
+      ...items,
+    ];
+    if (next.length > maxTopLevelItemsPerPlugin ||
+        next.map((item) => item.id).toSet().length != next.length) {
+      throw const PluginToolbarException(
+        'error.invalid_params',
+        'a plugin can register at most 2 unique toolbar items',
+      );
+    }
+    if (next.isEmpty) {
+      _items.remove(pluginId);
+    } else {
+      _items[pluginId] = next;
+    }
+    notifyListeners();
+  }
+
   List<(String pluginId, PluginToolbarItem item)> getAll() {
     return List.unmodifiable([
       for (final entry in _items.entries)
@@ -89,7 +125,9 @@ class PluginToolbarRegistry extends ChangeNotifier {
   }) {
     final id = _safeText(json['id'], field: 'id', maxLength: 128);
     final type = json['type'] as String? ?? 'button';
-    final allowedTypes = isChild ? const {'button'} : const {'button', 'menu'};
+    final allowedTypes = isChild
+        ? const {'button'}
+        : const {'button', 'menu', 'split'};
     if (!allowedTypes.contains(type)) {
       throw const PluginToolbarException(
         'error.invalid_params',
@@ -133,10 +171,10 @@ class PluginToolbarRegistry extends ChangeNotifier {
     final children = <PluginToolbarItem>[];
     final childrenValue = json['children'];
     if (childrenValue != null) {
-      if (type != 'menu') {
+      if (!_typesWithChildren.contains(type)) {
         throw const PluginToolbarException(
           'error.invalid_params',
-          'only menu items may declare children',
+          'only menu or split items may declare children',
         );
       }
       if (childrenValue is! List || childrenValue.length > maxMenuChildren) {
@@ -161,10 +199,10 @@ class PluginToolbarRegistry extends ChangeNotifier {
         );
       }
     }
-    if (type == 'menu' && children.isEmpty) {
-      throw const PluginToolbarException(
+    if (_typesWithChildren.contains(type) && children.isEmpty) {
+      throw PluginToolbarException(
         'error.invalid_params',
-        'menu requires children',
+        '$type requires children',
       );
     }
     if (children.map((child) => child.id).toSet().length != children.length) {
@@ -172,6 +210,42 @@ class PluginToolbarRegistry extends ChangeNotifier {
         'error.invalid_params',
         'children ids must be unique',
       );
+    }
+
+    final placement = json['placement'] as String? ?? 'primary';
+    if (isChild && json['placement'] != null) {
+      throw const PluginToolbarException(
+        'error.invalid_params',
+        'placement is only allowed on top-level items',
+      );
+    }
+    if (!const {'primary', 'overflow'}.contains(placement)) {
+      throw const PluginToolbarException(
+        'error.invalid_params',
+        'placement must be "primary" or "overflow"',
+      );
+    }
+
+    final rawOrder = json['order'];
+    if (rawOrder != null) {
+      if (isChild) {
+        throw const PluginToolbarException(
+          'error.invalid_params',
+          'order is only allowed on top-level items',
+        );
+      }
+      if (placement != 'overflow') {
+        throw const PluginToolbarException(
+          'error.invalid_params',
+          'order requires placement "overflow"',
+        );
+      }
+      if (rawOrder is! int || rawOrder < 0 || rawOrder > 10000) {
+        throw const PluginToolbarException(
+          'error.invalid_params',
+          'order must be an integer between 0 and 10000',
+        );
+      }
     }
 
     return PluginToolbarItem(
@@ -184,6 +258,8 @@ class PluginToolbarRegistry extends ChangeNotifier {
       children: children,
       openPlugin: json['openPlugin'] == true,
       param: json['param'],
+      placement: placement,
+      order: rawOrder as int? ?? PluginToolbarItem.defaultOrder,
     );
   }
 

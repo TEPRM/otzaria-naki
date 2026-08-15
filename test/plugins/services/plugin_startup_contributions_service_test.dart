@@ -7,7 +7,9 @@ import 'package:otzaria/plugins/models/plugin_permission_grant.dart';
 import 'package:otzaria/plugins/models/plugin_published_record.dart';
 import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
 import 'package:otzaria/plugins/services/context_menu_registry.dart';
+import 'package:otzaria/plugins/services/plugin_external_editions_registry.dart';
 import 'package:otzaria/plugins/services/plugin_lazy_activation_service.dart';
+import 'package:otzaria/plugins/services/plugin_search_dialog_registry.dart';
 import 'package:otzaria/plugins/services/plugin_startup_contributions_service.dart';
 import 'package:otzaria/plugins/services/plugin_toolbar_registry.dart';
 
@@ -149,6 +151,14 @@ Map<String, dynamic> _fullStartup() => {
     },
   ],
   'activationEvents': ['reader.sectionContentChanged'],
+  'searchDialogItems': [
+    {
+      'id': 'include-external',
+      'type': 'checkbox',
+      'title': 'חפש גם במקור חיצוני',
+      'visibleInModes': ['exact'],
+    },
+  ],
 };
 
 const _allPermissions = {
@@ -156,6 +166,7 @@ const _allPermissions = {
   'reader.toolbar',
   'reader.context_menu',
   'published_data.write',
+  'search.dialog',
   'events.subscribe:reader.sectionContentChanged',
 };
 
@@ -163,6 +174,8 @@ void main() {
   late PluginToolbarRegistry toolbar;
   late ContextMenuRegistry contextMenu;
   late PluginLazyActivationService activation;
+  late PluginSearchDialogRegistry searchDialog;
+  late PluginExternalEditionsRegistry externalEditions;
   late PluginStartupContributionsService service;
   late _FakeRepo repo;
 
@@ -170,10 +183,14 @@ void main() {
     toolbar = PluginToolbarRegistry.forTesting();
     contextMenu = ContextMenuRegistry.forTesting();
     activation = PluginLazyActivationService.forTesting();
+    searchDialog = PluginSearchDialogRegistry.forTesting();
+    externalEditions = PluginExternalEditionsRegistry.detached();
     service = PluginStartupContributionsService.forTesting(
       toolbarRegistry: toolbar,
       contextMenuRegistry: contextMenu,
       activationService: activation,
+      searchDialogRegistry: searchDialog,
+      externalEditionsRegistry: externalEditions,
     );
     repo = _FakeRepo();
   });
@@ -185,6 +202,7 @@ void main() {
 
     expect(toolbar.getAll().single.$2.id, 'b1');
     expect(contextMenu.getAll().single.$2.id, 'm1');
+    expect(searchDialog.getAll().single.$2.id, 'include-external');
     final record = repo.records.single;
     expect(record.key, 'manifest:k1');
     expect(jsonDecode(record.payloadJson), {'title': 'אירוע'});
@@ -193,6 +211,81 @@ void main() {
       isFalse,
       reason: 'בלי app.run_on_startup אין הערה שקטה — לחיצה תפתח את הדף',
     );
+  });
+
+  group('externalEditions', () {
+    InstalledPlugin editionsPlugin({List<String> permissions = const []}) {
+      final manifest = PluginManifest.fromJson({
+        'schemaVersion': 1,
+        'id': 'p1',
+        'name': 'Test',
+        'version': '1.0.0',
+        'entrypoint': 'index.html',
+        'permissions': permissions,
+        'contributes': {
+          'databaseSources': [
+            {'id': 'mapping_source', 'label': 'מיפוי', 'required': true},
+          ],
+          'startup': {
+            'externalEditions': [
+              {
+                'id': 'editions-1',
+                'provider': 'extlib',
+                'sourceId': 'mapping_source',
+                'table': 'mapping',
+                'externalIdColumn': 'ext_id',
+                'otzariaIdColumn': 'otzaria_id',
+              },
+            ],
+          },
+        },
+      });
+      return InstalledPlugin(
+        pluginId: 'p1',
+        name: 'Test',
+        version: '1.0.0',
+        installPath: '/plugins/p1',
+        entrypointPath: 'index.html',
+        enabled: true,
+        pinned: false,
+        manifest: manifest,
+        installedAt: DateTime(2026),
+        updatedAt: DateTime(2026),
+      );
+    }
+
+    const editionsPermissions = {
+      'app.startup_contributions',
+      'database.read',
+      'library.books.read',
+    };
+
+    test('נרשם עם שתי ההרשאות ומוסר כשאחת נשללת', () async {
+      repo.grantedByPlugin['p1'] = {...editionsPermissions};
+      await service.sync([editionsPlugin()], repo);
+      expect(externalEditions.configs, hasLength(1));
+      final config = externalEditions.configs.single;
+      expect(config.provider, 'extlib');
+      expect(config.table, 'mapping');
+      expect(config.plugin.pluginId, 'p1');
+
+      // שלילת database.read מסירה את הרישום בסנכרון הבא.
+      repo.grantedByPlugin['p1'] = {
+        'app.startup_contributions',
+        'library.books.read',
+      };
+      await service.sync([editionsPlugin()], repo);
+      expect(externalEditions.configs, isEmpty);
+    });
+
+    test('הסרת התוסף מסירה את הרישום', () async {
+      repo.grantedByPlugin['p1'] = {...editionsPermissions};
+      await service.sync([editionsPlugin()], repo);
+      expect(externalEditions.configs, hasLength(1));
+
+      await service.sync(const [], repo);
+      expect(externalEditions.configs, isEmpty);
+    });
   });
 
   test('lazy activation requires the app.run_on_startup permission', () async {
@@ -221,6 +314,7 @@ void main() {
 
     expect(toolbar.getAll(), isEmpty);
     expect(contextMenu.getAll(), isEmpty);
+    expect(searchDialog.getAll(), isEmpty);
     expect(repo.records, isEmpty);
     expect(activation.queueTargetedEvent('p1', 'click', {}), isFalse);
   });
@@ -233,6 +327,7 @@ void main() {
     expect(toolbar.getAll(), isEmpty);
     expect(contextMenu.getAll(), hasLength(1));
     expect(repo.records, hasLength(1));
+    expect(searchDialog.getAll(), hasLength(1));
   });
 
   test('revoking the permission on a later sync removes everything', () async {
@@ -246,7 +341,9 @@ void main() {
 
     expect(toolbar.getAll(), isEmpty);
     expect(contextMenu.getAll(), isEmpty);
+    expect(searchDialog.getAll(), isEmpty);
     expect(repo.records, isEmpty);
+    expect(searchDialog.getAll(), isEmpty);
   });
 
   test('a disabled plugin contributes nothing', () async {
@@ -258,6 +355,7 @@ void main() {
 
     expect(toolbar.getAll(), isEmpty);
     expect(repo.records, isEmpty);
+    expect(searchDialog.getAll(), isEmpty);
   });
 
   test('an uninstalled plugin is cleaned up on the next sync', () async {
@@ -293,6 +391,7 @@ void main() {
 
     expect(toolbar.getAll().single.$2.id, 'b2');
     expect(contextMenu.getAll(), isEmpty);
+    expect(searchDialog.getAll(), isEmpty);
     expect(repo.records.single.key, 'manifest:k2');
   });
 
@@ -472,15 +571,61 @@ void main() {
     expect(contextMenu.getAll(), hasLength(1));
   });
 
+  test('פקד Host דקלרטיבי אינו נרשם במסלול ה-toolbar הישן', () async {
+    repo.grantedByPlugin['p1'] = {..._allPermissions};
+
+    await service.sync([
+      _plugin(
+        startup: {
+          'toolbarItems': [
+            {
+              'id': 'host-only',
+              'title': 'Host',
+              'icon': 'book_24_regular',
+              'binding': {
+                'program': 'links',
+                'visibleOutput': 'book',
+              },
+              'action': {
+                'type': 'reader.openBook',
+                'args': {
+                  'identity': {r'$output': 'book'},
+                },
+              },
+            },
+          ],
+        },
+      ),
+    ], repo);
+
+    expect(toolbar.getAll(), isEmpty);
+  });
+
+  test('revoking search.dialog removes only the static search row', () async {
+    repo.grantedByPlugin['p1'] = {..._allPermissions};
+    final plugin = _plugin(startup: _fullStartup());
+    await service.sync([plugin], repo);
+    expect(searchDialog.getAll(), hasLength(1));
+
+    repo.grantedByPlugin['p1'] = {..._allPermissions}..remove('search.dialog');
+    await service.sync([plugin], repo);
+
+    expect(searchDialog.getAll(), isEmpty);
+    expect(toolbar.getAll(), hasLength(1));
+    expect(contextMenu.getAll(), hasLength(1));
+  });
+
   test('reapply restores declarative items after a registry wipe', () async {
     repo.grantedByPlugin['p1'] = {..._allPermissions};
     await service.sync([_plugin(startup: _fullStartup())], repo);
 
     toolbar.removeAll('p1');
     contextMenu.removeAll('p1');
+    searchDialog.removeAll('p1');
     service.reapply('p1');
 
     expect(toolbar.getAll(), hasLength(1));
     expect(contextMenu.getAll(), hasLength(1));
+    expect(searchDialog.getAll(), hasLength(1));
   });
 }

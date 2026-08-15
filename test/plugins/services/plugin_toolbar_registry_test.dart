@@ -49,6 +49,86 @@ void main() {
       expect(item.children.last.onClickEvent, 'marker.clear');
     });
 
+    test('parses a split item and rejects one without children', () {
+      registry.registerPayload('marker', {
+        'id': 'split',
+        'type': 'split',
+        'title': 'Open edition',
+        'icon': 'book_24_regular',
+        'children': [
+          {'id': 'other', 'title': 'Other edition'},
+        ],
+      });
+
+      final item = registry.getAll().single.$2;
+      expect(item.type, 'split');
+      expect(item.children.single.id, 'other');
+
+      expect(
+        () => registry.registerPayload('marker', {
+          'id': 'lonely-split',
+          'type': 'split',
+          'title': 'No children',
+          'icon': 'book_24_regular',
+        }),
+        throwsA(isA<PluginToolbarException>()),
+      );
+    });
+
+    test('order תקין נשמר, ודורש placement overflow ופריט עליון', () {
+      registry.registerPayload('marker', {
+        'id': 'before-print',
+        'title': 'Before print',
+        'icon': 'bookmark_24_regular',
+        'placement': 'overflow',
+        'order': 55,
+      });
+      expect(registry.getAll().single.$2.order, 55);
+
+      // ללא order — ברירת המחדל ממקמת אחרי כל הפריטים המובנים.
+      registry.removeAll('marker');
+      registry.registerPayload('marker', {
+        'id': 'no-order',
+        'title': 'No order',
+        'icon': 'bookmark_24_regular',
+        'placement': 'overflow',
+      });
+      expect(registry.getAll().single.$2.order, PluginToolbarItem.defaultOrder);
+
+      for (final invalid in [
+        {'placement': 'primary', 'order': 55}, // order בלי overflow
+        {'placement': 'overflow', 'order': -1},
+        {'placement': 'overflow', 'order': 10001},
+        {'placement': 'overflow', 'order': 'first'},
+      ]) {
+        expect(
+          () => registry.registerPayload('other', {
+            'id': 'bad-order',
+            'title': 'Bad',
+            'icon': 'bookmark_24_regular',
+            ...invalid,
+          }),
+          throwsA(isA<PluginToolbarException>()),
+          reason: 'payload $invalid היה אמור להידחות',
+        );
+      }
+
+      expect(
+        () => registry.registerPayload('other', {
+          'id': 'menu-with-child-order',
+          'type': 'menu',
+          'title': 'Menu',
+          'icon': 'bookmark_24_regular',
+          'placement': 'overflow',
+          'children': [
+            {'id': 'child', 'title': 'Child', 'order': 5},
+          ],
+        }),
+        throwsA(isA<PluginToolbarException>()),
+        reason: 'order על ילד היה אמור להידחות',
+      );
+    });
+
     test('requires an icon on a top-level item but not on children', () {
       expect(
         () => registry.registerPayload('marker', {
@@ -258,6 +338,61 @@ void main() {
       registry.removeAll('first');
 
       expect(registry.getAll().single.$1, 'second');
+    });
+
+    test('מחליף ומסתיר קבוצת פקדים בהתראה אטומית אחת', () {
+      const managedIds = {'default', 'editions'};
+      registry.replaceManagedItems(
+        'marker',
+        managedIds: managedIds,
+        items: const [
+          PluginToolbarItem(
+            id: 'default',
+            title: 'Old default',
+            icon: 'apps_24_regular',
+          ),
+          PluginToolbarItem(
+            id: 'editions',
+            title: 'Old editions',
+            icon: 'apps_24_regular',
+          ),
+        ],
+      );
+      final snapshots = <List<String>>[];
+      registry.addListener(() {
+        snapshots.add([
+          for (final record in registry.getAll()) record.$2.title,
+        ]);
+      });
+
+      registry.replaceManagedItems(
+        'marker',
+        managedIds: managedIds,
+        items: const [
+          PluginToolbarItem(
+            id: 'default',
+            title: 'New default',
+            icon: 'apps_24_regular',
+          ),
+          PluginToolbarItem(
+            id: 'editions',
+            title: 'New editions',
+            icon: 'apps_24_regular',
+          ),
+        ],
+      );
+
+      expect(snapshots, [
+        ['New default', 'New editions'],
+      ]);
+
+      registry.replaceManagedItems(
+        'marker',
+        managedIds: managedIds,
+        items: const [],
+      );
+      expect(snapshots.last, isEmpty);
+      expect(snapshots, hasLength(2));
     });
   });
 }

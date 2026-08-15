@@ -624,6 +624,7 @@ dart format lib/file.dart    # Format ONLY files you modified
 | Combined view helpers (shouldShow…) | `test/text_book/view/combined_view/combined_book_screen_test.dart` |
 | TabbedCommentaryPanel tab switching / onTabChanged | `test/text_book/view/tabbed_commentary_panel_test.dart` |
 | Page shape commentary selection | `test/text_book/view/page_shape_commentary_selection_test.dart` |
+| התאמת מפרשי צורת הדף בין ספרים (היקף קטגוריה) | `test/text_book/view/page_shape/page_shape_category_commentator_matching_test.dart` |
 | חלונית הצד של צורת הדף (3 לשוניות) | `test/text_book/view/page_shape/page_shape_sidebar_tabs_test.dart` |
 | תפריט הקשר בצורת הדף (מפרשים / קטע היעד) | `test/text_book/view/page_shape/simple_text_viewer_context_menu_test.dart` |
 | תת-תפריט "מפרשים" המשותף + מדיניות הצגה | `test/text_book/utils/commentators_context_menu_test.dart` |
@@ -667,14 +668,21 @@ dart format lib/file.dart    # Format ONLY files you modified
 | Facet helper | `test/search/facet_helper_test.dart` |
 | Search BLoC facet counts | `test/search/search_bloc_facet_counts_test.dart` |
 | Search scope preferences | `test/search/search_scope_preferences_test.dart` |
+| זכירת המיון ואיחוד התוצאות (העדפה, BLoC, טאב חדש) | `test/search/search_results_preferences_test.dart` |
+| אותן העדפות בלי אתחול `Settings` | `test/search/search_results_preferences_uninitialized_test.dart` |
 | עץ ניווט תוצאות (רשימת סינון, גלוּת הבחירה, פתיחת ענפים) | `test/search/search_navigation_tree_test.dart` |
 | חלונית סינון התוצאות מקצה לקצה (שדה "איתור ספר") | `test/search/search_facet_filtering_book_filter_test.dart` |
+| צמצום מקומי בלחיצה בעץ התוצאות (זיהוי הספר לפי המפתח היציב) | `test/search/search_client_side_facet_narrow_test.dart` |
+| זיהוי ספר של תוצאת חיפוש לפי מפתח האינדקס היציב | `test/search/search_result_book_resolution_test.dart` |
 | ניתוב חיפוש-בספר: פשוט מול מנוע | `test/search/utils/in_book_search_routing_test.dart` |
 | מדיניות ההתאמה (טווח קרבה + התאמת מילים) | `test/search/search_match_policy_test.dart` |
 | פתיחת תוצאה: העברת הקונפיגורציה לטאב הקריאה | `test/search/tantivy_search_results_in_book_routing_test.dart` |
+| זיהוי הספר של תוצאה מול הקטלוג (מפתח האינדקס + אימות כותרת) | `test/search/search_result_book_resolution_test.dart` |
+| פתיחת תוצאה מאינדקס שאינו מסונכרן (מסלול הלחיצה) | `test/search/search_result_stale_index_open_test.dart` |
 | שקילות מנוע ↔ הדגשה במרווח בין מילים | `test/search/highlight_engine_distance_parity_test.dart` |
 | הדגשה במדיניות התאמה — רק בשורות שהמנוע החזיר | `test/utils/highlight_match_policy_test.dart` |
 | שימור קונפיגורציית החיפוש בשכפול/שחזור טאב ובשמירה ל-JSON | `test/tabs/models/tab_search_state_clone_test.dart` |
+| איחוד התוצאות וטווח הקרבה ב-JSON של טאב החיפוש | `test/tabs/models/searching_tab_json_config_test.dart` |
 | Gematria search | `test/tools/gematria/gematria_search_test.dart` |
 
 **Personal Notes**
@@ -697,7 +705,8 @@ dart format lib/file.dart    # Format ONLY files you modified
 | Settings screen controller | `test/settings/settings_screen_controller_test.dart` |
 | Bookmark model | `test/settings/history/bookmark_model_test.dart` |
 | Custom folders BLoC | `test/settings/services/custom_folders/custom_folders_bloc_test.dart` |
-| Backup service (roundtrip, plugins, auto-backup) | `test/settings/services/backup_service_test.dart` |
+| Backup service (roundtrip, plugins, auto-backup, per-book, tabs) | `test/settings/services/backup_service_test.dart` |
+| כיסוי מקומות השמירה — כל box/תיקייה מוכרע כמגובה או לא | `test/settings/services/backup_storage_coverage_test.dart` |
 | Backup store (blobs, dedup, GC) + maintenance helpers | `test/unit/settings/backup/backup_store_test.dart` |
 | Backup rotation (GFS) | `test/unit/settings/backup/backup_rotation_test.dart` |
 | Backup archive merge rules | `test/unit/settings/backup/backup_merge_test.dart` |
@@ -716,10 +725,12 @@ dart format lib/file.dart    # Format ONLY files you modified
 | Nav rail item | `test/widgets/nav_rail_item_test.dart` |
 | Reader side panel shell | `test/widgets/reader_side_panel_shell_test.dart` |
 | Responsive action bar | `test/widgets/responsive_action_bar_test.dart` |
+| רוחב עמודת הטקסט (בסיס אזור הקריאה, יציב בפתיחת חלונית) | `test/widgets/layout/reading_area_width_test.dart` |
 | Scrollable list scrollbar | `test/widgets/scrollable_positioned_list_scrollbar_test.dart` |
 | Smooth mouse-wheel scrolling | `test/widgets/smooth_wheel_scroll_test.dart` |
 | Smart text render settings | `test/widgets/smart_text/render_settings_test.dart` |
 | Smart text ↔ plugin section sync gate | `test/widgets/smart_text/smart_text_section_sync_gate_test.dart` |
+| קיבוע מדויק של גובה השורה (סימוני הערות, `<big>`) בשלושת מסלולי הרינדור | `test/widgets/smart_text/exact_line_height_test.dart` |
 | Work/indexing status overlays | `test/widgets/work_status_overlay_test.dart`, `…indexing_status_overlay_test.dart` |
 | App dropdown/search menu | `test/widgets/app_dropdown_field_test.dart`, `…app_search_menu_test.dart` |
 | Search pane base | `test/widgets/search_pane_base_test.dart` |
@@ -777,6 +788,7 @@ dart format lib/file.dart    # Format ONLY files you modified
 | Link types (נרמול, סוג קנוני, תוויות) | `test/models/link_types_test.dart` |
 | Utils (page map builder, page converter, TOC parser) | `test/utils/page_map_builder_test.dart`, `…page_converter_test.dart`, `…toc_parser_test.dart` |
 | Utils (link processing) | `test/text_book/utils/link_processing_test.dart` |
+| חיתוך HTML לפי טווח הבחירה (שימור עיצוב בהעתקה חלקית) | `test/utils/text/html_slice_test.dart` |
 | גודל פענוח תמונות (cacheWidth על נכסים כבדים) | `test/utils/ui/image_decode_size_test.dart` |
 | Hebrew text utils (migration) | `test/migration/hebrew_text_utils_test.dart` |
 | Text book searcher (in-book search) | `test/text_book/models/text_book_searcher_test.dart` |

@@ -17,13 +17,28 @@ ZmanimCalendarContext? buildZmanimCalendarContext(DateTime date, String city) {
   final cityData = getCityData(city);
   if (cityData == null) return null;
 
-  final latitude = cityData['lat']!;
-  final longitude = cityData['lng']!;
-  final elevation = cityData['elevation']!;
-  final timeZoneId = cityData['timezone'] as String? ?? 'Asia/Jerusalem';
+  return buildZmanimCalendarContextForCoordinates(
+    date,
+    name: city,
+    latitude: (cityData['lat'] as num).toDouble(),
+    longitude: (cityData['lng'] as num).toDouble(),
+    elevation: (cityData['elevation'] as num).toDouble(),
+    timeZoneId: cityData['timezone'] as String? ?? 'Asia/Jerusalem',
+  );
+}
 
+/// בונה הקשר חישוב לקואורדינטות שרירותיות (מקום שאינו ברשימת הערים).
+/// [timeZoneId] חייב להיות מזהה IANA חוקי (זורק אם לא).
+ZmanimCalendarContext buildZmanimCalendarContextForCoordinates(
+  DateTime date, {
+  required double latitude,
+  required double longitude,
+  double elevation = 0,
+  String timeZoneId = 'Asia/Jerusalem',
+  String name = '',
+}) {
   final location = GeoLocation();
-  location.setLocationName(city);
+  location.setLocationName(name);
   location.setLatitude(latitude: latitude);
   location.setLongitude(longitude: longitude);
   location.setElevation(elevation > 0 ? elevation : 0);
@@ -54,12 +69,52 @@ ZmanimCalendarContext? buildZmanimCalendarContext(DateTime date, String city) {
 Map<String, String> calculateDailyTimes(DateTime date, String city) {
   final context = buildZmanimCalendarContext(date, city);
   if (context == null) return {};
+  return _computeDailyTimes(
+    context: context,
+    date: date,
+    city: city,
+    inIsrael: isCityInIsrael(city),
+  );
+}
+
+/// זמני היום לקואורדינטות שרירותיות — מקום שאינו ברשימת הערים.
+/// זמנים תלויי-עיר מחושבים עם ברירות מחדל: קידוש לבנה מושמט (אין נתוני
+/// עיר), הדלקת נרות לפי ברירת המחדל (30 דק'), וחצות הלילה בקירוב
+/// (חצות היום + 12 שעות).
+Map<String, String> calculateDailyTimesForCoordinates(
+  DateTime date, {
+  required double latitude,
+  required double longitude,
+  double elevation = 0,
+  String timeZoneId = 'Asia/Jerusalem',
+  bool inIsrael = false,
+}) {
+  final context = buildZmanimCalendarContextForCoordinates(
+    date,
+    latitude: latitude,
+    longitude: longitude,
+    elevation: elevation,
+    timeZoneId: timeZoneId,
+  );
+  return _computeDailyTimes(
+    context: context,
+    date: date,
+    city: '',
+    inIsrael: inIsrael,
+  );
+}
+
+Map<String, String> _computeDailyTimes({
+  required ZmanimCalendarContext context,
+  required DateTime date,
+  required String city,
+  required bool inIsrael,
+}) {
   final zmanimCalendar = context.zmanimCalendar;
   final tzLocation = context.tzLocation;
 
-  final bool isInIsrael = isCityInIsrael(city);
   final jewishCalendar = JewishCalendar.fromDateTime(date);
-  jewishCalendar.inIsrael = isInIsrael;
+  jewishCalendar.inIsrael = inIsrael;
 
   final ctx = ZmanComputeContext(
     cal: zmanimCalendar,
@@ -447,20 +502,22 @@ final List<ZmanDefinition> kZmanimRegistry = [
 
   // ── זריחה ──────────────────────────────────────────────────────────────
   ZmanDefinition(
+    id: 'sunriseAstronomical',
+    title: 'נץ אסטרונומי',
+    subtitle: 'בתיקון גובה',
+    category: 'זריחה',
+    explanation:
+        '''זריחת החמה בתיקון גובה מלא — הזמן שבו השמש הייתה נראית מגובה המקום אילו האופק היה חשוף עד קו הים, ללא הרים מסתירים.
+בערים גבוהות (כגון ירושלים) הוא מוקדם בכמה דקות מהנץ המקובל, ואין נוהגים על פיו למעשה.''',
+    compute: (c) => c.cal.getSunrise(),
+  ),
+  ZmanDefinition(
     id: 'sunrise',
     title: 'הנץ הנראה',
     category: 'זריחה',
     explanation:
-        '''הנץ החמה כפי שנראה מגובה המקום בניכוי X מטר, שאלו הסתרים שיש לנכותם כדי לקבל את האופק האמיתי ולקבוע על פיו את הנץ הנראה.''',
-    defaultEnabled: true,
-    compute: (c) => c.cal.getSunrise(),
-  ),
-  ZmanDefinition(
-    id: 'seaLevelSunrise',
-    title: 'נץ החמה המישורי',
-    category: 'זריחה',
-    explanation: '''כשהמקום והאופק בגובה אחד
-הנץ החמה כאשר המקום והאופק בגובה אחד, ובו תחילת היום, הן לענין השעות הזמניות והן לענין תפילה לרבים הסוברים שיש ללכת אחר הנץ המישורי. במקומות בהם המקום גבוה מהאופק ולכן הנץ נראה לעיניים לפני הזמן המישורי לכולי עלמא הולכים אחר הנץ הנראה, כגון ירושלים. ובמקומות בהם האופק גבוה מהמקום, בגלל הסתרי הרים באופק כמו ערי השפילה ומישור החוף בארץ ישראל, נחלקו החכמים אם יש לנכות ההרים ולעשות כהנץ המישורי, או להמתין עד שתראה החמה לעיניים ולהתפלל בהנץ הנראה. עיקר ההכרעה בזה [כסברת הגר"ש דביליצקי זצ"ל] שאפשר להמתין לראיית גלגל החמה, ובתנאי שלא מתעכבת יותר מ-5 דק' אחר הנץ המישורי, שעד אז עדיין אדומה היא ונקראת דמדומי חמה, אם ההסתרים גורמים לה לאיחור יותר מ-5 דק' יש להתפלל בהנץ המישורי או בהנץ בניכוי חלק מההרים המסתירים (בעיקר ההרים הקרובים שגורמים לאיחור הגדול שנחשבים כמו חומה בעלמא). השלכות הנץ המישורי להלכה: לתפילה בהץ החמה כדלעיל, ולכל הדינים שזמנם ביום דראוי לכתחילה שלא לעשותם קודם הנץ (מגילה כ'), כהלל, לולב, שופר, מגילה וכדו'. לזמן ק"ש, לתחילת חשבון שעות זמניות לדעת הגר"א, לחישוב זמן עה"ש למפרע, ולסוף זמן ק"ש של לילה לאנוס (או"ח רל"ה ד').''',
+        '''זריחת החמה באופק המישורי — הנץ המקובל ברוב הלוחות, וכך נהוג לכנותו.
+אין זה הנץ הנראה במדויק: הזמן שבו השמש נראית בפועל מעל ההרים שבאופק המזרחי עשוי להיות מאוחר בכמה דקות, וחישובו דורש מדידה של פרופיל ההרים באופק של כל מקום (כדרך לוחות "חי-טבלאות" ו"עתים לבינה").''',
     defaultEnabled: true,
     compute: (c) => c.cal.getSeaLevelSunrise(),
   ),

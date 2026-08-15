@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 // קידומת ל-Link של dart:io כי models/links.dart מגדיר Link משלו שמסתיר אותו.
@@ -38,6 +39,7 @@ import 'package:otzaria/plugins/services/plugin_network_fetch_service.dart';
 import 'package:otzaria/plugins/utils/reader_location_resolver.dart';
 import 'package:otzaria/search/models/search_configuration.dart';
 import 'package:otzaria/search/search_repository.dart';
+import 'package:otzaria/settings/engine/settings_repository.dart';
 import 'package:otzaria_search_engine/otzaria_search_engine.dart'
     show
         MergedSibling,
@@ -97,6 +99,7 @@ class _StubSearchRepository extends SearchRepository {
   );
   int pageCalls = 0;
   int streamWithCountsCalls = 0;
+  Stream<SearchStreamUpdate>? streamOverride;
 
   void _capture(
     String query,
@@ -210,7 +213,7 @@ class _StubSearchRepository extends SearchRepository {
       wordMatchMode: wordMatchMode,
       searchOptions: searchOptions,
     );
-    return Stream.fromIterable(updates);
+    return streamOverride ?? Stream.fromIterable(updates);
   }
 }
 
@@ -222,6 +225,7 @@ class _MockBookOpenCoordinator extends Mock implements BookOpenCoordinator {}
 class _StubPluginRegistryRepository extends PluginRegistryRepository {
   List<PluginPermissionGrant> permissions = [];
   bool? permissionGrant;
+  Completer<void>? permissionGate;
 
   /// מיפוי פר-הרשאה; כשמוגדר, גובר על [permissionGrant].
   Map<String, bool>? permissionGrants;
@@ -238,6 +242,7 @@ class _StubPluginRegistryRepository extends PluginRegistryRepository {
 
   @override
   Future<bool?> getPermission(String pluginId, String permission) async {
+    await permissionGate?.future;
     if (permissionGrants != null) return permissionGrants![permission];
     return permissionGrant;
   }
@@ -420,6 +425,69 @@ Future<void> main() async {
           ),
         ),
       );
+    });
+
+    test('rejects incomplete location coordinates', () async {
+      await expectLater(
+        adapter.execute('calendar', 'getDailyTimes', {'lat': 31.7784}),
+        throwsA(isA<Exception>()),
+      );
+    });
+
+    test('returns the calendar cities for plugins', () async {
+      final cities =
+          await adapter.execute('calendar', 'getCities', {}) as List<dynamic>;
+
+      expect(
+        cities,
+        contains(
+          allOf(
+            containsPair('name', 'ירושלים'),
+            containsPair('timezone', 'Asia/Jerusalem'),
+            containsPair('inIsrael', true),
+          ),
+        ),
+      );
+    });
+  });
+
+  group('PluginBridgeAdapter.settings.get', () {
+    late PluginBridgeAdapter adapter;
+
+    setUp(() {
+      adapter = PluginBridgeAdapter(
+        _buildInstalledPlugin(
+          permissions: const ['settings.read'],
+        ),
+        dependencies: _buildNetworkDeps(),
+        pluginRepository: _StubPluginRegistryRepository(),
+      );
+    });
+
+    test('מחזיר את מיקום HebrewBooks שהוגדר', () async {
+      await Settings.setValue<String>(
+        SettingsRepository.keyHebrewBooksPath,
+        '/books/hebrewbooks',
+      );
+
+      final result = await adapter.execute('settings', 'get', {
+        'key': SettingsRepository.keyHebrewBooksPath,
+      });
+
+      expect(result, '/books/hebrewbooks');
+    });
+
+    test('מחזיר מחרוזת ריקה כשהמיקום לא הוגדר', () async {
+      await Settings.setValue<String>(
+        SettingsRepository.keyHebrewBooksPath,
+        '',
+      );
+
+      final result = await adapter.execute('settings', 'get', {
+        'key': SettingsRepository.keyHebrewBooksPath,
+      });
+
+      expect(result, '');
     });
   });
 
@@ -1217,6 +1285,97 @@ Future<void> main() async {
     });
   });
 
+  group('PluginBridgeAdapter.library.resolveCategoryPaths', () {
+    late PluginBridgeAdapter adapter;
+
+    setUp(() {
+      final library = Library(
+        categories: [
+          Category(
+            title: 'בדיקה',
+            description: '',
+            shortDescription: '',
+            order: 0,
+            subCategories: const [],
+            books: [
+              TextBook(
+                id: 42,
+                title: 'בראשית',
+                categoryId: 1,
+                fileType: 'txt',
+                categoryPath: '/תנך/תורה',
+              ),
+              PdfBook(
+                id: 7,
+                title: 'שולחן ערוך',
+                path: '/tmp/shulchan.pdf',
+                categoryId: 2,
+                fileType: 'pdf',
+              ),
+            ],
+            parent: null,
+          ),
+        ],
+      );
+      DataRepository.instance.library = Future.value(library);
+
+      adapter = PluginBridgeAdapter(
+        _buildInstalledPlugin(permissions: const ['library.books.read']),
+        dependencies: PluginBridgeDependencies(
+          historyBloc: _MockHistoryBloc(),
+          tabsBloc: _StubTabsBloc(),
+          navigationBloc: _MockNavigationBloc(),
+          calendarCubit: _StubCalendarCubit(
+            _buildCalendarState(DateTime(2026, 1, 1), inIsrael: true),
+          ),
+          workspaceBloc: _MockWorkspaceBloc(),
+          searchRepository: _MockSearchRepository(),
+          personalNotesRepository: _MockPersonalNotesRepository(),
+          bookOpenCoordinator: _MockBookOpenCoordinator(),
+          themePayloadBuilder: () => <String, dynamic>{},
+          showConfirmDialog: ({required title, required content}) async => true,
+          showWarningDialog:
+              ({required title, required content, required subtitle}) async =>
+                  true,
+        ),
+        pluginRepository: _StubPluginRegistryRepository(),
+      );
+    });
+
+    test('מחזיר נתיבים מיושרים לסדר הקלט, עם null למזהה לא מוכר', () async {
+      final result = await adapter.execute(
+        'library',
+        'resolveCategoryPaths',
+        const {
+          'ids': [42, 9999, 7, 'לא-מספר'],
+        },
+      );
+
+      expect(result, isA<List>());
+      final paths = result as List;
+      expect(paths, hasLength(4));
+      expect(paths[0], '/תנך/תורה');
+      expect(paths[1], isNull);
+      // ספר בלי categoryPath — נפתר לפי עץ הקטגוריות או null; לא זורק.
+      expect(paths[3], isNull);
+    });
+
+    test('קלט שאינו מערך או גדול מדי — נדחה', () async {
+      expect(
+        () => adapter.execute('library', 'resolveCategoryPaths', const {
+          'ids': 'not-a-list',
+        }),
+        throwsA(isA<Exception>()),
+      );
+      expect(
+        () => adapter.execute('library', 'resolveCategoryPaths', {
+          'ids': List<int>.filled(20001, 1),
+        }),
+        throwsA(isA<Exception>()),
+      );
+    });
+  });
+
   group('PluginBridgeAdapter.library.getTree', () {
     late PluginBridgeAdapter adapter;
 
@@ -1614,6 +1773,243 @@ Future<void> main() async {
         ),
       );
       expect(hit, isFalse);
+    });
+
+    test('timeoutMs מעל התקרה נדחה לפני ביצוע הבקשה', () async {
+      var hit = false;
+      final fetchService = PluginNetworkFetchService(
+        client: MockClient((req) async {
+          hit = true;
+          return http.Response('', 200);
+        }),
+      );
+      final adapter = buildAdapter(fetchService);
+
+      await expectLater(
+        () => adapter.execute('network', 'fetch', const {
+          'url': 'https://nakdan.dicta.org.il/api',
+          'timeoutMs': 120001,
+        }),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('timeoutMs'),
+          ),
+        ),
+      );
+      expect(hit, isFalse);
+    });
+
+    test('fetchStream שולח metadata ואז מקטעי גוף בלי לצבור אותם', () async {
+      final responseBody = StreamController<List<int>>();
+      final fetchService = PluginNetworkFetchService(
+        client: MockClient.streaming((request, bodyStream) async {
+          return http.StreamedResponse(
+            responseBody.stream,
+            200,
+            headers: {'content-type': 'application/x-ndjson'},
+          );
+        }),
+      );
+      final adapter = buildAdapter(fetchService);
+      final events = <Map<String, dynamic>>[];
+      var completed = false;
+
+      final execution = adapter
+          .execute(
+            'network',
+            'fetchStream',
+            const {
+              'url': 'https://nakdan.dicta.org.il/api',
+              '__streamId': 'network_test_1',
+            },
+            eventSink: (topic, payload) async {
+              expect(topic, '__otzaria.network.fetchStream.chunk');
+              events.add(payload);
+            },
+          )
+          .whenComplete(() => completed = true);
+      while (events.isEmpty) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      final metadata = events.single['chunk'] as Map<String, dynamic>;
+      expect(metadata['sequence'], 0);
+      expect(metadata['type'], 'response');
+      expect(metadata['status'], 200);
+      expect(metadata['ok'], isTrue);
+      expect(metadata['headers']['content-type'], 'application/x-ndjson');
+
+      responseBody.add(utf8.encode('{"id":1}\n'));
+      while (events.length < 2) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(completed, isFalse);
+      expect(events[1]['chunk'], {
+        'sequence': 1,
+        'type': 'data',
+        'body': '{"id":1}\n',
+      });
+
+      await responseBody.close();
+      final result = await execution as Map<String, dynamic>;
+      expect(result, {'completed': true, 'cancelled': false, 'chunks': 2});
+      adapter.dispose();
+    });
+
+    test('fetchStream מפצל מנת שרת גדולה בלי לחצות surrogate pair', () async {
+      final prefix = 'a' * 32767;
+      final payload = '$prefix😀${'b' * 10000}';
+      final fetchService = PluginNetworkFetchService(
+        client: MockClient.streaming((request, bodyStream) async {
+          return http.StreamedResponse(
+            Stream.value(utf8.encode(payload)),
+            200,
+          );
+        }),
+      );
+      final adapter = buildAdapter(fetchService);
+      final fragments = <String>[];
+
+      await adapter.execute(
+        'network',
+        'fetchStream',
+        const {
+          'url': 'https://nakdan.dicta.org.il/api',
+          '__streamId': 'network_large_chunk_1',
+        },
+        eventSink: (topic, event) async {
+          final chunk = event['chunk'] as Map<String, dynamic>;
+          if (chunk['type'] == 'data') fragments.add(chunk['body'] as String);
+        },
+      );
+
+      expect(fragments, hasLength(2));
+      expect(fragments.every((part) => part.length <= 32768), isTrue);
+      expect(fragments.join(), payload);
+      expect(fragments.first.endsWith('a'), isTrue);
+      expect(fragments.last.startsWith('😀'), isTrue);
+      adapter.dispose();
+    });
+
+    test('fetchStream ניתן לביטול גם בזמן ההמתנה לכותרות', () async {
+      final requestStarted = Completer<void>();
+      final fetchService = PluginNetworkFetchService(
+        client: MockClient.streaming((request, bodyStream) async {
+          final abortable = request as http.AbortableRequest;
+          requestStarted.complete();
+          await abortable.abortTrigger;
+          throw http.RequestAbortedException(request.url);
+        }),
+      );
+      final adapter = buildAdapter(fetchService);
+
+      final execution = adapter.execute(
+        'network',
+        'fetchStream',
+        const {
+          'url': 'https://nakdan.dicta.org.il/api',
+          '__streamId': 'network_cancel_1',
+        },
+        eventSink: (topic, payload) async {},
+      );
+      await requestStarted.future;
+      final cancellation =
+          await adapter.execute('network', 'fetchStream', const {
+                '__cancelStreamId': 'network_cancel_1',
+              })
+              as Map<String, dynamic>;
+      final result = await execution as Map<String, dynamic>;
+
+      expect(cancellation['cancelled'], isTrue);
+      expect(result['completed'], isFalse);
+      expect(result['cancelled'], isTrue);
+      adapter.dispose();
+    });
+
+    test('ביטול fetchStream בזמן בדיקת הרשאה אינו הולך לאיבוד', () async {
+      final gate = Completer<void>();
+      pluginRegistryRepository.permissionGate = gate;
+      var hit = false;
+      final fetchService = PluginNetworkFetchService(
+        client: MockClient((request) async {
+          hit = true;
+          return http.Response('unexpected', 200);
+        }),
+      );
+      final adapter = buildAdapter(fetchService);
+
+      final execution = adapter.execute(
+        'network',
+        'fetchStream',
+        const {
+          'url': 'https://nakdan.dicta.org.il/api',
+          '__streamId': 'network_pending_cancel_1',
+        },
+        eventSink: (topic, payload) async {},
+      );
+      await Future<void>.delayed(Duration.zero);
+      final cancellation =
+          await adapter.execute('network', 'fetchStream', const {
+                '__cancelStreamId': 'network_pending_cancel_1',
+              })
+              as Map<String, dynamic>;
+      gate.complete();
+      final result = await execution as Map<String, dynamic>;
+
+      expect(cancellation['cancelled'], isFalse);
+      expect(result, {'completed': false, 'cancelled': true});
+      expect(hit, isFalse);
+      adapter.dispose();
+    });
+
+    test('fetchStream מחיל timeout על גוף תגובה שלא הסתיים', () async {
+      final responseBody = StreamController<List<int>>();
+      final fetchService = PluginNetworkFetchService(
+        client: MockClient.streaming((request, bodyStream) async {
+          return http.StreamedResponse(responseBody.stream, 200);
+        }),
+      );
+      final adapter = buildAdapter(fetchService);
+
+      await expectLater(
+        adapter.execute(
+          'network',
+          'fetchStream',
+          const {
+            'url': 'https://nakdan.dicta.org.il/api',
+            'timeoutMs': 5,
+            '__streamId': 'network_timeout_1',
+          },
+          eventSink: (topic, payload) async {},
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+      await responseBody.close();
+      adapter.dispose();
+    });
+
+    test('fetchStream דורש תעבורת stream פנימית', () async {
+      final fetchService = PluginNetworkFetchService(
+        client: MockClient((request) async => http.Response('ok', 200)),
+      );
+      final adapter = buildAdapter(fetchService);
+
+      await expectLater(
+        adapter.execute('network', 'fetchStream', const {
+          'url': 'https://nakdan.dicta.org.il/api',
+          '__streamId': 'network_no_transport_1',
+        }),
+        throwsA(
+          isA<Exception>().having(
+            (error) => error.toString(),
+            'message',
+            contains('stream transport unavailable'),
+          ),
+        ),
+      );
+      adapter.dispose();
     });
   });
 
@@ -2264,19 +2660,29 @@ Future<void> main() async {
           searchRepository: stub,
         );
 
-        final result =
-            await adapter.execute('search', 'query', {
-                  'query': 'בראשית',
-                  'mode': 'advanced',
-                  'distance': 3,
-                  'proximityScope': 'sameParagraph',
-                  'order': 'catalogue',
-                  'grouping': 'sameSection',
-                  'wordMatchMode': 'mostWords',
-                  'limit': 10,
-                  'offset': 5,
-                  'includeBookCounts': true,
-                })
+        final chunks = <Map<String, dynamic>>[];
+        final completion =
+            await adapter.execute(
+                  'search',
+                  'query',
+                  {
+                    'query': 'בראשית',
+                    'mode': 'advanced',
+                    'distance': 3,
+                    'proximityScope': 'sameParagraph',
+                    'order': 'catalogue',
+                    'grouping': 'sameSection',
+                    'wordMatchMode': 'mostWords',
+                    'limit': 10,
+                    'offset': 5,
+                    'includeBookCounts': true,
+                    '__streamId': 'test_search_1',
+                  },
+                  eventSink: (topic, payload) async {
+                    expect(topic, '__otzaria.search.query.chunk');
+                    chunks.add(payload['chunk'] as Map<String, dynamic>);
+                  },
+                )
                 as Map<String, dynamic>;
 
         expect(stub.captured!['limit'], 10);
@@ -2290,14 +2696,16 @@ Future<void> main() async {
         expect(stub.streamWithCountsCalls, 1);
         expect(stub.pageCalls, 0);
 
-        expect(result['total'], 812);
-        expect(result['truncated'], isFalse);
-        final hit = (result['results'] as List).single as Map;
+        expect(completion['completed'], isTrue);
+        expect(chunks, hasLength(2));
+        expect(chunks.first['total'], 812);
+        expect(chunks.first['truncated'], isFalse);
+        final hit = (chunks.last['results'] as List).single as Map;
         expect(hit['id'], 10);
         expect(hit['type'], 'text');
         expect(hit['index'], 12);
         expect(hit['reference'], 'בראשית, פרק א');
-        expect((result['bookCounts'] as List).single, {
+        expect((chunks.first['bookCounts'] as List).single, {
           'id': 10,
           'type': 'text',
           'bookId': 'בראשית',
@@ -2319,15 +2727,24 @@ Future<void> main() async {
           searchRepository: stub,
         );
 
-        final result =
-            await adapter.execute('search', 'query', {'query': 'בראשית'})
-                as Map<String, dynamic>;
+        final chunks = <Map<String, dynamic>>[];
+        await adapter.execute(
+          'search',
+          'query',
+          {
+            'query': 'בראשית',
+            '__streamId': 'test_search_2',
+          },
+          eventSink: (topic, payload) async {
+            chunks.add(payload['chunk'] as Map<String, dynamic>);
+          },
+        );
 
         expect(stub.captured!['facets'], ['/']);
-        expect(stub.pageCalls, 1);
-        expect(stub.streamWithCountsCalls, 0);
-        expect(result['facets'], ['/']);
-        expect(result['total'], 0);
+        expect(stub.pageCalls, 0);
+        expect(stub.streamWithCountsCalls, 1);
+        expect(chunks.single['facets'], ['/']);
+        expect(chunks.single['total'], isNull);
       },
       skip: engineReady ? false : searchEngineSkipReason,
     );
@@ -2344,15 +2761,86 @@ Future<void> main() async {
 
         await adapter.execute('search', 'query', {
           'query': 'בראשית',
+          '__streamId': 'test_search_3',
           'books': [
             {'id': 10},
           ],
-        });
+        }, eventSink: (topic, payload) async {});
 
         expect(
           (stub.captured!['facets'] as List).single,
           startsWith('/תנך/תורה/'),
         );
+      },
+      skip: engineReady ? false : searchEngineSkipReason,
+    );
+
+    test('search.query דורש תעבורת stream פנימית', () async {
+      final adapter = buildAdapter(books: [TextBook(id: 10, title: 'בראשית')]);
+
+      await expectLater(
+        () => adapter.execute('search', 'query', {'query': 'בראשית'}),
+        throwsA(
+          isA<Exception>().having(
+            (error) => error.toString(),
+            'message',
+            contains('stream id'),
+          ),
+        ),
+      );
+    });
+
+    test(
+      'ביטול בזמן אתחול החיפוש נצרך לפני רישום ה-stream הפעיל',
+      () async {
+        final stub = _StubSearchRepository();
+        final adapter = buildAdapter(
+          books: [TextBook(id: 10, title: 'בראשית')],
+          searchRepository: stub,
+        );
+        final search = adapter.execute('search', 'query', {
+          'query': 'בראשית',
+          '__streamId': 'cancel_during_startup_1',
+        }, eventSink: (topic, payload) async {});
+
+        await adapter.execute('search', 'query', {
+          '__cancelStreamId': 'cancel_during_startup_1',
+        });
+        final completion = await search as Map<String, dynamic>;
+
+        expect(completion['cancelled'], isTrue);
+      },
+      skip: engineReady ? false : searchEngineSkipReason,
+    );
+
+    test(
+      'עצירת האיטרטור מבטלת את stream החיפוש הפעיל',
+      () async {
+        final controller = StreamController<SearchStreamUpdate>();
+        final stub = _StubSearchRepository()
+          ..streamOverride = controller.stream;
+        final adapter = buildAdapter(
+          books: [TextBook(id: 10, title: 'בראשית')],
+          searchRepository: stub,
+        );
+        final search = adapter.execute('search', 'query', {
+          'query': 'בראשית',
+          '__streamId': 'cancel_search_1',
+        }, eventSink: (topic, payload) async {});
+        while (stub.streamWithCountsCalls == 0) {
+          await Future<void>.delayed(Duration.zero);
+        }
+
+        final cancellation =
+            await adapter.execute('search', 'query', {
+                  '__cancelStreamId': 'cancel_search_1',
+                })
+                as Map<String, dynamic>;
+        final completion = await search as Map<String, dynamic>;
+
+        expect(cancellation['cancelled'], isTrue);
+        expect(completion['cancelled'], isTrue);
+        await controller.close();
       },
       skip: engineReady ? false : searchEngineSkipReason,
     );
@@ -2480,6 +2968,30 @@ Future<void> main() async {
         expect(result['id'], 42);
       },
     );
+
+    test('library.resolveBooks פותר זהויות באצווה ומחזיר קטגוריה', () async {
+      final adapter = buildAdapter(
+        books: [
+          TextBook(
+            id: 42,
+            title: 'שמות',
+            categoryPath: 'תנך, תורה',
+          ),
+        ],
+      );
+
+      final result =
+          await adapter.execute('library', 'resolveBooks', {
+                'items': [
+                  {'id': 42, 'source': 'library'},
+                  {'id': 999, 'source': 'library'},
+                ],
+              })
+              as List;
+
+      expect(result.first, containsPair('categoryPath', '/תנך/תורה'));
+      expect(result.last, isNull);
+    });
 
     // --- reader.openBook ---
 

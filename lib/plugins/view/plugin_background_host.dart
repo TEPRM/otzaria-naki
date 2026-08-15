@@ -10,11 +10,14 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path/path.dart' as p;
 
+import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:otzaria/core/connectivity_status_service.dart';
 import 'package:otzaria/core/ui_snack.dart';
 import 'package:otzaria/history/bloc/history_bloc.dart';
 import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
 import 'package:otzaria/personal_notes/repository/personal_notes_repository.dart';
+import 'package:otzaria/settings/engine/settings_repository.dart';
+import 'package:otzaria/settings/l10n/settings_language.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_bloc.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_event.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_state.dart';
@@ -68,10 +71,21 @@ const String _sdkStub = r'''
 (function () {
   var _queue = [];
   var _realSdk = null;
+  var _notReadyStream = function () {
+    return {
+      next: function () {
+        return Promise.reject(new Error('Otzaria SDK not ready yet'));
+      },
+      [Symbol.asyncIterator]: function () { return this; }
+    };
+  };
 
   window.Otzaria = {
     call: function (method, payload) {
       if (_realSdk) return _realSdk.call(method, payload);
+      if (method === 'search.query' || method === 'network.fetchStream') {
+        return _notReadyStream();
+      }
       return Promise.reject(new Error('Otzaria SDK not ready yet'));
     },
     on: function (event, cb) {
@@ -83,6 +97,8 @@ const String _sdkStub = r'''
     },
     _boot: function (sdk, payload) {
       _realSdk = sdk;
+      // סמן חיוּת לדיספצ'ר — ראו plugin_tab_page.dart.
+      window.Otzaria._booted = true;
       _queue.forEach(function (item) { sdk.on(item.event, item.cb); });
       _queue = [];
       window.dispatchEvent(new CustomEvent('plugin.boot', { detail: payload }));
@@ -866,8 +882,12 @@ class _BackgroundPluginRunnerState extends State<_BackgroundPluginRunner> {
             'app': {
               'version': packageInfo.version,
               'platform': Platform.operatingSystem,
-              'locale': 'he-IL',
-              'textDirection': 'rtl',
+              // שפת הממשק הפעילה (he-IL לתאימות; 'language' — קוד השפה)
+              ...pluginLocalePayload(
+                code: Settings.getValue<String>(
+                  SettingsRepository.keySettingsLanguage,
+                ),
+              ),
               // סימון לתוסף שהוא רץ ברקע — מאפשר לקוד התוסף להתנהג אחרת
               // (למשל לא לבצע ניווט יזום) כשאין UI גלוי.
               'runMode': 'background',
@@ -888,12 +908,117 @@ class _BackgroundPluginRunnerState extends State<_BackgroundPluginRunner> {
                 '''
 (function () {
   var _ls = {};
+  var _searchStreams = {};
+  var _searchSequence = 0;
+  var _searchEvent = '__otzaria.search.query.chunk';
+  var _networkStreams = {};
+  var _networkSequence = 0;
+  var _networkEvent = '__otzaria.network.fetchStream.chunk';
+  var rpc = function (method, payload) {
+    return window.flutter_inappwebview.callHandler('otzaria_rpc', {
+      method: method,
+      payload: payload || {}
+    });
+  };
+  window.addEventListener(_searchEvent, function (event) {
+    var detail = event.detail || {};
+    var stream = _searchStreams[detail.streamId];
+    if (stream) stream.push(detail.chunk);
+  });
+  window.addEventListener(_networkEvent, function (event) {
+    var detail = event.detail || {};
+    var stream = _networkStreams[detail.streamId];
+    if (stream) stream.push(detail.chunk);
+  });
+  var createRpcStream = function (method, payload, streams, streamId) {
+    var maxQueuedChunks = 256;
+    var queue = [];
+    var waiters = [];
+    var ended = false;
+    var failure = null;
+    var flush = function () {
+      while (waiters.length && queue.length) {
+        waiters.shift().resolve({ value: queue.shift(), done: false });
+      }
+      if (queue.length || !ended) return;
+      while (waiters.length) {
+        var waiter = waiters.shift();
+        if (failure) waiter.reject(failure);
+        else waiter.resolve({ value: undefined, done: true });
+      }
+    };
+    var session = {
+      push: function (chunk) {
+        if (ended) return;
+        if (queue.length >= maxQueuedChunks) {
+          session.fail(new Error('Stream consumer is too slow'));
+          void rpc(method, { __cancelStreamId: streamId });
+          return;
+        }
+        queue.push(chunk);
+        flush();
+      },
+      finish: function () {
+        if (ended) return;
+        ended = true;
+        delete streams[streamId];
+        flush();
+      },
+      fail: function (error) {
+        if (ended) return;
+        failure = error instanceof Error ? error : new Error(String(error));
+        ended = true;
+        delete streams[streamId];
+        flush();
+      }
+    };
+    streams[streamId] = session;
+    var request = Object.assign({}, payload || {}, { __streamId: streamId });
+    rpc(method, request).then(function (response) {
+      if (!response || response.success !== true) {
+        var message = response && response.error && response.error.message;
+        session.fail(new Error(message || 'Stream failed'));
+        return;
+      }
+      session.finish();
+    }, session.fail);
+    return {
+      next: function () {
+        if (queue.length) return Promise.resolve({ value: queue.shift(), done: false });
+        if (ended) {
+          return failure
+            ? Promise.reject(failure)
+            : Promise.resolve({ value: undefined, done: true });
+        }
+        return new Promise(function (resolve, reject) {
+          waiters.push({ resolve: resolve, reject: reject });
+        });
+      },
+      return: function () {
+        if (!ended) {
+          ended = true;
+          delete streams[streamId];
+          flush();
+          void rpc(method, { __cancelStreamId: streamId });
+        }
+        return Promise.resolve({ value: undefined, done: true });
+      },
+      [Symbol.asyncIterator]: function () { return this; }
+    };
+  };
+  var createSearchStream = function (payload) {
+    var id = 'search_' + Date.now().toString(36) + '_' + (++_searchSequence).toString(36);
+    return createRpcStream('search.query', payload, _searchStreams, id);
+  };
+  var createNetworkFetchStream = function (payload) {
+    var id = 'network_' + Date.now().toString(36) + '_' + (++_networkSequence).toString(36);
+    return createRpcStream('network.fetchStream', payload, _networkStreams, id);
+  };
   var realSdk = {
     call: function (method, payload) {
-      return window.flutter_inappwebview.callHandler('otzaria_rpc', {
-        method: method,
-        payload: payload || {}
-      });
+      if (method === 'search.query') return createSearchStream(payload);
+      if (method === 'network.fetchStream') return createNetworkFetchStream(payload);
+      return rpc(method, payload);
     },
     on: function (event, cb) {
       if (!_ls[event]) _ls[event] = [];

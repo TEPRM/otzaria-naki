@@ -347,15 +347,60 @@ class FileSystemData {
       return const {};
     }
 
-    final dir = Directory(hebrewBooksPath);
-    if (!await dir.exists()) {
+    return scanHebrewBooksPdfFilesAtPath(hebrewBooksPath);
+  }
+
+  /// סורק תיקיית PDF ישירה או את שורש נתוני HebrewBooks שמכיל `Books`.
+  @visibleForTesting
+  static Future<Map<String, String>> scanHebrewBooksPdfFilesAtPath(
+    String configuredPath,
+  ) async {
+    final configuredDir = Directory(configuredPath);
+    final booksDir = Directory(path.join(configuredPath, 'Books'));
+    final directories = [configuredDir, booksDir];
+    final visited = <String>{};
+    final pdfFiles = <String, String>{};
+
+    for (final directory in directories) {
+      final normalized = path.normalize(directory.absolute.path);
+      if (!visited.add(normalized) || !await directory.exists()) continue;
+      await for (final entity in directory.list()) {
+        if (entity is File && entity.path.toLowerCase().endsWith('.pdf')) {
+          pdfFiles.putIfAbsent(
+            path.basename(entity.path).toLowerCase(),
+            () => entity.path,
+          );
+        }
+      }
+    }
+    return pdfFiles;
+  }
+
+  /// בדיקה נקודתית: אילו מהמזהים המבוקשים קיימים כקובצי PDF בתיקייה המוגדרת.
+  ///
+  /// בניגוד ל-[_scanHebrewBooksPdfFiles] שסורק את כל התיקייה ונשמר במטמון,
+  /// כאן נבדקים רק המזהים המבוקשים — זול מספיק לקריאה בעת פתיחת ספר, ולכן
+  /// מזהה גם קובץ שירד אחרי הסריקה האחרונה (הורדות שרצות ברקע).
+  static Future<Map<String, String>> probeHebrewBooksPdfFilesByIds(
+    Set<int> ids,
+  ) async {
+    final hebrewBooksPath = Settings.getValue<String>(
+      SettingsRepository.keyHebrewBooksPath,
+    );
+    if (hebrewBooksPath == null || hebrewBooksPath.isEmpty || ids.isEmpty) {
       return const {};
     }
-
+    final roots = [hebrewBooksPath, path.join(hebrewBooksPath, 'Books')];
     final pdfFiles = <String, String>{};
-    await for (final entity in dir.list()) {
-      if (entity is File && entity.path.toLowerCase().endsWith('.pdf')) {
-        pdfFiles[path.basename(entity.path).toLowerCase()] = entity.path;
+    for (final id in ids) {
+      for (final name in ['$id.pdf', 'hebrewbooks_org_$id.pdf']) {
+        for (final root in roots) {
+          final file = File(path.join(root, name));
+          if (await file.exists()) {
+            pdfFiles.putIfAbsent(name, () => file.path);
+            break;
+          }
+        }
       }
     }
     return pdfFiles;
@@ -366,7 +411,6 @@ class FileSystemData {
   /// [pdfFilesByLowerName] - מפה משם קובץ (lowercase) לנתיב מלא.
   /// תומך בשתי תבניות שמות: `Hebrewbooks_org_<id>.pdf` ו-`<id>.pdf`.
   /// ספר ללא [Book.id] או ללא קובץ תואם מוחזר כמות שהוא.
-  @visibleForTesting
   static List<Book> mapHebrewBooksToLocal(
     List<Book> books,
     Map<String, String> pdfFilesByLowerName,
