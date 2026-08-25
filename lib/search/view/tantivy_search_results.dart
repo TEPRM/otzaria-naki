@@ -15,6 +15,7 @@ import 'package:otzaria/search/utils/in_book_search_routing.dart';
 import 'package:otzaria/search/models/external_search_status.dart';
 import 'package:otzaria/search/utils/snippet_builder.dart';
 import 'package:otzaria/search/view/external_search_results_section.dart';
+import 'package:otzaria/search/view/search_result_match_tag.dart';
 import 'package:otzaria/search/view/search_result_source_tag.dart';
 import 'package:otzaria/settings/settings_exports.dart';
 import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
@@ -49,6 +50,9 @@ class _TantivySearchResultsState extends State<TantivySearchResults> {
   static const double _loadMoreThreshold = 200;
   final ScrollController _scrollController = ScrollController();
   final Map<String, List<InlineSpan>> _snippetCache = {};
+
+  /// מטמון פרסורי ה-HTML לאופסטים — תלוי רק ב-HTML עצמו (לא בעיצוב).
+  final Map<String, ParsedHighlightedSnippet> _parsedSnippetCache = {};
   bool _isAutoLoadInFlight = false;
 
   /// חתימת החיפוש האחרון (שאילתה + קטגוריות) שעבורו כבר גללנו לראש הרשימה.
@@ -656,15 +660,31 @@ class _TantivySearchResultsState extends State<TantivySearchResults> {
 
               final wrappedTitleText = _formatTitleForWrapping(titleText);
 
-              // ההדגשה מגיעה מוכנה מהמנוע בתוך rawHtml, ולכן המפתח תלוי רק
-              // ב-HTML ובסגנון התצוגה — לא בפרמטרי החיפוש.
-              final snippetCacheKey = [
+              // שכבת-האופסטים: המנוע אינו מחזיר מיקומים נומריים אלא סימון
+              // הדגשה בתוך ה-HTML; הפרסור ל-[ParsedHighlightedSnippet]
+              // הופך את הסימון לטווחי-תווים מדויקים. המפתח תלוי רק ב-HTML.
+              final parsedCacheKey = [
                 result.id,
                 result.segment,
                 rawHtml.hashCode,
+                settingsState.replaceHolyNames,
+              ].join('|');
+              final parsedSnippet = _parsedSnippetCache.putIfAbsent(
+                parsedCacheKey,
+                () {
+                  if (_parsedSnippetCache.length > 300) {
+                    _parsedSnippetCache.clear();
+                  }
+                  return SnippetBuilder.parseHighlightedHtml(rawHtml);
+                },
+              );
+
+              // ההדגשה מרונדרת מאותם אופסטים עצמם, ולכן המפתח תלוי רק
+              // ב-HTML ובסגנון התצוגה — לא בפרמטרי החיפוש.
+              final snippetCacheKey = [
+                parsedCacheKey,
                 settingsState.fontSize,
                 settingsState.fontFamily,
-                settingsState.replaceHolyNames,
                 colorScheme.onSurface.toARGB32(),
               ].join('|');
 
@@ -676,8 +696,9 @@ class _TantivySearchResultsState extends State<TantivySearchResults> {
                   if (_snippetCache.length > 300) {
                     _snippetCache.clear();
                   }
-                  return SnippetBuilder.fromHighlightedHtml(
-                    html: rawHtml,
+                  return SnippetBuilder.spansFromRanges(
+                    plainText: parsedSnippet.plainText,
+                    ranges: parsedSnippet.ranges,
                     defaultStyle: TextStyle(
                       fontSize: settingsState.fontSize,
                       fontFamily: settingsState.fontFamily,
@@ -781,6 +802,28 @@ class _TantivySearchResultsState extends State<TantivySearchResults> {
                                   // מתוצאות ספק חיצוני שמוצגות באותו מסך. בלי
                                   // מדור חיצוני אין ממה להבדיל, והתגית הייתה
                                   // רק גוזלת רוחב משם הספר.
+                                  // תגית סוג-ההתאמה: מצב החיפוש שהניב את
+                                  // התוצאה + (ב-tooltip) מספר האופסטים
+                                  // שחולצו מסימון המנוע. מוצגת תמיד עבור
+                                  // תוצאות המנוע, כדי לזהות במבט אחת איזה
+                                  // סוג חיפוש ואיזה מקור הדגשה פעילים.
+                                  Padding(
+                                    padding:
+                                        const EdgeInsetsDirectional.only(
+                                      start: 4,
+                                    ),
+                                    child: SearchResultMatchTag(
+                                      label: searchModeLabel(
+                                        state.configuration.searchMode,
+                                      ),
+                                      matchCount: parsedSnippet.ranges.length,
+                                      engineMarked:
+                                          parsedSnippet.hasEngineMarkup,
+                                      tooltip:
+                                          'מצב חיפוש: ${searchModeLabel(state.configuration.searchMode)} · '
+                                          '${parsedSnippet.hasEngineMarkup ? '${parsedSnippet.ranges.length} אופסטים מסימון המנוע' : 'אין סימון מנוע'}',
+                                    ),
+                                  ),
                                   ValueListenableBuilder<ExternalSearchStatus?>(
                                     valueListenable:
                                         widget.tab.externalSearchStatus,

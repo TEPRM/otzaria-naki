@@ -3,14 +3,45 @@ import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 import 'package:otzaria/search/utils/literal_search_pattern.dart';
 
+/// תוצאת פרסור HTML מודגש שהמנוע מחזיר.
+///
+/// המנוע אינו מחזיר אופסטים נומריים ב-API שלו — את מיקומי ההתאמות הוא מסמן
+/// בתגי הדגשה בתוך ה-HTML ([SnippetBuilder._highlightTags]). המחלקה הזאת
+/// היא שכבת-האופסטים של האפליקציה: [SnippetBuilder.parseHighlightedHtml]
+/// מתרגם את המרקאפ ל-[plainText] נקי ולרשימת [ranges] — טווחי תווים
+/// `[start, end)` מדויקים על גבי [plainText] — כך שכל מי שצריך מיקומי
+/// התאמה (תצוגה, קפיצה-לתוצאה, PDF) יכול להשתמש בהם בלי להריץ regex
+/// משלו ובלי סתירה מול מה שהמנוע סימן.
+class ParsedHighlightedSnippet {
+  /// הטקסט הנקי (אחרי נירמול רווחים), זהה תו-בתו לשרשור ה-InlineSpan
+  /// ש-[SnippetBuilder.fromHighlightedHtml] היה מפיק.
+  final String plainText;
+
+  /// טווחי ההתאמה `[start, end)` על [plainText], בסדר עולה וללא חפיפה.
+  final List<List<int>> ranges;
+
+  /// `true` אם ה-HTML הכיל סימון הדגשה של המנוע (תג font/mark); `false`
+  /// אם הטקסט הגיע ללא סימון — אז [ranges] ריק והצד האפליקציה נופל בחזרה
+  /// להדגשה עצמאית (regex).
+  final bool hasEngineMarkup;
+
+  const ParsedHighlightedSnippet({
+    required this.plainText,
+    required this.ranges,
+    required this.hasEngineMarkup,
+  });
+}
+
 /// בונה הדגשות לתצוגת תוצאות חיפוש.
 ///
 /// קיימים שני מקורות לתוצאות, ולכל אחד דרך הדגשה משלו:
 ///
 /// 1. **תוצאות ממנוע החיפוש** (`search_engine`) — המנוע מסמן את ההתאמות
-///    בתגי הדגשה בתוך ה-HTML שהוא מחזיר. הצד של Dart רק מפרסר את התגים
-///    ל-[InlineSpan] באמצעות [fromHighlightedHtml]. אין כל לוגיקת התאמה בצד
-///    האפליקציה — המנוע אחראי לכך.
+///    בתגי הדגשה בתוך ה-HTML שהוא מחזיר. הצד של Dart מפרסר את התגים
+///    ל-[InlineSpan] באמצעות [fromHighlightedHtml], ומאז הוספת
+///    [parseHighlightedHtml] — גם לטווחי-תווים מדויקים
+///    ([ParsedHighlightedSnippet]) שניתנים לשימוש חוזר. אין כל לוגיקת
+///    התאמה בצד האפליקציה — המנוע אחראי לכך.
 ///
 /// 2. **חיפוש מקומי בתוך ספר פתוח** — חיפוש ליטרלי של מחרוזת שלמה
 ///    (ראה `section_search_utils`). ההדגשה מסמנת את הופעות השאילתה כפי
@@ -27,65 +58,80 @@ class SnippetBuilder {
 
   static final RegExp _whitespace = RegExp(r'\s+');
 
-  /// ממיר HTML מודגש שמגיע ממנוע החיפוש לרשימת [InlineSpan].
+  /// מפרסר HTML מודגש שמגיע ממנוע החיפוש לטקסט נקי ולטווחי-תווים מדויקים.
   ///
-  /// טקסט שעטוף בתג הדגשה ([_highlightTags]) מקבל את [highlightStyle];
-  /// שאר הטקסט מקבל את [defaultStyle]. תגי HTML אחרים מנוקים ומוצג רק
-  /// תוכן הטקסט שלהם.
-  static List<InlineSpan> fromHighlightedHtml({
-    required String html,
-    required TextStyle defaultStyle,
-    required TextStyle highlightStyle,
-  }) {
+  /// זו נקודת-הכניסה ל"אופסטים מהמנוע": המנוע לא מחזיר מיקומים נומריים,
+  /// אבל המרקאפ שהוא מחזיר הוא המקור הסמכותי למיקומי ההתאמות, והפרסור כאן
+  /// הופך אותו לאופסטים `[start, end)` על [ParsedHighlightedSnippet.plainText].
+  /// הטקסט הנקי זהה לשרשור ה-span-ים ש-[fromHighlightedHtml] מפיק, כך
+  /// שהצגה והאופסטים תמיד מסונכרנים.
+  static ParsedHighlightedSnippet parseHighlightedHtml(String html) {
     final body = html_parser.parse(html).body;
-    if (body == null) {
-      return [TextSpan(text: '', style: defaultStyle)];
+    final buffer = StringBuffer();
+    final ranges = <List<int>>[];
+    if (body != null) {
+      _collectPlainTextAndRanges(
+        body,
+        highlighted: false,
+        buffer: buffer,
+        ranges: ranges,
+      );
     }
-
-    final spans = <InlineSpan>[];
-    _appendHtmlSpans(
-      body,
-      highlighted: false,
-      spans: spans,
-      defaultStyle: defaultStyle,
-      highlightStyle: highlightStyle,
+    return ParsedHighlightedSnippet(
+      plainText: buffer.toString(),
+      ranges: ranges,
+      hasEngineMarkup: ranges.isNotEmpty,
     );
-
-    if (spans.isEmpty) {
-      return [TextSpan(text: '', style: defaultStyle)];
-    }
-    return spans;
   }
 
-  static void _appendHtmlSpans(
+  static void _collectPlainTextAndRanges(
     dom.Node node, {
     required bool highlighted,
-    required List<InlineSpan> spans,
-    required TextStyle defaultStyle,
-    required TextStyle highlightStyle,
+    required StringBuffer buffer,
+    required List<List<int>> ranges,
   }) {
     for (final child in node.nodes) {
       if (child is dom.Text) {
         final text = child.text.replaceAll(_whitespace, ' ');
         if (text.isEmpty) continue;
-        spans.add(
-          TextSpan(
-            text: text,
-            style: highlighted ? highlightStyle : defaultStyle,
-          ),
-        );
+        if (highlighted) {
+          final start = buffer.length;
+          ranges.add([start, start + text.length]);
+        }
+        buffer.write(text);
       } else if (child is dom.Element) {
-        final isHighlight =
-            highlighted || _highlightTags.contains(child.localName);
-        _appendHtmlSpans(
+        _collectPlainTextAndRanges(
           child,
-          highlighted: isHighlight,
-          spans: spans,
-          defaultStyle: defaultStyle,
-          highlightStyle: highlightStyle,
+          highlighted: highlighted || _highlightTags.contains(child.localName),
+          buffer: buffer,
+          ranges: ranges,
         );
       }
     }
+  }
+
+  /// ממיר HTML מודגש שמגיע ממנוע החיפוש לרשימת [InlineSpan].
+  ///
+  /// טקסט שעטוף בתג הדגשה ([_highlightTags]) מקבל את [highlightStyle];
+  /// שאר הטקסט מקבל את [defaultStyle]. תגי HTML אחרים מנוקים ומוצג רק
+  /// תוכן הטקסט שלהם.
+  ///
+  /// ממומש מעל [parseHighlightedHtml] + [spansFromRanges]: הפרסור נעשה
+  /// פעם אחת, והטווחים שהוא מפיק הם בדיוק מה שמרונדר — כך שמי שמחזיק
+  /// את ה-[ParsedHighlightedSnippet] מקבל אופסטים התואמים תו-בתו למה
+  /// שעל המסך.
+  static List<InlineSpan> fromHighlightedHtml({
+    required String html,
+    required TextStyle defaultStyle,
+    required TextStyle highlightStyle,
+  }) {
+    final parsed = parseHighlightedHtml(html);
+    return spansFromRanges(
+      plainText: parsed.plainText,
+      ranges: parsed.ranges,
+      defaultStyle: defaultStyle,
+      highlightStyle: highlightStyle,
+    );
   }
 
   /// מחלץ את המונחים שהמנוע סימן כהתאמות (תוכן תגי [_highlightTags]) מתוך

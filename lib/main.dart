@@ -21,6 +21,7 @@ import 'package:otzaria/bookmarks/bloc/bookmark_bloc.dart';
 import 'package:otzaria/bookmarks/repository/bookmark_repository.dart';
 import 'package:otzaria/find_ref/bloc/find_ref_bloc.dart';
 import 'package:otzaria/find_ref/repository/find_ref_factory.dart';
+import 'package:otzaria/core/build_info.dart';
 import 'package:otzaria/core/focus_repository.dart';
 import 'package:otzaria/history/bloc/history_bloc.dart';
 import 'package:otzaria/history/history_repository.dart';
@@ -450,6 +451,14 @@ Future<void> _runAppBootstrap() async {
     _appWindowListener = AppWindowListener();
     windowManager.addListener(_appWindowListener!);
     await windowManager.setPreventClose(true);
+
+    // תווית בילד (OTZARIA_BUILD_LABEL): נראית ב-tooltip של שורת המשימות
+    // וב-Alt+Tab גם כששורת-הכותרת מוסתרת — מזהה את הבילד בבדיקות ידניות.
+    // בבילד רגיל (בלי define) התווית ריקה והכותרת נשארת "Otzaria".
+    await windowManager.setTitle(BuildInfo.windowTitle);
+    if (BuildInfo.buildLabel.isNotEmpty) {
+      debugPrint('Otzaria build label: ${BuildInfo.buildLabel}');
+    }
 
     // ה-splash נייטיבי ב-runner והחלון הראשי נשאר מוסתר עד presentMainWindow,
     // שם הוא נחשף ישר בגבולותיו הסופיים — לכן אין כאן waitUntilReadyToShow.
