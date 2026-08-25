@@ -420,17 +420,20 @@ jobs:
       - name: Upload Windows installer (regular)
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-windows-installer
           path: installer/otzaria-*-windows.exe
 
       - name: Upload Windows installer (full)
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-windows-installer-full
           path: installer/otzaria-*-windows-full.exe
 
       - name: Upload Windows ZIP
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-windows-zip
           path: otzaria-windows.zip

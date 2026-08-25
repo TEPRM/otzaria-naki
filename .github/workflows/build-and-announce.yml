@@ -472,24 +472,28 @@ jobs:
       - name: Upload Windows installer (regular)
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-windows-installer
           path: installer/otzaria-*-windows.exe
 
       - name: Upload Windows installer (full)
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-windows-installer-full
           path: installer/otzaria-*-windows-full.exe
 
       - name: Upload Windows indexed installer tools
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-windows-indexed-installer-tools
           path: indexed-installer-tools/*
 
       - name: Upload Windows ZIP
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-windows-zip
           path: otzaria-windows.zip
 
@@ -1014,6 +1018,7 @@ jobs:
         if: steps.find_packages.outputs.deb_file != ''
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-linux-deb
           path: ${{ steps.find_packages.outputs.deb_file }}
           
@@ -1021,12 +1026,14 @@ jobs:
         if: steps.find_packages.outputs.rpm_file != ''
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-linux-rpm
           path: ${{ steps.find_packages.outputs.rpm_file }}
        
       - name: Upload linux build (raw)
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-linux-raw
           path: linux-build/*
 
@@ -1128,6 +1135,7 @@ jobs:
         if: true
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-linux-full
           path: otzaria-linux-full.tar.gz
 
@@ -1135,6 +1143,7 @@ jobs:
         if: true
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-library-full-indexed
           path: indexed-release-parts/*
           compression-level: 0
@@ -1142,6 +1151,7 @@ jobs:
       - name: Upload indexed FULL manifest for installer build
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-library-full-indexed-manifest
           path: indexed-release-parts/*.manifest.json
 
@@ -1369,6 +1379,7 @@ jobs:
       - name: Upload apk
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-android.apk
           path: build/app/outputs/flutter-apk/app-release.apk
 
@@ -1396,6 +1407,7 @@ jobs:
         if: true
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-android-full
           path: otzaria-android-full.zip
       
@@ -1642,6 +1654,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-macos.dmg
           path: otzaria-macos.dmg
 
@@ -1649,6 +1662,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-macos-update
           path: otzaria-macos.zip
 
@@ -1656,6 +1670,7 @@ jobs:
         if: true
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-macos-full
           path: otzaria-macos-full.zip
 
@@ -1736,6 +1751,7 @@ jobs:
       - name: Upload Windows indexed FULL bootstrap installer
         uses: actions/upload-artifact@v4.6.2
         with:
+          retention-days: 3
           name: otzaria-windows-installer-full-indexed
           path: installer/otzaria-*-windows-full-indexed.exe
 
