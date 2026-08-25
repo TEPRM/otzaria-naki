@@ -183,7 +183,8 @@ jobs:
           EnforceProcessCountAcrossBuilds: 'true'
           CMAKE_BUILD_PARALLEL_LEVEL: '4'
         run: |
-          flutter build windows --release --verbose
+          flutter build windows --release --verbose `
+            --dart-define=OTZARIA_BUILD_LABEL=engine-offsets
 
       - name: Zip Windows build
         shell: pwsh
