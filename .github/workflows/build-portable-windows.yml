@@ -1,0 +1,180 @@
+name: "Build Portable Windows (ZIP only)"
+
+# בנייה ידנית של ZIP נייד בלבד — בלי מתקינים ובלי הורדת מסד הספרייה.
+# בדיוק אותם שלבי הקומפילציה כמו ב-build_windows הרגיל (credentials,
+# pub get + generators, VC++ app-local, build, zip עם portable.marker),
+# אבל עוצר אחרי ה-ZIP — מי שכבר יש לו את התוכנה והמאגר על המחשב לא
+# משלם על הורדת ה-DB ועל בניית Inno Setup.
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build_windows:
+    runs-on: windows-2022
+    env:
+      # VC++ Redistributable מקובע ב-URL ישיר של מיקרוסופט (לא aka.ms שזז),
+      # עם אימות SHA-256 אחרי ההורדה. VC_REDIST_MIN_VERSION הוא *רף תחתון*:
+      # ה-runner של GitHub מגיע לרוב עם MSVC חדש מכל redist ציבורי, אז /install
+      # מחזיר 1638 (no-op) ו-System32 נשארת עם גרסת הראנר — לכן דורשים
+      # System32 >= MIN ולא שוויון, אחרת כל עדכון runner image שובר בנייה.
+      VC_REDIST_URL: 'https://download.visualstudio.microsoft.com/download/pr/ebdab8e5-1d7b-4d9f-a11b-cbb1720c3b12/843068991DAAA1F73AD9F6239BCE4D0F6A07A51F18C37EA2A867E9BECA71295C/VC_redist.x64.exe'
+      VC_REDIST_SHA256: '843068991DAAA1F73AD9F6239BCE4D0F6A07A51F18C37EA2A867E9BECA71295C'
+      VC_REDIST_MIN_VERSION: '14.51.36247.0'
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.0
+          cache: true
+
+      - name: Create Google Calendar Credentials
+        shell: pwsh
+        run: |
+          $clientId = '${{ secrets.GOOGLE_CALENDAR_CLIENT_ID }}'
+          $clientSecret = '${{ secrets.GOOGLE_CALENDAR_CLIENT_SECRET }}'
+          if ([string]::IsNullOrWhiteSpace($clientId) -or [string]::IsNullOrWhiteSpace($clientSecret)) {
+            throw "Google Calendar secrets are missing. Please set GOOGLE_CALENDAR_CLIENT_ID and GOOGLE_CALENDAR_CLIENT_SECRET."
+          }
+          $credentialsContent = @"
+          class GoogleCalendarCredentials {
+            static const String clientId = '$clientId';
+            static const String clientSecret = '$clientSecret';
+          }
+          "@
+          $credentialsContent | Out-File -FilePath "lib/tools/calendar/services/google_calendar_credentials.dart" -Encoding UTF8
+          Write-Host "Google Calendar credentials file created"
+
+      - name: Prepare Flutter dependencies for Windows release
+        shell: pwsh
+        run: |
+          flutter pub get
+          # Generate the settings .g.dart files: search index + translation catalog.
+          dart run tool/generate_search_index.dart
+          dart run tool/generate_settings_l10n.dart
+
+      - name: Bundle latest VC++ Redistributable runtime DLLs (app-local)
+        shell: pwsh
+        run: |
+          # מטרה: לארוז את ה-DLLs של MSVC runtime (MSVCP140 וחבריו) ליד
+          # otzaria.exe כך שיינטענו ע"י סדר חיפוש ה-DLL של ויינדוס במקום
+          # הגרסה שמותקנת ב-System32 אצל המשתמש. רקע: גרסה ספציפית של
+          # MSVCP140.dll (14.36.32532.0 שהגיעה עם VS 2022 17.6, יוני 2023)
+          # מכילה NULL-deref ב-+0x12f58 שמקריס כל std::string concat
+          # בקוד החם של flutter_inappwebview, ובלי שדרוג מבחוץ הוא נשאר
+          # תקוע במכונת המשתמש. בנדול app-local פותר את זה לכל מסלולי
+          # ההפצה (regular installer, full installer, ו-portable ZIP) — אף
+          # אחד מהם כבר לא מריץ vc_redist.x64.exe בהתקנה.
+          #
+          # הגרסה מקובעת ב-env (VC_REDIST_URL + VC_REDIST_SHA256 + VC_REDIST_MIN_VERSION)
+          # ולא מוורדת מ-aka.ms הזז, כך שאותו vc_redist.x64.exe יורד בכל
+          # בנייה. אחרי ההורדה מתבצע אימות SHA-256. מתקינים אותו על ה-runner
+          # (שהוא VM זמני) ואז מעתיקים את ה-DLLs מ-System32 ל-installer\vcredist\x64.
+          # ה-install(DIRECTORY) ב-CMakeLists קולט אותם משם וממקם ליד otzaria.exe
+          # בתיקיית Release.
+          #
+          # windows-2022 מגיעה עם VC Redist חדש מכל redist ציבורי, אז /install
+          # מחזיר 1638 (no-op) ו-System32 נשארת עם גרסת הראנר. לכן לא דורשים
+          # שוויון אלא רף תחתון: System32 >= VC_REDIST_MIN_VERSION. ה-DLLs
+          # שמועתקים הם של הראנר (>= הרף), וזה בטוח.
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path "installer\vc_redist.x64.exe")) {
+            Write-Host "Downloading pinned vc_redist.x64.exe ($env:VC_REDIST_URL)..."
+            Invoke-WebRequest -Uri $env:VC_REDIST_URL -OutFile "installer\vc_redist.x64.exe"
+          } else {
+            Write-Host "vc_redist.x64.exe already present, reusing"
+          }
+          $actualHash = (Get-FileHash "installer\vc_redist.x64.exe" -Algorithm SHA256).Hash
+          if ($actualHash -ne $env:VC_REDIST_SHA256) {
+            throw "vc_redist.x64.exe SHA-256 mismatch — expected $env:VC_REDIST_SHA256 but got $actualHash"
+          }
+          Write-Host "vc_redist.x64.exe SHA-256 verified: $actualHash"
+          Write-Host "Installing vc_redist.x64.exe on the runner..."
+          $proc = Start-Process -FilePath "installer\vc_redist.x64.exe" `
+            -ArgumentList '/install','/quiet','/norestart' -Wait -PassThru
+          # exit codes: 0=success, 1638=newer-version-already-installed, 3010=ok-needs-reboot
+          if ($proc.ExitCode -notin @(0, 1638, 3010)) {
+            throw "vc_redist.x64.exe install failed with exit code $($proc.ExitCode)"
+          }
+          Write-Host "vc_redist exit code: $($proc.ExitCode)"
+          # רף תחתון: ודא ש-System32 לא ישן מ-VC_REDIST_MIN_VERSION.
+          $msvcpPath = Join-Path $env:SystemRoot 'System32\msvcp140.dll'
+          if (-not (Test-Path $msvcpPath)) {
+            throw "msvcp140.dll missing from $msvcpPath after vc_redist install — something is wrong with the runner image"
+          }
+          $actualMsvcpVersion = (Get-Item $msvcpPath).VersionInfo.FileVersionRaw
+          if ($actualMsvcpVersion -lt [version]$env:VC_REDIST_MIN_VERSION) {
+            $msg = @(
+              'VC++ runtime on runner is OLDER than the pinned minimum.',
+              "  System32\msvcp140.dll:          $actualMsvcpVersion",
+              "  required VC_REDIST_MIN_VERSION:  $env:VC_REDIST_MIN_VERSION",
+              '',
+              'The pinned vc_redist.x64.exe should have raised System32 to at least',
+              'this version. If this fires, the download/install step likely failed,',
+              'or the runner image is unexpectedly old.',
+              '',
+              'To raise the floor: resolve aka.ms/vc14/vc_redist.x64.exe, then update',
+              'VC_REDIST_URL / VC_REDIST_SHA256 / VC_REDIST_MIN_VERSION together.'
+            ) -join "`n"
+            throw $msg
+          }
+          Write-Host "System32 msvcp140.dll ($actualMsvcpVersion) meets minimum $env:VC_REDIST_MIN_VERSION"
+          $destDir = "installer\vcredist\x64"
+          New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+          $dlls = @(
+            'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
+            'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll',
+            'vcruntime140.dll', 'vcruntime140_1.dll', 'vcruntime140_threads.dll',
+            'concrt140.dll', 'vccorlib140.dll'
+          )
+          foreach ($d in $dlls) {
+            $src = Join-Path $env:SystemRoot "System32\$d"
+            if (Test-Path $src) {
+              Copy-Item -Path $src -Destination (Join-Path $destDir $d) -Force
+              $ver = (Get-Item $src).VersionInfo.FileVersion
+              Write-Host "  copied $d (v$ver)"
+            } else {
+              Write-Host "::warning::$d not found in System32 — skipping"
+            }
+          }
+          Write-Host "VC++ runtime DLLs staged in $destDir"
+
+      - name: Build Flutter Windows app
+        shell: pwsh
+        env:
+          # מאלץ את MSBuild לקמפל קבצי C++ במקביל גם בתוך אותו פרויקט
+          UseMultiToolTask: 'true'
+          EnforceProcessCountAcrossBuilds: 'true'
+          CMAKE_BUILD_PARALLEL_LEVEL: '4'
+        run: |
+          flutter build windows --release --verbose `
+            --dart-define=OTZARIA_BUILD_LABEL=engine-offsets
+
+      - name: Zip Windows build
+        shell: pwsh
+        run: |
+          $relDir = Get-ChildItem -Directory build\windows |
+                    Where-Object { Test-Path "$($_.FullName)\runner\Release" } |
+                    Select-Object -First 1 -ExpandProperty FullName
+          if (-not $relDir) { throw 'Release directory not found' }
+          Compress-Archive -Path "$relDir\runner\Release\*" -DestinationPath otzaria-windows.zip
+          # portable.marker הופך את ה-ZIP לנייד באמת: כל הנתונים נשמרים
+          # בתיקיית otzaria_data ליד ה-EXE (ראה lib/core/app_paths.dart →
+          # isPortable).
+          $marker = Join-Path $env:RUNNER_TEMP 'portable.marker'
+          New-Item -ItemType File -Path $marker -Force | Out-Null
+          Compress-Archive -Path $marker -Update -DestinationPath otzaria-windows.zip
+
+      - name: Upload Windows ZIP
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          retention-days: 3
+          name: otzaria-windows-zip
+          path: otzaria-windows.zip
