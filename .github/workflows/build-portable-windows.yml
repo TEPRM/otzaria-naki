@@ -11,6 +11,9 @@ permissions:
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/engine-match-offsets
 
 jobs:
   build_windows:
