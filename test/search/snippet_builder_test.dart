@@ -59,37 +59,6 @@ Future<void> main() async {
     });
   });
 
-  group('extractHighlightedTerms - חילוץ מונחי התאמה להדגשת PDF', () {
-    test('מחלץ את תוכן תגי font ו-mark בלבד, ללא כפילויות', () {
-      final terms = SnippetBuilder.extractHighlightedTerms(
-        'בראשית <font color="red">ברא</font> אלהים '
-        '<mark>שבתות</mark> וגם <font color="red">ברא</font>',
-      );
-      expect(terms, {'ברא', 'שבתות'});
-    });
-
-    test('תגי עיצוב של תוכן הספר (b) אינם נחשבים התאמה', () {
-      final terms = SnippetBuilder.extractHighlightedTerms(
-        '<b>כותרת</b> טקסט <font>מצא</font>',
-      );
-      expect(terms, {'מצא'});
-    });
-
-    test('HTML ללא תגי הדגשה מחזיר קבוצה ריקה', () {
-      expect(
-        SnippetBuilder.extractHighlightedTerms('טקסט רגיל בלי הדגשות'),
-        isEmpty,
-      );
-    });
-
-    test('מנרמל רווחים בתוך מונח מודגש', () {
-      final terms = SnippetBuilder.extractHighlightedTerms(
-        '<font>אבג   דהו</font>',
-      );
-      expect(terms, {'אבג דהו'});
-    });
-  });
-
   group(
     'highlightLiteral - חיפוש מקומי',
     () {

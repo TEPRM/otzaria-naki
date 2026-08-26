@@ -134,36 +134,6 @@ class SnippetBuilder {
     );
   }
 
-  /// מחלץ את המונחים שהמנוע סימן כהתאמות (תוכן תגי [_highlightTags]) מתוך
-  /// [html]. משמש להדגשת ההתאמות האמיתיות על גבי דפי PDF.
-  static Set<String> extractHighlightedTerms(String html) {
-    final body = html_parser.parse(html).body;
-    if (body == null) return const {};
-    final terms = <String>{};
-    _collectHighlightedTerms(body, highlighted: false, terms: terms);
-    return terms;
-  }
-
-  static void _collectHighlightedTerms(
-    dom.Node node, {
-    required bool highlighted,
-    required Set<String> terms,
-  }) {
-    for (final child in node.nodes) {
-      if (child is dom.Text) {
-        if (!highlighted) continue;
-        final text = child.text.replaceAll(_whitespace, ' ').trim();
-        if (text.isNotEmpty) terms.add(text);
-      } else if (child is dom.Element) {
-        _collectHighlightedTerms(
-          child,
-          highlighted: highlighted || _highlightTags.contains(child.localName),
-          terms: terms,
-        );
-      }
-    }
-  }
-
   /// מחלץ טקסט גולמי מ-HTML של המנוע (מסיר תגים ומנרמל רווחים), לצורך
   /// הדגשה-מחדש בצד האפליקציה בעקביות עם פאנל הקריאה.
   static String htmlToPlainText(String html) {

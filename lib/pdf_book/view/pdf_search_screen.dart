@@ -119,13 +119,23 @@ class PdfBookSearchView extends StatefulWidget {
   /// תקרת מונחים ייחודיים לתבנית ההדגשה, כדי שהרגקס לא יתנפח.
   static const int _maxHighlightTerms = 50;
 
-  /// בונה תבנית הדגשה אחת מהמונחים שהמנוע סימן כהתאמות ב-[resultHtmls]
-  /// (עד [_maxHighlightTerms] מונחים). מחזיר null כשאין מונחים.
+  /// בונה תבנית הדגשה אחת מהקטעים שהמנוע סימן כהתאמות ב-[resultHtmls]
+  /// (עד [_maxHighlightTerms] מונחים), דרך שכבת-האופסטים:
+  /// [SnippetBuilder.parseHighlightedHtml] מתרגם את סימון המנוע לטווחי-תווים
+  /// על הטקסט הנקי, וכל טווח נחתך לקטע מדויק — אותו טקסט בדיוק שמודגש
+  /// ברשימת התוצאות, כך שההדגשה על העמוד וההדגשה בקטע תמיד מסונכרנות.
+  /// מחזיר null כשאין קטעים.
   @visibleForTesting
   static RegExp? buildAdvancedHighlightPattern(Iterable<String> resultHtmls) {
     final terms = <String>{};
     for (final html in resultHtmls) {
-      terms.addAll(SnippetBuilder.extractHighlightedTerms(html));
+      final parsed = SnippetBuilder.parseHighlightedHtml(html);
+      for (final range in parsed.ranges) {
+        final term = parsed.plainText.substring(range[0], range[1]).trim();
+        if (term.isEmpty) continue;
+        terms.add(term);
+        if (terms.length >= _maxHighlightTerms) break;
+      }
       if (terms.length >= _maxHighlightTerms) break;
     }
 

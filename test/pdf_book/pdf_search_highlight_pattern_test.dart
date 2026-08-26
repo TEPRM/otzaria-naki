@@ -80,6 +80,25 @@ Future<void> main() async {
         expect(duplicated.pattern, single.pattern);
       });
 
+      test('קטע רב-מילים נחתך מהאופסטים כמכלול, כולל רווחים מנורמלים', () {
+        // שכבת-האופסטים חותכת את כל הטווח מהטקסט הנקי, כך שקטע שהמנוע
+        // סימן כמכלול נשאר קטע אחד בתבנית — לא פירור למילים.
+        final pattern = PdfBookSearchView.buildAdvancedHighlightPattern([
+          '<font>אבג   דהו</font>',
+        ])!;
+
+        expect(pattern.hasMatch('הנה אבג דהו כאן'), isTrue);
+        expect(pattern.hasMatch('שבת שלום'), isFalse);
+      });
+
+      test('רווחים מסביב לקטע המודגש נחתכים מהמונח', () {
+        final pattern = PdfBookSearchView.buildAdvancedHighlightPattern([
+          '<font>  שבתות  </font>',
+        ])!;
+
+        expect(pattern.hasMatch('בזכות שבתות שנשמרו'), isTrue);
+      });
+
       test('נאכפת תקרת מונחים — מונחים מעבר לתקרה לא נכללים', () {
         final htmls = List.generate(
           60,
