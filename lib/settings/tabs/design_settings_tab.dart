@@ -82,6 +82,22 @@ class DesignSettingsTab extends StatelessWidget {
       ],
     ),
     SettingsSearchEntry(
+      id: 'design.display.reading_tabs_placement',
+      title: 'מיקום הכרטיסיות',
+      subtitle: 'כרטיסיות העיון ברצועה שלמעלה או בעמודה אנכית בצד',
+      tab: SettingsTab.design,
+      cardId: 'design.display',
+      keywords: [
+        'כרטיסיות',
+        'טאבים',
+        'לשוניות',
+        'עמודה',
+        'אנכי',
+        'בצד',
+        'למעלה',
+      ],
+    ),
+    SettingsSearchEntry(
       id: 'design.pdf.book_view',
       title: 'תצוגת ספר בPDF',
       subtitle: 'פתיחת ספרי PDF בתצוגת ספר או רגילה',
@@ -93,8 +109,8 @@ class DesignSettingsTab extends StatelessWidget {
       id: 'design.pdf.talmud_bavli_format',
       title: 'פורמט פתיחת תלמוד בבלי',
       subtitle:
-          'פתיחת מסכתות הבבלי בטקסט או ב-PDF, '
-          'מהספרייה ומכל מקום אחר',
+          'פתיחת מסכתות הבבלי בטקסט או ב-PDF — '
+          'בספרייה, בתצוגה המקדימה ובכל מקום אחר',
       tab: SettingsTab.design,
       cardId: 'design.pdf',
       keywords: [
@@ -106,6 +122,7 @@ class DesignSettingsTab extends StatelessWidget {
         'טקסט',
         'מסכת',
         'ספרייה',
+        'תצוגה מקדימה',
       ],
     ),
     SettingsSearchEntry(
@@ -318,6 +335,32 @@ class DesignSettingsTab extends StatelessWidget {
                           );
                         },
                       ),
+                      SettingsActionTile.segmentedTile<String>(
+                        rtlIcon: FluentIcons.panel_left_24_regular,
+                        title: context.settingsText('מיקום הכרטיסיות'),
+                        options: [
+                          SegmentOption(
+                            value: SettingsRepository.readingTabsPlacementTop,
+                            label: context.settingsText('למעלה'),
+                            subtitle: context.settingsText(
+                              'הכרטיסיות יוצגו ברצועה שבשורת הכותרת',
+                            ),
+                          ),
+                          SegmentOption(
+                            value: SettingsRepository.readingTabsPlacementSide,
+                            label: context.settingsText('בצד'),
+                            subtitle: context.settingsText(
+                              'הכרטיסיות יוצגו בעמודה אנכית ליד סרגל הניווט',
+                            ),
+                          ),
+                        ],
+                        currentValue: state.readingTabsPlacement,
+                        onChanged: (value) {
+                          context.read<SettingsBloc>().add(
+                            UpdateReadingTabsPlacement(value),
+                          );
+                        },
+                      ),
                     ],
                   ),
                   kSettingsCardSpacing,
@@ -328,7 +371,7 @@ class DesignSettingsTab extends StatelessWidget {
                   title: context.settingsText('תצוגת PDF'),
                   children: [
                     SettingsActionTile.switchTile(
-                      icon: FluentIcons.book_open_24_regular,
+                      icon: OtzariaIcons.otzaria_icon_2_page_24_regular,
                       title: context.settingsText('תצוגת ספר בPDF'),
                       subtitle: context.settingsText(
                         state.enablePerBookSettings
@@ -366,7 +409,8 @@ class DesignSettingsTab extends StatelessWidget {
                           icon: OtzariaIcons.book_pdf_24_regular,
                           subtitle: context.settingsText(
                             'מסכתות הבבלי ייפתחו במהדורת ה-PDF '
-                            'בדף המתאים, גם בפתיחה מהספרייה',
+                            'בדף המתאים, גם בפתיחה מהספרייה '
+                            'ובתצוגה המקדימה',
                           ),
                         ),
                       ],

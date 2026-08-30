@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:otzaria/plugins/plugin_constants.dart';
 import 'package:otzaria/plugins/services/plugin_highlight_registry.dart';
 
 void main() {
@@ -533,50 +534,337 @@ void main() {
       expect(registry.revision, 0);
     });
   });
+
+  group('ריבוי מופעים של אותו תוסף', () {
+    const i1 = 'instance-1';
+    const i2 = 'instance-2';
+
+    PluginInstanceKey key(String instanceId) => (
+      pluginId: 'plugin.a',
+      instanceId: instanceId,
+    );
+
+    test('אותה הדגשה משני מופעים מצוירת פעם אחת', () {
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        ownerInstanceId: i1,
+        payload: _payload(id: 'shared'),
+      );
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        ownerInstanceId: i2,
+        payload: _payload(id: 'shared'),
+      );
+
+      expect(
+        registry.getAllHighlights(bookId: 'book', sectionIndex: 1),
+        hasLength(1),
+      );
+      expect(
+        registry.getHighlights(ownerPluginId: 'plugin.a', ownerInstanceId: i1),
+        hasLength(1),
+      );
+      expect(
+        registry.getHighlights(ownerPluginId: 'plugin.a', ownerInstanceId: i2),
+        hasLength(1),
+      );
+    });
+
+    test('בציור מועדף העותק של המופע הגלוי', () {
+      registry = PluginHighlightRegistry.forTesting(
+        isInstanceVisible: (instanceKey) => instanceKey.instanceId == i2,
+      );
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        ownerInstanceId: i1,
+        payload: _payload(id: 'shared'),
+      );
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        ownerInstanceId: i2,
+        payload: {
+          ..._payload(id: 'shared'),
+          'style': {'backgroundColor': '#112233'},
+        },
+      );
+
+      final rendered = registry
+          .getAllHighlights(bookId: 'book', sectionIndex: 1)
+          .single;
+      expect(rendered.style.backgroundColor, '#112233');
+    });
+
+    test('removeInstance מסיר רק את המופע והציור חושף את העותק השני', () {
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        ownerInstanceId: i1,
+        payload: _payload(id: 'shared'),
+      );
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        ownerInstanceId: i2,
+        payload: _payload(id: 'shared'),
+      );
+
+      registry.removeInstance(key(i1));
+
+      expect(
+        registry.getHighlights(ownerPluginId: 'plugin.a', ownerInstanceId: i1),
+        isEmpty,
+      );
+      expect(
+        registry.getHighlights(ownerPluginId: 'plugin.a', ownerInstanceId: i2),
+        hasLength(1),
+      );
+      expect(
+        registry.getAllHighlights(bookId: 'book', sectionIndex: 1),
+        hasLength(1),
+      );
+    });
+
+    test('מחיקה ממופע אחד אינה נוגעת בעותק של המופע השני', () {
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        ownerInstanceId: i1,
+        payload: _payload(id: 'shared'),
+      );
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        ownerInstanceId: i2,
+        payload: _payload(id: 'shared'),
+      );
+
+      expect(
+        registry.clearHighlight(
+          ownerPluginId: 'plugin.a',
+          ownerInstanceId: i1,
+          highlightId: 'shared',
+        ),
+        isTrue,
+      );
+
+      expect(
+        registry.getAllHighlights(bookId: 'book', sectionIndex: 1),
+        hasLength(1),
+      );
+    });
+
+    test('removePlugin מנקה את כל המופעים', () {
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        ownerInstanceId: i1,
+        payload: _payload(id: 'shared'),
+      );
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        ownerInstanceId: i2,
+        payload: _payload(id: 'shared'),
+      );
+
+      registry.removePlugin('plugin.a');
+
+      expect(
+        registry.getAllHighlights(bookId: 'book', sectionIndex: 1),
+        isEmpty,
+      );
+      expect(
+        registry.getHighlights(ownerPluginId: 'plugin.a', ownerInstanceId: i1),
+        isEmpty,
+      );
+      expect(
+        registry.getHighlights(ownerPluginId: 'plugin.a', ownerInstanceId: i2),
+        isEmpty,
+      );
+    });
+  });
+
+  group('bookUid — מפתח כפול ותאימות לאחור', () {
+    test('reanchorSection אינו נוגע בהדגשה של ספר אחר בעל אותה כותרת', () {
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        payload: _reanchorPayload(id: 'other-book', bookUid: 'uid:10'),
+        now: DateTime.utc(2026, 8, 24, 10),
+      );
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        payload: _reanchorPayload(id: 'legacy'),
+        now: DateTime.utc(2026, 8, 24, 10),
+      );
+
+      final changed = registry.reanchorSection(
+        bookId: 'book',
+        sectionIndex: 1,
+        sourceText: 'prefix before target after',
+        bookUid: 'id:10',
+        now: DateTime.utc(2026, 8, 24, 11),
+      );
+
+      // ההדגשה הזרה הייתה מעוגנת מול טקסט של ספר אחר ומסומנת ככושלת;
+      // ההדגשה הישנה (ללא uid) כן מעוגנת מחדש כמקודם.
+      expect(changed.map((r) => r.highlightId), ['legacy']);
+    });
+
+    test('הדגשה חדשה עם bookUid נמצאת גם דרך הכותרת וגם דרך המזהה', () {
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        payload: _payload(id: 'h1', bookId: 'ברכות', bookUid: 'id:10'),
+        now: DateTime.utc(2026, 8, 24),
+      );
+
+      // ציור קיים (כותרת בלבד) — עדיין מוצא אותה: אין רגרסיה.
+      expect(
+        registry
+            .getAllHighlights(bookId: 'ברכות', sectionIndex: 1)
+            .single
+            .highlightId,
+        'h1',
+      );
+      // ציור מחווט (כותרת + uid) — מוצא אותה גם כן.
+      expect(
+        registry
+            .getAllHighlights(
+              bookId: 'ברכות',
+              sectionIndex: 1,
+              bookUid: 'id:10',
+            )
+            .single
+            .highlightId,
+        'h1',
+      );
+    });
+
+    test('migrate-on-read: הדגשה ישנה (כותרת בלבד) נמצאת גם בציור עם uid', () {
+      // נשמרה לפני תמיכת bookUid — אין לה bookUid.
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        payload: _payload(id: 'old', bookId: 'ברכות'),
+        now: DateTime.utc(2026, 8, 24),
+      );
+
+      final drawn = registry.getAllHighlights(
+        bookId: 'ברכות',
+        sectionIndex: 1,
+        bookUid: 'id:10',
+      );
+      expect(drawn.single.highlightId, 'old');
+      expect(drawn.single.bookUid, isNull);
+    });
+
+    test('שני ספרים באותו שם — bookUid מפריד ביניהם בציור', () {
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        payload: _payload(id: 'lib', bookId: 'גיטין', bookUid: 'id:10'),
+        now: DateTime.utc(2026, 8, 24),
+      );
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        payload: _payload(id: 'usr', bookId: 'גיטין', bookUid: 'uid:10'),
+        now: DateTime.utc(2026, 8, 24),
+      );
+
+      // ציור הספר הרשמי — רק ההדגשה שלו, לא של הספר האישי בעל אותו שם.
+      final libDrawn = registry.getAllHighlights(
+        bookId: 'גיטין',
+        sectionIndex: 1,
+        bookUid: 'id:10',
+      );
+      expect(libDrawn.map((h) => h.highlightId), ['lib']);
+
+      final usrDrawn = registry.getAllHighlights(
+        bookId: 'גיטין',
+        sectionIndex: 1,
+        bookUid: 'uid:10',
+      );
+      expect(usrDrawn.map((h) => h.highlightId), ['usr']);
+    });
+
+    test('הדגשה עם bookUid מצוירת פעם אחת כשנשאלים שני המפתחות', () {
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        payload: _payload(id: 'once', bookId: 'ברכות', bookUid: 'id:10'),
+        now: DateTime.utc(2026, 8, 24),
+      );
+
+      expect(
+        registry.getAllHighlights(
+          bookId: 'ברכות',
+          sectionIndex: 1,
+          bookUid: 'id:10',
+        ),
+        hasLength(1),
+      );
+    });
+
+    test('הסרת הדגשה עם bookUid מנקה את שני המפתחות', () {
+      registry.setHighlight(
+        ownerPluginId: 'plugin.a',
+        payload: _payload(id: 'rm', bookId: 'ברכות', bookUid: 'id:10'),
+        now: DateTime.utc(2026, 8, 24),
+      );
+      registry.clearHighlight(ownerPluginId: 'plugin.a', highlightId: 'rm');
+
+      expect(
+        registry.getAllHighlights(bookId: 'ברכות', sectionIndex: 1),
+        isEmpty,
+      );
+      expect(
+        registry.getAllHighlights(
+          bookId: 'ברכות',
+          sectionIndex: 1,
+          bookUid: 'id:10',
+        ),
+        isEmpty,
+      );
+    });
+  });
 }
 
-Map<String, dynamic> _reanchorPayload({required String id}) => {
-  'highlightId': id,
-  'bookId': 'book',
-  'sectionIndex': 1,
-  'range': {
-    'type': 'text-range-v1',
-    'schemaVersion': 1,
-    'layer': 'source',
-    'sourceTextHash':
-        '0000000000000000000000000000000000000000000000000000000000000000',
-    'start': {'grapheme': 7, 'codePoint': 7, 'utf16': 7},
-    'end': {'grapheme': 13, 'codePoint': 13, 'utf16': 13},
-    'exactText': 'target',
-    'beforeText': {
-      'raw': 'before ',
-      'normalized': 'before ',
-      'maxGraphemes': 30,
-      'actualGraphemes': 7,
-      'truncatedAtBoundary': true,
-    },
-    'afterText': {
-      'raw': ' after',
-      'normalized': ' after',
-      'maxGraphemes': 30,
-      'actualGraphemes': 6,
-      'truncatedAtBoundary': true,
-    },
-    'occurrenceIndexInSection': 0,
-    'occurrenceCountInSection': 1,
-    'normalizationProfile': 'strict',
-  },
-  'style': {'backgroundColor': '#FFE066'},
-};
+Map<String, dynamic> _reanchorPayload({required String id, String? bookUid}) =>
+    {
+      'highlightId': id,
+      'bookId': 'book',
+      'bookUid': ?bookUid,
+      'sectionIndex': 1,
+      'range': {
+        'type': 'text-range-v1',
+        'schemaVersion': 1,
+        'layer': 'source',
+        'sourceTextHash':
+            '0000000000000000000000000000000000000000000000000000000000000000',
+        'start': {'grapheme': 7, 'codePoint': 7, 'utf16': 7},
+        'end': {'grapheme': 13, 'codePoint': 13, 'utf16': 13},
+        'exactText': 'target',
+        'beforeText': {
+          'raw': 'before ',
+          'normalized': 'before ',
+          'maxGraphemes': 30,
+          'actualGraphemes': 7,
+          'truncatedAtBoundary': true,
+        },
+        'afterText': {
+          'raw': ' after',
+          'normalized': ' after',
+          'maxGraphemes': 30,
+          'actualGraphemes': 6,
+          'truncatedAtBoundary': true,
+        },
+        'occurrenceIndexInSection': 0,
+        'occurrenceCountInSection': 1,
+        'normalizationProfile': 'strict',
+      },
+      'style': {'backgroundColor': '#FFE066'},
+    };
 
 Map<String, dynamic> _payload({
   String? id,
   String bookId = 'book',
+  String? bookUid,
   int sectionIndex = 1,
 }) {
   return {
     'highlightId': ?id,
     'bookId': bookId,
+    'bookUid': ?bookUid,
     'sectionIndex': sectionIndex,
     'range': {
       'type': 'text-range-v1',

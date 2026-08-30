@@ -53,19 +53,25 @@ import 'package:otzaria/data/constants/database_constants.dart';
 import 'package:otzaria/library_update/bloc/library_update_bloc.dart';
 import 'package:otzaria/library_update/repository/library_update_repository.dart';
 import 'package:otzaria/library_update/services/companion_assets_service.dart';
+import 'package:otzaria/library_update/services/startup_recovery_check.dart';
 import 'package:seforim_library_updater/seforim_library_updater.dart';
 import 'package:zstandard/zstandard.dart';
 import 'package:otzaria/work_status/work_status_cubit.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_bloc.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_event.dart';
+import 'package:otzaria/plugins/bloc/plugin_updates_cubit.dart';
 import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
 import 'package:otzaria/plugins/declarative/services/declarative_library_book_access.dart';
+import 'package:otzaria/plugins/services/plugin_reader_actions.dart';
 import 'package:otzaria/plugins/declarative/services/declarative_plugin_host_service.dart';
 import 'package:otzaria/utils/navigation/book_open_coordinator.dart';
 
 import 'package:otzaria_search_engine/otzaria_search_engine.dart';
 import 'package:otzaria/core/app_paths.dart';
+import 'package:otzaria/core/cli_command.dart';
 import 'package:otzaria/core/error_log_file.dart';
+import 'package:otzaria/core/info/app_info_cli.dart';
+import 'package:otzaria/core/info/app_install_timeline.dart';
 import 'package:otzaria/core/external_activation_queue.dart';
 import 'package:otzaria/core/portable_paths.dart';
 import 'package:otzaria/core/window_listener.dart';
@@ -74,6 +80,7 @@ import 'package:otzaria/tools/shamor_zachor/providers/shamor_zachor_data_provide
 import 'package:otzaria/tools/shamor_zachor/providers/shamor_zachor_progress_provider.dart';
 import 'package:otzaria/settings/services/backup_service.dart';
 import 'package:otzaria/core/http_client_registry.dart';
+import 'package:otzaria/plugins/services/plugin_report_service.dart';
 import 'package:otzaria/services/direct_error_report_service.dart';
 import 'package:otzaria/data/cache/books_cache.dart';
 import 'package:otzaria/data/cache/acronyms_cache.dart';
@@ -95,6 +102,7 @@ import 'package:otzaria/plugins/services/plugin_install_report_service.dart';
 import 'package:otzaria/plugins/services/plugin_packager_cli.dart';
 import 'package:otzaria/plugins/services/plugin_store_link_parser.dart';
 import 'package:otzaria/plugins/services/plugin_protocol_registration_service.dart';
+import 'package:otzaria/plugins/utils/plugin_dev_tools_mode.dart';
 import 'package:otzaria/plugins/view/webview_environment_holder.dart';
 import 'package:otzaria/core/sentry_event_filter.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
@@ -277,6 +285,8 @@ void main(List<String> args) async {
     return;
   }
 
+  PluginDevToolsMode.initFromArgs(args);
+
   SentryWidgetsFlutterBinding.ensureInitialized();
 
   // אישור קבלה מוקדם לאתר החנות עבור קישורי התקנת תוסף שהגיעו כארגומנטים —
@@ -415,6 +425,14 @@ Future<void> _initializeSentry() async {
 Future<void> _runAppBootstrap() async {
   // Check for single instance - skip on Apple platforms (macOS/iOS) due to sandbox restrictions
   if (!Platform.isMacOS && !Platform.isIOS) {
+    // שם התהליך משמש רק לשם קובץ ה-pid. בלעדיו החבילה מריצה tasklist/ps
+    // באופן חוסם לפני runApp — במחשב שסוכן סינון מאט בו יצירת תהליכים זה
+    // עיכב את העלייה בעשרות שניות (issue #989). חייב לגזור אותו כמו החבילה
+    // (שם ה-EXE בלי סיומת), אחרת מופע ישן וחדש לא יזהו זה את זה.
+    FlutterSingleInstance.processName ??= Platform.resolvedExecutable
+        .split(Platform.pathSeparator)
+        .last
+        .replaceAll(RegExp(r'\.exe$', caseSensitive: false), '');
     FlutterSingleInstance flutterSingleInstance = FlutterSingleInstance();
     bool isFirstInstance = await flutterSingleInstance.isFirstInstance();
     if (!isFirstInstance) {
@@ -537,6 +555,7 @@ Future<void> _initializeProcessSingletons() async {
     }
 
     _clearErrorLogOnVersionChange();
+    await AppInstallTimelineStore.recordLaunch(ErrorLogFile.appVersion);
 
     if (!kIsWeb &&
         (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
@@ -589,30 +608,16 @@ Future<void> _initializeProcessSingletons() async {
 }
 
 /// משחזר עדכון ספרייה שנקטע (marker+backup) לפני פתיחת ה-DB.
-Future<void> _recoverInterruptedLibraryUpdate() async {
-  try {
-    final dbPath = DatabaseConstants.getDatabasePath();
-    const recovery = LibraryDbRecoveryService();
-    final result = await recovery.recoverIfNeeded(dbPath);
-    switch (result.action) {
-      case RecoveryAction.restored:
-        debugPrint('📦 ${result.detail}');
-      case RecoveryAction.blockedMissingBackup:
-        // עדכון דלתא שנקטע: ה-apply אטומי (transaction), אז ה-DB תקין — מקור או
-        // יעד. הבדיקה פותחת RW כדי לגלגל hot journal שנשאר מהקריסה, ומריצה
-        // quick_check. פגום (נדיר, לא-SQLite) → הורדה מלאה.
-        if (recovery.checkDbHealthAfterCrash(dbPath)) {
-          debugPrint('📦 ${result.detail}: ה-DB עבר quick_check; מנקה סימון');
-          recovery.clearStaleArtifacts(dbPath);
-        } else {
-          debugPrint('   ⚠️ ה-DB פגום/לא קריא — נדרשת הורדה מלאה; משאיר סימון');
-        }
-      case RecoveryAction.none:
-        break;
-    }
-  } catch (e) {
-    debugPrint('library update recovery failed: $e');
-  }
+Future<void> _recoverInterruptedLibraryUpdate() {
+  return StartupRecoveryCheck(
+    readPref: Settings.getValue<String>,
+    writePref: (key, value) => Settings.setValue(key, value),
+    logError: (title, message) => _appendUnhandledErrorToLocalLog(
+      title: title,
+      error: message,
+      details: const {'Phase': 'initialize', 'Component': 'Library recovery'},
+    ),
+  ).run(DatabaseConstants.getDatabasePath());
 }
 
 Future<void> _initializeRestartableRuntime() async {
@@ -699,6 +704,8 @@ Future<void> _runDeferredErrorReportFlush() async {
     final reportService = DirectErrorReportService();
     HttpClientRegistry.register(reportService.closeHttpClient);
     await reportService.startAutomaticFlush();
+    // תור דיווחי התוספים משתמש ב-client סטטי שכבר רשום ב-HttpClientRegistry.
+    await PluginReportService().startAutomaticFlush();
   } catch (error, stackTrace) {
     _logNonFatalInitializationError(
       'Direct error report queue',
@@ -965,17 +972,15 @@ String _buildLocalPluginInstallUri(String filePath) {
 ///   `otzaria.exe pack-plugin --help` / `-h` — הצגת מסך עזרה.
 ///   `otzaria build-release-index --library <dir> --index <dir> --data <dir>`
 ///       בונה אינדקס חיפוש מבודד עבור חבילת ההפצה המלאה.
+///   `otzaria info [<נושא>] [--limit=<n>] [--compact] [--out=<path>]`
+///       מדפיס דוח JSON על ההתקנה ל-stdout (ראה [AppInfoCli]).
 ///
 /// הלוגיקה עצמה ב-[PluginPackagerCli.run] כדי לשתף בדיוק את אותו הקוד
 /// עם `tool/plugins/package_plugin.dart`.
 Future<bool> _maybeRunCliCommand(List<String> args) async {
   if (args.isEmpty) return false;
 
-  final command = args.first.trim().toLowerCase();
-  // תמיכה גם ב-`pack-plugin`, ב-`--pack-plugin` וב-`/pack-plugin` (Windows style).
-  final normalized = command
-      .replaceFirst(RegExp(r'^(--|/)'), '')
-      .replaceAll('_', '-');
+  final normalized = normalizeCliCommand(args.first);
 
   if (normalized == 'pack-plugin') {
     final exitCode = await PluginPackagerCli.run(args.skip(1).toList());
@@ -986,6 +991,13 @@ Future<bool> _maybeRunCliCommand(List<String> args) async {
 
   if (normalized == 'build-release-index') {
     final exitCode = await ReleaseIndexBuilderCli.run(args.skip(1).toList());
+    await stdout.flush();
+    await stderr.flush();
+    exit(exitCode);
+  }
+
+  if (normalized == 'info') {
+    final exitCode = await AppInfoCli.run(args.skip(1).toList());
     await stdout.flush();
     await stderr.flush();
     exit(exitCode);
@@ -1096,9 +1108,16 @@ class _AppBootstrapState extends State<AppBootstrap> {
             )..add(LoadTabs()),
           ),
           BlocProvider<NavigationBloc>(
-            create: (_) => NavigationBloc(
+            create: (context) => NavigationBloc(
               repository: NavigationRepository(),
               tabsRepository: TabsRepository(),
+              // "חיפוש" ו"עיון" הם אותו עמוד טאבים; היישור לפי החלונית
+              // הפעילה שומר שהאייקון המודגש בסרגל יתאים למה שמוצג בפועל.
+              activePaneStream: context
+                  .read<TabsBloc>()
+                  .stream
+                  .map((tabsState) => tabsState.activePane)
+                  .distinct(),
             )..add(const CheckLibrary()),
           ),
           BlocProvider<FindRefBloc>(
@@ -1160,6 +1179,10 @@ class _AppBootstrapState extends State<AppBootstrap> {
               allowPrerelease: () => false,
             ),
           ),
+          BlocProvider<PluginUpdatesCubit>(
+            lazy: true,
+            create: (_) => PluginUpdatesCubit(),
+          ),
           BlocProvider<PluginSystemBloc>(
             create: (context) {
               final repository = PluginRegistryRepository();
@@ -1175,13 +1198,16 @@ class _AppBootstrapState extends State<AppBootstrap> {
               final host = DeclarativePluginHostService(
                 loadPlugin: repository.getPlugin,
                 loadPermissions: (pluginId) async =>
-                    (await repository.getPluginPermissions(pluginId))
-                        .where((permission) => permission.granted)
-                        .map((permission) => permission.permission)
-                        .toSet(),
+                    (await repository.getGrantedPermissionNames(
+                      pluginId,
+                    )).toSet(),
                 bookResolver: bookAccess,
                 bookOpener: bookAccess,
                 parallelEditionsFinder: bookAccess.parallelEditionsForIdentity,
+                readerScroller: PluginDeclarativeReaderScroller(
+                  tabsBloc: tabsBloc,
+                ),
+                searchOpener: PluginDeclarativeSearchOpener(coordinator),
                 onError: (pluginId, error, stackTrace) => debugPrint(
                   'Declarative plugin host [$pluginId]: $error\n$stackTrace',
                 ),
@@ -1209,7 +1235,8 @@ Future<void> initHive() async {
     Hive.openBox<dynamic>('workspaces'),
     Hive.openBox<dynamic>('history'),
     Hive.openBox<dynamic>('bookmarks'),
-    Hive.openBox<dynamic>('error_reports_queue'),
+    Hive.openBox<dynamic>(DirectErrorReportService.queueBoxName),
+    Hive.openBox<dynamic>(PluginReportService.queueBoxName),
   ]);
 }
 

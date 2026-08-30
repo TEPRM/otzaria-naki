@@ -17,6 +17,7 @@ class SettingsRepository {
   static const String keyFontFamily = 'key-font-family';
   static const String keyCommentatorsFontFamily =
       'key-commentators-font-family';
+  static const String keyPageShapeBottomFont = 'page_shape_bottom_font';
   static const String keyFontBold = 'key-font-bold';
   static const String keyCommentatorsFontBold = 'key-commentators-font-bold';
   static const String keyCommentatorsFontSize = 'key-commentators-font-size';
@@ -53,6 +54,7 @@ class SettingsRepository {
   static const String keyIsFullscreen = 'key-is-fullscreen';
   static const String keyLibraryViewMode = 'key-library-view-mode';
   static const String keyLibraryShowPreview = 'key-library-show-preview';
+  static const String keySearchShowPreview = 'key-search-show-preview';
   static const String keyEnablePerBookSettings = 'key-enable-per-book-settings';
   static const String keyPdfBookViewByDefault = 'key-pdf-book-view-by-default';
   static const String keyTalmudBavliOpenFormat = 'key-talmud-bavli-open-format';
@@ -90,6 +92,19 @@ class SettingsRepository {
   static const String keyPersonalNotesCollapsedByDefault =
       'key-personal-notes-collapsed';
   static const String keyCompactMenuMode = 'key-compact-menu-mode';
+
+  /// מיקום רצועת כרטיסיות העיון: `top` בשורת הכותרת, `side` בעמודה אנכית.
+  static const String keyReadingTabsPlacement = 'key-reading-tabs-placement';
+  static const String keyReadingTabsColumnWidth =
+      'key-reading-tabs-column-width';
+  static const String keyReadingTabsColumnCollapsed =
+      'key-reading-tabs-column-collapsed';
+
+  static const String readingTabsPlacementTop = 'top';
+  static const String readingTabsPlacementSide = 'side';
+  static const double defaultReadingTabsColumnWidth = 220;
+  static const double minReadingTabsColumnWidth = 160;
+  static const double maxReadingTabsColumnWidth = 400;
 
   /// CSV של מזהי כלים מובנים שהמשתמש הסתיר מהממשק (לשונית הכלים).
   static const String keyHiddenBuiltInToolIds = 'key-hidden-builtin-tool-ids';
@@ -157,6 +172,7 @@ class SettingsRepository {
     keyFontSize,
     keyFontFamily,
     keyCommentatorsFontFamily,
+    keyPageShapeBottomFont,
     keyFontBold,
     keyCommentatorsFontBold,
     keyCommentatorsFontSize,
@@ -188,6 +204,7 @@ class SettingsRepository {
     keyIsFullscreen,
     keyLibraryViewMode,
     keyLibraryShowPreview,
+    keySearchShowPreview,
     keyEnablePerBookSettings,
     keyPdfBookViewByDefault,
     keyTalmudBavliOpenFormat,
@@ -210,6 +227,9 @@ class SettingsRepository {
     keyEnableHtmlLinks,
     keyPersonalNotesCollapsedByDefault,
     keyCompactMenuMode,
+    keyReadingTabsPlacement,
+    keyReadingTabsColumnWidth,
+    keyReadingTabsColumnCollapsed,
     keyHiddenBuiltInToolIds,
     keyBuiltInToolsPinnedToNavRail,
     keyBuiltInToolsOrder,
@@ -272,6 +292,10 @@ class SettingsRepository {
       'commentatorsFontFamily': _settings.getValue<String>(
         keyCommentatorsFontFamily,
         defaultValue: AppFonts.defaultCommentatorsFont,
+      ),
+      'pageShapeBottomFont': _settings.getValue<String>(
+        keyPageShapeBottomFont,
+        defaultValue: AppFonts.defaultFont,
       ),
       'fontBold': _settings.getValue<bool>(keyFontBold, defaultValue: false),
       'commentatorsFontBold': _settings.getValue<bool>(
@@ -390,6 +414,10 @@ class SettingsRepository {
         keyLibraryShowPreview,
         defaultValue: true,
       ),
+      'searchShowPreview': _settings.getValue<bool>(
+        keySearchShowPreview,
+        defaultValue: true,
+      ),
       'shortcuts': await getShortcuts(),
       'enablePerBookSettings': _settings.getValue<bool>(
         keyEnablePerBookSettings,
@@ -421,6 +449,18 @@ class SettingsRepository {
       ),
       'compactMenuMode': _settings.getValue<bool>(
         keyCompactMenuMode,
+        defaultValue: false,
+      ),
+      'readingTabsPlacement': _settings.getValue<String>(
+        keyReadingTabsPlacement,
+        defaultValue: readingTabsPlacementTop,
+      ),
+      'readingTabsColumnWidth': _settings.getValue<double>(
+        keyReadingTabsColumnWidth,
+        defaultValue: defaultReadingTabsColumnWidth,
+      ),
+      'readingTabsColumnCollapsed': _settings.getValue<bool>(
+        keyReadingTabsColumnCollapsed,
         defaultValue: false,
       ),
       'mergeUserBooksIntoLibrary': _settings.getValue<bool>(
@@ -676,6 +716,10 @@ class SettingsRepository {
     await _settings.setValue(keyLibraryShowPreview, value);
   }
 
+  Future<void> updateSearchShowPreview(bool value) async {
+    await _settings.setValue(keySearchShowPreview, value);
+  }
+
   Future<void> updateEnablePerBookSettings(bool value) async {
     await _settings.setValue(keyEnablePerBookSettings, value);
   }
@@ -706,6 +750,18 @@ class SettingsRepository {
 
   Future<void> updateCompactMenuMode(bool value) async {
     await _settings.setValue(keyCompactMenuMode, value);
+  }
+
+  Future<void> updateReadingTabsPlacement(String value) async {
+    await _settings.setValue(keyReadingTabsPlacement, value);
+  }
+
+  Future<void> updateReadingTabsColumnWidth(double value) async {
+    await _settings.setValue(keyReadingTabsColumnWidth, value);
+  }
+
+  Future<void> updateReadingTabsColumnCollapsed(bool value) async {
+    await _settings.setValue(keyReadingTabsColumnCollapsed, value);
   }
 
   Future<void> updateMergeUserBooksIntoLibrary(bool value) async {
@@ -1062,6 +1118,7 @@ class SettingsRepository {
     await _settings.setValue(keyIsFullscreen, false);
     await _settings.setValue(keyLibraryViewMode, 'grid');
     await _settings.setValue(keyLibraryShowPreview, true);
+    await _settings.setValue(keySearchShowPreview, true);
     await _settings.setValue(keyEnablePerBookSettings, false);
     await _settings.setValue(keyPdfBookViewByDefault, false);
     await _settings.setValue(keyTalmudBavliOpenFormat, 'text');

@@ -32,12 +32,26 @@ import 'package:otzaria/text_book/utils/commentator_group_builder.dart';
 import 'package:otzaria/text_book/utils/inline_notes_utils.dart' as notes;
 import 'package:otzaria/text_book/utils/reading_segment_navigation.dart';
 import 'package:otzaria/text_book/utils/reading_segments.dart';
+import 'package:otzaria/utils/file/toc_parser.dart';
+import 'package:otzaria/utils/file/markdown_to_otzaria.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
-  static const int _linkLookBehindLines = 60;
-  static const int _linkLookAheadLines = 140;
-  static const int _linksReloadThresholdLines = 20;
+  // השאילתה עצמה רצה ב-Isolate, אבל כל טעינה גוררת פענוח התוצאה, מיזוג
+  // הקישורים ובנייה מחדש של חלונית המפרשים על ה-thread שמצייר. הסף — ולא
+  // גודל החלון — הוא שקובע את התדירות: טעינה כל ~120 שורות במקום כל ~20.
+  /// כמה שורות אחורה נטענות סביב הנראה. חייב להיות ≥ [linksReloadThresholdLines].
+  @visibleForTesting
+  static const int linkLookBehindLines = 150;
+
+  /// כמה שורות קדימה נטענות סביב הנראה. חייב להיות ≥ [linksReloadThresholdLines],
+  /// אחרת שורות בין קצה הכיסוי לנקודת הטעינה יישארו בלי קישורים.
+  @visibleForTesting
+  static const int linkLookAheadLines = 200;
+
+  /// המרחק מקצה החלון הטעון שבו נטענת מנה חדשה. קובע את תדירות הטעינות.
+  @visibleForTesting
+  static const int linksReloadThresholdLines = 120;
   static const int _initialContentLookBehindLines = 80;
   static const int _initialContentLookAheadLines = 180;
   static const int _contentLookBehindLines = 120;
@@ -215,10 +229,9 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
         currentState.visibleIndices,
       );
       _warmContentCacheInBackground(currentState.book);
-    } else {
-      // שחרור רק בטאב רקע. שחרור בחזית מקריס את רשימת הסגמנטים במצב קריאה
-      // רציף, וה-ScrollablePositionedList מצמיד את היעד לאורך החדש — כלומר
-      // המשתמש מאבד את מקום הקריאה בדיוק בזמן הפיצול.
+    } else if (!currentState.continuousReadingMode) {
+      // שחרור אסור במצב קריאה רציף: הוא מכווץ את רשימת הסגמנטים, וגם רשימת
+      // טאב רקע חיה (KeepAlive) — ה-clamp דורס את מקום הקריאה (issue #912).
       _releaseContentOutsideWindow(currentState, emit);
     }
   }
@@ -608,6 +621,7 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
     SearchMode searchMode = SearchMode.exact;
     int searchDistance = 0;
     SearchMatchPolicy matchPolicy = SearchMatchPolicy.standard;
+    Set<int>? searchResultLines;
     bool showLeftPane;
     List<String> commentators;
     late final List<int> visibleIndices;
@@ -636,6 +650,7 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
       searchMode = currentState.searchMode;
       searchDistance = currentState.searchDistance;
       matchPolicy = currentState.matchPolicy;
+      searchResultLines = currentState.searchResultLines;
       showLeftPane = currentState.showLeftPane;
       commentators = currentState.activeCommentators;
       visibleIndices = currentState.visibleIndices;
@@ -668,6 +683,7 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
       searchMode = initial.searchMode;
       searchDistance = initial.searchDistance;
       matchPolicy = initial.matchPolicy;
+      searchResultLines = initial.initialSearchResultLines;
       showLeftPane = initial.showLeftPane;
       commentators = initial.commentators;
       visibleIndices = [initial.index < 0 ? 0 : initial.index];
@@ -718,13 +734,27 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
     }
 
     try {
-      final tocFuture = repository.getTableOfContents(book);
+      final requiresRenderedToc = _requiresWholeBookContent(book);
+      final tocFuture = requiresRenderedToc
+          ? null
+          : repository.getTableOfContents(book);
 
       List<String>? contentLines;
       List<bool>? loadedLineFlags;
       if (state is TextBookLoaded && event.preserveState) {
         contentLines = (state as TextBookLoaded).content;
         loadedLineFlags = _loadedContentFlags;
+      } else if (requiresRenderedToc) {
+        final content = await repository.getBookContent(book);
+        contentLines = await splitContentLines(content);
+        loadedLineFlags = List<bool>.filled(contentLines.length, true);
+        _setLoadedContentFlags(book, loadedLineFlags);
+        _markLoadedContentRange(
+          book,
+          0,
+          contentLines.isEmpty ? 0 : contentLines.length - 1,
+          totalLines: contentLines.length,
+        );
       } else {
         final initialRange = await repository.getBookContentRange(
           book,
@@ -788,7 +818,11 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
 
       loadedLineFlags ??= _loadedContentFlags;
 
-      final tableOfContents = await tocFuture;
+      // Markdown מוצג מ-HTML מומר, ולכן ה-TOC שלו נגזר מאותן שורות מוצגות;
+      // TOC שמור מתייחס לשורות המקור ולא יוכל לנווט בתוכן הזה.
+      final tableOfContents = requiresRenderedToc
+          ? TocParser.parseEntriesFromContent(contentLines.join('\n'))
+          : await tocFuture ?? const <TocEntry>[];
 
       String? currentTitle;
       if (visibleIndices.isNotEmpty) {
@@ -992,6 +1026,7 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
         searchMode: searchMode,
         searchDistance: searchDistance,
         matchPolicy: matchPolicy,
+        searchResultLines: searchResultLines,
         scrollController: scrollController,
         positionsListener: positionsListener,
         scrollOffsetController: scrollOffsetController,
@@ -1254,13 +1289,9 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
       emit(updatedState);
       if (_shouldLoadLinksForState(updatedState)) {
         final targetIndices = _targetIndicesForCommentaryRefresh(updatedState);
-        _loadLinksInBackground(
-          updatedState.book,
-          targetIndices,
-          targetBookTitlesOverride: _normalizeCommentaryTargets(
-            updatedState.activeCommentators,
-          ),
-        );
+        // ללא override — היעדים נגזרים מהמצב, כך שבצורת הדף נשמרים גם
+        // מפרשי הטורים ולא רק הבחירה מהחלונית (issue #906).
+        _loadLinksInBackground(updatedState.book, targetIndices);
       }
     }
   }
@@ -1513,15 +1544,15 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
 
   ({int start, int end}) _calculateLinksWindow(List<int> visibleIndices) {
     if (visibleIndices.isEmpty) {
-      return (start: 0, end: _linkLookAheadLines);
+      return (start: 0, end: linkLookAheadLines);
     }
 
     final minVisible = visibleIndices.reduce((a, b) => a < b ? a : b);
     final maxVisible = visibleIndices.reduce((a, b) => a > b ? a : b);
 
     return (
-      start: (minVisible - _linkLookBehindLines).clamp(0, minVisible),
-      end: maxVisible + _linkLookAheadLines,
+      start: (minVisible - linkLookBehindLines).clamp(0, minVisible),
+      end: maxVisible + linkLookAheadLines,
     );
   }
 
@@ -1535,8 +1566,8 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
         _loadedLinksStart != null &&
         _loadedLinksEnd != null &&
         _loadedLinksTargetBookTitlesSignature == targetBookTitlesSignature &&
-        start >= (_loadedLinksStart! - _linksReloadThresholdLines) &&
-        end <= (_loadedLinksEnd! + _linksReloadThresholdLines);
+        start >= (_loadedLinksStart! - linksReloadThresholdLines) &&
+        end <= (_loadedLinksEnd! + linksReloadThresholdLines);
   }
 
   List<String>? _normalizeTargetBookTitles(Iterable<String>? targetBookTitles) {
@@ -1663,7 +1694,12 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
         state,
         workspaceId,
       );
-      return pageShapeTargets ?? const <String>[];
+      // מפרשי חלונית הצד (activeCommentators) מוצגים לצד טורי צורת הדף —
+      // בלעדיהם רענון בגלילה מוחק את הקישורים שלהם והם נעלמים (issue #906).
+      return _normalizeCommentaryTargets([
+        ...?pageShapeTargets,
+        ...state.activeCommentators,
+      ]);
     }
 
     if (state.showSplitView || state.activeCommentators.isNotEmpty) {
@@ -2393,6 +2429,8 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
     List<int> visibleIndices, {
     bool force = false,
   }) async {
+    if (_requiresWholeBookContent(book)) return;
+
     final window = _calculateContentWindow(visibleIndices);
     if (!force &&
         _isContentWindowSufficient(book, window.startLine, window.endLine)) {
@@ -2445,6 +2483,8 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
   }
 
   Future<void> _warmContentCacheInBackground(TextBook book) async {
+    if (_requiresWholeBookContent(book)) return;
+
     if (_isWarmingContentCache || !_allowBackgroundWarming) {
       return;
     }
@@ -2564,6 +2604,9 @@ class TextBookBloc extends Bloc<TextBookEvent, TextBookState> {
       _isWarmingContentCache = false;
     }
   }
+
+  bool _requiresWholeBookContent(TextBook book) =>
+      isMarkdownBook(fileType: book.fileType, filePath: book.filePath);
 
   Future<void> _loadFullBookInBackground(TextBook book) async {
     try {

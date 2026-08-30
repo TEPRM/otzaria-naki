@@ -16,6 +16,11 @@ const Map<String, String> apiCallToPermissionHint = {
   'library.getBookToc': 'library.content.read',
   'library.listBookAltStructures': 'library.content.read',
   'library.getBookAltToc': 'library.content.read',
+  'library.getLinkContent': 'library.content.read',
+  'library.getCommentators': pluginLinksReadPermission,
+  'library.getLinks': pluginLinksReadPermission,
+  'library.getRawLinks': pluginLinksReadPermission,
+  'library.getLinkTargetsSummary': pluginLinksReadPermission,
 
   // app.*
   'app.getUserEmail': 'app.user_email.read',
@@ -25,6 +30,9 @@ const Map<String, String> apiCallToPermissionHint = {
   'app.getLocale': 'app.info.read',
   'app.getGrantedPermissions': 'app.info.read',
   'app.getConnectivity': 'app.info.read',
+  'app.registerShortcut': 'app.shortcuts',
+  'app.unregisterShortcut': 'app.shortcuts',
+  'app.updateShortcut': 'app.shortcuts',
 
   // feedback.*
   'feedback.sendEmail': 'feedback.send_email',
@@ -32,17 +40,32 @@ const Map<String, String> apiCallToPermissionHint = {
   // shortcut.*
   'shortcut.create': 'ui.create_shortcut',
 
+  // ui.* (בחירת תיקייה)
+  'ui.pickFolder': 'fs.folder_access',
+
   // fs.* (user-selected files)
   'fs.pickUserFile': 'fs.user_files.read',
   'fs.resolveFileUrl': 'fs.user_files.read',
   'fs.readTextFile': 'fs.user_files.read',
   'fs.revokeFile': 'fs.user_files.read',
+  'fs.beginBinaryWrite': 'fs.user_files.write',
+  'fs.commitUserFileWrite': 'fs.user_files.write',
+  'fs.abortBinaryWrite': 'fs.user_files.write',
 
   // history.*
   'history.list': 'history.read',
   'history.listSearches': 'history.read',
   'history.clear': 'history.write',
   'history.remove': 'history.write',
+
+  // bookmarks.*
+  'bookmarks.list': pluginBookmarksReadPermission,
+  'bookmarks.add': pluginBookmarksWritePermission,
+  'bookmarks.remove': pluginBookmarksWritePermission,
+
+  // tools.*
+  'tools.gematria': pluginToolsReadPermission,
+  'tools.dictionary': pluginToolsReadPermission,
 
   // notifications.*
   'notifications.showInApp': 'notifications.send',
@@ -55,6 +78,7 @@ const Map<String, String> apiCallToPermissionHint = {
 
   // plugin.*
   'plugin.openSelf': 'navigation.write',
+  'plugin.openOther': pluginOpenOtherPermission,
 
   // reader.* (new APIs)
   'reader.addContextMenuItem': 'reader.context_menu',
@@ -71,7 +95,57 @@ const Map<String, String> apiCallToPermissionHint = {
   'reader.revealHighlight': 'reader.highlight',
   'reader.clearHighlight': 'reader.highlight',
   'reader.clearAllHighlights': 'reader.highlight',
+  'reader.getActiveCommentators': 'reader.open',
+  'reader.setActiveCommentators': 'reader.open',
+  'reader.scrollToSection': 'reader.open',
+  'reader.getHighlightCapabilities': 'reader.open',
+
+  // network.* — הגישה נבדקת באדפטר לפי היעד; יעד localhost בלבד דורש
+  // `network.localhost` במקום `network.access`.
+  'network.fetch': 'network.access',
+  'network.fetchStream': 'network.access',
+  'network.download': 'network.access',
 };
+
+/// קריאות API שאינן דורשות הרשאת manifest — הגבול נאכף במקום אחר. הצהרה
+/// עליהן ב-`permissions` שוברת התקנה, ולכן מקבלת הודעת שגיאה משלה.
+const Set<String> apiCallsWithoutPermission = {
+  'feedback.report',
+  'feedback.hasReporterEmail',
+  'network.fetch',
+  'network.fetchStream',
+  'network.download',
+  'fs.extractZip',
+  'fs.deleteFile',
+  'fs.writeFile',
+  'fs.readFile',
+  'fs.listDir',
+  'fs.makeDir',
+  'fs.deleteEntry',
+  'fs.stat',
+  'plugin.backgroundDone',
+  'ui.print',
+  'ui.exportPdf',
+};
+
+/// קריאת רשימת הסימניות של המשתמש. נפרדת מהכתיבה, בעקבות התקדים של
+/// `notes.read`/`notes.write`.
+const pluginBookmarksReadPermission = 'bookmarks.read';
+
+/// הוספה ומחיקה של סימניות.
+const pluginBookmarksWritePermission = 'bookmarks.write';
+
+/// קריאת כלי העזר המובנים (גימטריה, מילון) — נתוני עזר של התוכנה, ללא
+/// גישה לנתוני המשתמש.
+const pluginToolsReadPermission = 'tools.read';
+
+/// הרשאה לקריאת מפת הקישורים של הספרייה — המפרשים על ספר, קישורי טווח השורות
+/// וסיכום היעדים. נפרדת מ-`library.content.read` כי היא חושפת מבנה בלבד.
+const pluginLinksReadPermission = 'library.links.read';
+
+/// הרשאה לפתיחת דף של תוסף **אחר** (`plugin.openOther`). נפרדת מ-navigation.write
+/// כי היא מפעילה את ה-WebView של תוסף שלישי, ולא רק מזיזה את המשתמש בין מסכים.
+const pluginOpenOtherPermission = 'plugin.open_other';
 
 /// הרשאה להפעלת מנוע התוסף ברקע ללא פתיחת הדף שלו.
 /// בתוסף דקלרטיבי ההפעלה נעשית רק בעקבות אירוע.
@@ -92,6 +166,46 @@ const pluginStartupContributionsPermission = 'app.startup_contributions';
 /// שם ההרשאה לגישה לאינטרנט. מטופלת בנפרד בממשק: במצב 'מנותק' היא מתחילה
 /// כבויה במסך ההתקנה, ותוסף שהמשתמש כיבה בו הרשאה זו ממשיך להופיע גם במצב 'מנותק'.
 const pluginNetworkAccessPermission = 'network.access';
+
+/// הרשאת בחירת תיקייה (`ui.pickFolder`) — פוצלה מ-ui.feedback כי התיקייה
+/// שנבחרת היא גבול ההסכמה של פעולות הקבצים (fs.extractZip / fs.deleteFile).
+const pluginFolderAccessPermission = 'fs.folder_access';
+
+/// הרשאת דפדפן לקריאת לוח ההעתקה מתוך WebView של התוסף; כבויה כברירת מחדל.
+const pluginClipboardReadPermission = 'clipboard.read';
+
+/// הרשאות בסיס — מוענקות לכל תוסף אוטומטית, בלי הצהרה במניפסט ובלי הצגה
+/// למשתמש. הצהרה קיימת נסבלת לתאימות לאחור (הוולידטור רק ממליץ להסירה).
+const pluginBaselinePermissions = <String>{
+  'plugin.storage.read',
+  'plugin.storage.write',
+  'app.info.read',
+  'ui.feedback',
+  'notifications.send',
+  'events.subscribe:theme.changed',
+};
+
+/// הרשאה חדשה (key) שהצהרה ותיקה (value) נחשבת כמכסה אותה —
+/// ui.pickFolder ישב היסטורית תחת ui.feedback.
+const pluginLegacyPermissionAliases = <String, String>{
+  pluginFolderAccessPermission: 'ui.feedback',
+};
+
+/// ההרשאות שמוצגות למשתמש ונשמרות כהחלטות: הרשאות המניפסט ללא הרשאות הבסיס.
+List<String> effectiveManifestPermissions(List<String> manifestPermissions) {
+  final result = <String>[];
+  for (final permission in manifestPermissions) {
+    if (pluginBaselinePermissions.contains(permission)) continue;
+    if (!result.contains(permission)) result.add(permission);
+  }
+  return result;
+}
+
+/// מאחד את הרשאות הבסיס לרשימת הרשאות מוענקות — ל-boot payload,
+/// ל-app.getGrantedPermissions ולאירוע plugin.permissions_changed.
+List<String> withBaselinePermissions(Iterable<String> granted) {
+  return {...granted, ...pluginBaselinePermissions}.toList()..sort();
+}
 
 const pluginValidPermissions = <String>[
   // ===== מידע על האפליקציה =====
@@ -115,12 +229,19 @@ const pluginValidPermissions = <String>[
   /// ונתונים שנקראים ע"י Flutter בעלייה, בלי להריץ קוד של התוסף.
   pluginStartupContributionsPermission,
 
+  /// רישום קיצורי מקלדת לתוסף — מהמניפסט (`contributes.startup.shortcuts`)
+  /// או בזמן ריצה (`app.registerShortcut`).
+  'app.shortcuts',
+
   // ===== ספרייה =====
   /// חיפוש וקריאת רשימת ספרים
   'library.books.read',
 
   /// קריאת תוכן ספרים
   'library.content.read',
+
+  /// קריאת מפרשים וקישורים של ספר (מבנה בלבד, ללא תוכן)
+  pluginLinksReadPermission,
 
   // ===== חיפוש =====
   /// ביצוע חיפוש טקסט מלא
@@ -146,6 +267,9 @@ const pluginValidPermissions = <String>[
   /// מעבר בין מסכים באפליקציה
   'navigation.write',
 
+  /// פתיחת דף של תוסף אחר המותקן אצל המשתמש
+  pluginOpenOtherPermission,
+
   // ===== הערות אישיות =====
   /// קריאת הערות אישיות
   'notes.read',
@@ -168,10 +292,22 @@ const pluginValidPermissions = <String>[
   /// יצירת קיצור דרך (deep-link) בשולחן העבודה / תפריט ההתחל
   'ui.create_shortcut',
 
+  // ===== לוח העתקה =====
+  /// קריאת תוכן לוח ההעתקה של מערכת ההפעלה מתוך דף התוסף
+  pluginClipboardReadPermission,
+
   // ===== קבצים אישיים =====
   /// בחירה וקריאה של קבצים אישיים שהמשתמש בוחר במפורש (PDF/טקסט וכו').
   /// הגישה מוגבלת לקבצים שהמשתמש בחר בדיאלוג — לא לנתיב חופשי בדיסק.
   'fs.user_files.read',
+
+  /// כתיבה לקובץ שהמשתמש בחר, או שמירה לקובץ חדש דרך דיאלוג „שמור בשם”.
+  /// אין לתוסף דרך להזין נתיב: היעד הוא תמיד קובץ שהמשתמש בחר בדיאלוג —
+  /// או בפתיחה עם `access: 'readwrite'`, או בשמירה עצמה.
+  'fs.user_files.write',
+
+  /// בחירת תיקייה בדיאלוג מערכת ועבודה על קבצים בתוכה (חילוץ/מחיקה).
+  pluginFolderAccessPermission,
 
   // ===== אחסון תוסף =====
   /// קריאה מאחסון מפתח-ערך של התוסף
@@ -203,6 +339,17 @@ const pluginValidPermissions = <String>[
 
   /// מחיקה ועריכת היסטוריית קריאה
   'history.write',
+
+  // ===== סימניות =====
+  /// קריאת רשימת הסימניות
+  pluginBookmarksReadPermission,
+
+  /// הוספה ומחיקה של סימניות
+  pluginBookmarksWritePermission,
+
+  // ===== כלי עזר =====
+  /// שימוש בכלי העזר המובנים (גימטריה, מילון)
+  pluginToolsReadPermission,
 
   // ===== מסד נתונים =====
   /// קריאת נתונים ממקורות SQLite שהאפליקציה מאשרת לתוסף

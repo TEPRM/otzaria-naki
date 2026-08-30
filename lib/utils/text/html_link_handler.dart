@@ -4,11 +4,15 @@ import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:otzaria/data/repository/data_repository.dart';
 import 'package:otzaria/core/messages/common_messages.dart';
 import 'package:otzaria/core/ui_snack.dart';
+import 'package:otzaria/library/models/library.dart';
 import 'package:otzaria/models/books.dart';
 import 'package:otzaria/tabs/models/text_tab.dart';
 import 'package:otzaria/text_book/bloc/text_book_bloc.dart';
 import 'package:otzaria/text_book/bloc/text_book_state.dart';
 import 'package:otzaria/text_book/utils/reading_segment_navigation.dart';
+
+import 'package:otzaria/utils/text/heading_slug.dart';
+import 'package:path/path.dart' as p;
 
 /// מחלקה לטיפול בקישורי HTML בתוך הטקסט
 class HtmlLinkHandler {
@@ -56,14 +60,10 @@ class HtmlLinkHandler {
       // מציאת הספר על פי הנתיב
       final bookTitle = _getTitleFromPath(path);
       final library = await DataRepository.instance.library;
-      final foundBook = library.findBookByTitle(bookTitle, TextBook);
+      final foundBook = resolveBookLinkTarget(library, bookTitle);
 
       if (foundBook == null) {
         throw Exception('לא נמצא ספר בשם: $bookTitle');
-      }
-
-      if (foundBook is! TextBook) {
-        throw Exception('הספר $bookTitle אינו ספר טקסט');
       }
 
       // פתיחת הספר באינדקס הנכון (המרה ל-0-based)
@@ -93,8 +93,9 @@ class HtmlLinkHandler {
   static String _getTitleFromPath(String path) {
     // הסרת סיומת קובץ ונתיב
     String title = path.split('/').last.split('\\').last;
-    if (title.endsWith('.txt')) {
-      title = title.substring(0, title.length - 4);
+    final extension = p.extension(title).toLowerCase();
+    if (extension == '.txt' || extension == '.text') {
+      title = title.substring(0, title.length - extension.length);
     }
     return title;
   }
@@ -132,6 +133,10 @@ class HtmlLinkHandler {
 
       // בדיקה אם זה קישור פנימי לכותרת באותו ספר
       if (url.startsWith('#')) {
+        // עוגן id (קישורי הערות שוליים כמו #footnote-1) — לפני מסלול הכותרות.
+        final fragment = _safeDecode(url.substring(1)).trim();
+        if (await _navigateToIdAnchor(context, fragment)) return true;
+        if (!context.mounted) return true;
         await _navigateToHeader(context, _headerSegments(url.substring(1)));
         return true;
       }
@@ -169,6 +174,59 @@ class HtmlLinkHandler {
     }
   }
 
+  /// מאתר את הספר שקישור `book://` מפנה אליו, כ-TextBook לפתיחה בלשונית.
+  ///
+  /// ‏`findBookByTitle` משווה `runtimeType` ולא `is`, ולכן ספר-מסמך
+  /// (HTML/DOCX/EPUB/ODT) אינו נמצא בחיפוש אחר `TextBook` — אף שהקורא פותח
+  /// אותו דרך אותה לשונית בדיוק, בעטיפת `toTextBook()` (ראו
+  /// `OpenedTab.fromBook`). בלי ההשלמה כאן כל קישור `book://` אל ספר כזה
+  /// מת, ובקובצי HTML זו הדרך המתועדת לקשר בין ספרים.
+  static TextBook? resolveBookLinkTarget(Library library, String title) {
+    final direct = library.findBookByTitle(title, TextBook);
+    if (direct is TextBook) return direct;
+    final any = library.findBookByTitle(title, null);
+    return any is ConvertibleDocumentBook ? any.toTextBook() : null;
+  }
+
+  /// מאתר את השורה שמכילה עוגן `id="[fragment]"` בגוף הספר, או null.
+  @visibleForTesting
+  static int? findIdAnchorLine(List<String> lines, String fragment) {
+    if (fragment.isEmpty || fragment.contains('#')) return null;
+    final idPattern = RegExp('\\bid\\s*=\\s*"${RegExp.escape(fragment)}"');
+    final index = lines.indexWhere(idPattern.hasMatch);
+    return index < 0 ? null : index;
+  }
+
+  /// מנווט לעוגן id בספר הנוכחי (הערות שוליים בסגנון #footnote-N ↔ #noteref-N).
+  /// מחזיר false כשאין עוגן כזה — והקישור ממשיך למסלול הכותרות.
+  static Future<bool> _navigateToIdAnchor(
+    BuildContext context,
+    String fragment,
+  ) async {
+    try {
+      final state = context.read<TextBookBloc>().state;
+      if (state is! TextBookLoaded) return false;
+      final index = findIdAnchorLine(state.content, fragment);
+      if (index == null) return false;
+      final viewportExtent =
+          context.size?.height ?? MediaQuery.sizeOf(context).height;
+      await scrollToSourceLine(
+        scrollController: state.scrollController,
+        scrollOffsetController: state.scrollOffsetController,
+        positionsListener: state.positionsListener,
+        segments: state.readingSegments,
+        lineIndex: index,
+        viewportExtent: viewportExtent,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.ease,
+      );
+      return true;
+    } catch (e) {
+      debugPrint('שגיאה בניווט לעוגן id: $e');
+      return false;
+    }
+  }
+
   /// מנווט לכותרת באותו ספר הנוכחי
   static Future<void> _navigateToHeader(
     BuildContext context,
@@ -187,7 +245,15 @@ class HtmlLinkHandler {
       // חיפוש הכותרת בתוכן הספציפי
       final viewportExtent =
           context.size?.height ?? MediaQuery.sizeOf(context).height;
-      final resolved = await _findHeaderPath(state.book, segments);
+      // עוגן בתוכן שהקורא מציג כרגע קודם לפענוח הנתיב: טעינה מחדש של הספר
+      // מחזירה אינדקסים של שורות המקור, שאינם באותה מפה כמו ה-HTML המוצג
+      // (ספרי Markdown).
+      final anchorIndex = segments.length == 1
+          ? findAnchorIndex(state.content, segments.single)
+          : null;
+      final resolved = anchorIndex != null
+          ? HeaderPathResult(index: anchorIndex, reachedHeader: segments.single)
+          : await _findHeaderPath(state.book, segments);
 
       if (resolved.index != null) {
         // ניווט לאינדקס שנמצא
@@ -238,12 +304,10 @@ class HtmlLinkHandler {
       // קבלת רשימת כל הספרים לבדיקה
       final allBooks = library.getAllBooks();
 
-      final foundBook = library.findBookByTitle(bookTitle, TextBook);
+      final anyBook = library.findBookByTitle(bookTitle, null);
+      final foundBook = resolveBookLinkTarget(library, bookTitle);
 
       if (foundBook == null) {
-        // נסה לחפש בלי להגביל לטיפוס TextBook
-        final anyBook = library.findBookByTitle(bookTitle, null);
-
         if (anyBook != null) {
           throw Exception(
             'הספר "$bookTitle" נמצא אבל הוא מטיפוס ${anyBook.runtimeType}, לא TextBook',
@@ -255,11 +319,6 @@ class HtmlLinkHandler {
         throw Exception(
           'לא נמצא ספר בשם: "$bookTitle".\nספרים זמינים (דוגמאות): $availableBooks',
         );
-      }
-
-      // וידוא שזה TextBook
-      if (foundBook is! TextBook) {
-        throw Exception('הספר $bookTitle אינו ספר טקסט');
       }
 
       final book = foundBook;
@@ -427,6 +486,11 @@ class HtmlLinkHandler {
     final lines = content.split('\n');
     final tagPattern = RegExp(r'<[^>]*>');
 
+    // יעד עוגן מפורש קודם להתאמת טקסט: כך מסמכי Markdown מסמנים יעדי ניווט
+    // שאינם ה-slug של הכותרת.
+    final anchorIndex = findAnchorIndex(lines, headerName);
+    if (anchorIndex != null) return anchorIndex;
+
     for (int i = 0; i < lines.length; i++) {
       if (isHeaderMatch(
         lines[i].replaceAll(tagPattern, '').trim(),
@@ -471,7 +535,39 @@ class HtmlLinkHandler {
   static bool isHeaderMatch(String text, String headerName) {
     final cleanText = text.trim().replaceAll(RegExp(r'\s+'), '');
     final cleanHeader = headerName.trim().replaceAll(RegExp(r'\s+'), '');
-    return cleanText == cleanHeader;
+    if (cleanText == cleanHeader) return true;
+    return headingSlug(text) == headingSlug(headerName);
+  }
+
+  /// מחפש כותרת בכל עומק תוכן העניינים, כולל עוגני Markdown בסגנון GitHub.
+  @visibleForTesting
+  static int? findHeaderIndexInToc(
+    List<TocEntry> entries,
+    String headerName,
+  ) {
+    for (final entry in flattenToc(entries)) {
+      if (isHeaderMatch(entry.text, headerName)) return entry.index;
+    }
+    return null;
+  }
+
+  /// מחפש יעד עוגן מפורש בשורות המוצגות — `id` על כותרת או `name`/`id` על
+  /// `<a>`. כך מסמכי Markdown מסמנים יעדי ניווט שאינם ה-slug של הכותרת.
+  @visibleForTesting
+  static int? findAnchorIndex(List<String> lines, String anchor) {
+    final trimmed = anchor.trim();
+    if (trimmed.isEmpty) return null;
+    final pattern = RegExp(
+      '<(?:h[1-6]|a)\\b[^>]*\\b(?:name|id)\\s*=\\s*(["\\\'])'
+      '${RegExp.escape(trimmed)}\\1',
+      caseSensitive: false,
+    );
+    for (var index = 0; index < lines.length; index++) {
+      // סינון מוקדם: התאמת regex על כל שורה בספר יקרה מהותית מחיפוש מחרוזת.
+      if (!lines[index].contains(trimmed)) continue;
+      if (pattern.hasMatch(lines[index])) return index;
+    }
+    return null;
   }
 }
 

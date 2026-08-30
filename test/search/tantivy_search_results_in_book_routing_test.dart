@@ -5,6 +5,7 @@ import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otzaria/data/repository/data_repository.dart';
 import 'package:otzaria/library/models/library.dart';
+import 'package:otzaria/models/books.dart';
 import 'package:otzaria/search/bloc/search_bloc.dart';
 import 'package:otzaria/search/bloc/search_event.dart';
 import 'package:otzaria/search/bloc/search_state.dart';
@@ -34,14 +35,16 @@ void main() {
   });
 
   setUp(() {
-    DataRepository.instance.library = Future.value(
-      Library(categories: const []),
-    );
+    // מפתח יציב ('id:1') חייב ספר תואם בקטלוג — מפתח שנעלם נחסם כאינדקס ישן.
+    final library = Library(categories: const []);
+    library.books.add(TextBook(id: 1, title: 'בראשית'));
+    DataRepository.instance.library = Future.value(library);
   });
 
   Future<TextBookTab> openFirstResult(
     WidgetTester tester, {
     required SearchConfiguration configuration,
+    String? typedAfterSearch,
   }) async {
     final searchBloc = _StaticSearchBloc(
       SearchState(
@@ -70,11 +73,13 @@ void main() {
       initialState: SettingsState.initial(),
     );
     final tabsBloc = _RecordingTabsBloc();
-    // הפותח קורא את הקונפיגורציה מה-bloc של טאב החיפוש עצמו.
+    // הפותח קורא את הקונפיגורציה והשאילתה מה-bloc של טאב החיפוש עצמו —
+    // באפליקציה זהו אותו מופע שמוזרק כ-Provider, ולכן גם כאן הם משותפים.
     final searchingTab = SearchingTab(
       'חיפוש',
       'תדע זרעך',
       initialConfiguration: configuration,
+      searchBloc: searchBloc,
     );
 
     addTearDown(() async {
@@ -102,6 +107,12 @@ void main() {
       ),
     );
     await tester.pump();
+
+    if (typedAfterSearch != null) {
+      // המשתמש מקליד בתיבה בלי להפעיל חיפוש חדש — state.searchQuery נשאר
+      // השאילתה שבוצעה, ורק הטקסט בבקר משתנה.
+      searchingTab.queryController.text = typedAfterSearch;
+    }
 
     await tester.tap(find.text('בראשית, פרק טו').first);
     for (var i = 0; i < 6; i++) {
@@ -204,10 +215,27 @@ void main() {
 
     final initialState = tab.bloc.state;
     expect(initialState, isA<TextBookInitial>());
-    expect(
-      (initialState as TextBookInitial).matchPolicy.proximityScope,
-      SearchScope.sameSection,
+    final initial = initialState as TextBookInitial;
+    expect(initial.matchPolicy.proximityScope, SearchScope.sameSection);
+    expect(initial.initialSearchResultLines, {389});
+  });
+
+  testWidgets('הקלדה אחרי החיפוש אינה מחליפה את השאילתה שבוצעה', (
+    tester,
+  ) async {
+    // הבאג: הפותח קרא את queryController.text במקום את state.searchQuery,
+    // וכך טקסט שהוקלד-אך-לא-חופש הפך ל-searchText של טאב הקריאה — ההדגשה
+    // בספר חיפשה מחרוזת שהתוצאה מעולם לא נמצאה בה.
+    final tab = await openFirstResult(
+      tester,
+      configuration: const SearchConfiguration(
+        searchMode: SearchMode.advanced,
+        distance: 3,
+      ),
+      typedAfterSearch: 'טקסט שהוקלד ולא חופש',
     );
+
+    expect(tab.searchText, 'תדע זרעך');
   });
 
   testWidgets('שאילתה ליטרלית נפתחת כחיפוש מדויק מקומי', (tester) async {

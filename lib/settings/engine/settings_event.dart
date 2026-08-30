@@ -317,6 +317,15 @@ class UpdateLibraryShowPreview extends SettingsEvent {
   List<Object?> get props => [libraryShowPreview];
 }
 
+class UpdateSearchShowPreview extends SettingsEvent {
+  final bool searchShowPreview;
+
+  const UpdateSearchShowPreview(this.searchShowPreview);
+
+  @override
+  List<Object?> get props => [searchShowPreview];
+}
+
 class RefreshShortcuts extends SettingsEvent {
   const RefreshShortcuts();
 
@@ -406,6 +415,33 @@ class UpdateCompactMenuMode extends SettingsEvent {
 
   @override
   List<Object?> get props => [compactMenuMode];
+}
+
+class UpdateReadingTabsPlacement extends SettingsEvent {
+  final String placement;
+
+  const UpdateReadingTabsPlacement(this.placement);
+
+  @override
+  List<Object?> get props => [placement];
+}
+
+class UpdateReadingTabsColumnWidth extends SettingsEvent {
+  final double width;
+
+  const UpdateReadingTabsColumnWidth(this.width);
+
+  @override
+  List<Object?> get props => [width];
+}
+
+class UpdateReadingTabsColumnCollapsed extends SettingsEvent {
+  final bool collapsed;
+
+  const UpdateReadingTabsColumnCollapsed(this.collapsed);
+
+  @override
+  List<Object?> get props => [collapsed];
 }
 
 class UpdateMergeUserBooksIntoLibrary extends SettingsEvent {

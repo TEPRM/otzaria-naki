@@ -1,4 +1,3 @@
-import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:otzaria/library/models/library.dart';
 import 'package:otzaria/library/view/grid_items.dart';
@@ -8,6 +7,7 @@ import 'package:otzaria/search/utils/search_catalogue_order_helper.dart';
 import 'package:otzaria/theme/app_tokens.dart';
 import 'package:otzaria/widgets/lists/nav_tree_tile.dart';
 import 'package:otzaria/widgets/widgets_exports.dart';
+import 'package:otzaria/utils/ui/book_format_icon.dart';
 
 /// עץ ניווט תוצאות החיפוש בעיצוב מסך הספרייה ([library_browser.dart]),
 /// בנוי מ-[NavTreeTile]. העץ משוטח לרשימת שורות ומרונדר ב-ListView.builder
@@ -97,12 +97,12 @@ class SearchNavigationTree extends StatelessWidget {
     // בנייה מוקדמת של כל העץ (ExpandableCard לכל קטגוריה) הקפיאה את הגלילה
     // ואת הרינדור-מחדש בכל שינוי סינון.
     final rows = _flattenRows();
-    return ListView.builder(
-      // שוליים אופקיים — הכרטיסים לא נוגעים בקצה החלונית, וקו הגלילה יושב
-      // ברווח שנוצר (ולא על התוכן).
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      itemCount: rows.length,
-      itemBuilder: (context, index) => _buildFlatRow(context, rows[index]),
+    return NavTreeFocusGroup(
+      child: ListView.builder(
+        padding: kNavTreeListPadding,
+        itemCount: rows.length,
+        itemBuilder: (context, index) => _buildFlatRow(context, rows[index]),
+      ),
     );
   }
 
@@ -353,11 +353,7 @@ class SearchNavigationTree extends StatelessWidget {
             fit: BoxFit.contain,
           )
         : Icon(
-            book is PdfBook
-                ? FluentIcons.document_pdf_24_regular
-                : book is DocxBook || book.fileType == 'docx'
-                ? FluentIcons.document_edit_24_regular
-                : FluentIcons.document_text_24_regular,
+            bookFormatIcon(book),
             color: cs.onSecondaryContainer,
             size: _iconSize,
           );
@@ -483,13 +479,15 @@ class SearchNavigationTree extends StatelessWidget {
       );
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      itemCount: matches.length,
-      itemBuilder: (context, index) {
-        final match = matches[index];
-        return _buildBook(context, match.book, match.facet, match.count, 0);
-      },
+    return NavTreeFocusGroup(
+      child: ListView.builder(
+        padding: kNavTreeListPadding,
+        itemCount: matches.length,
+        itemBuilder: (context, index) {
+          final match = matches[index];
+          return _buildBook(context, match.book, match.facet, match.count, 0);
+        },
+      ),
     );
   }
 

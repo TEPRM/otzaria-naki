@@ -9,6 +9,9 @@ import 'package:otzaria/plugins/models/plugin_manifest.dart';
 import 'package:otzaria/plugins/models/plugin_permission_grant.dart';
 import 'package:otzaria/plugins/models/plugin_published_record.dart';
 import 'package:otzaria/plugins/models/plugin_toolbar_item.dart';
+import 'package:otzaria/plugins/models/plugin_when_condition.dart';
+import 'package:otzaria/plugins/models/plugin_valid_permissions.dart';
+import 'package:otzaria/plugins/plugin_constants.dart';
 import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
 import 'package:otzaria/plugins/services/plugin_startup_contributions_service.dart';
 import 'package:otzaria/plugins/services/context_menu_registry.dart';
@@ -32,14 +35,37 @@ class _FakeRegistryRepo extends Fake implements PluginRegistryRepository {
       this.permission;
 }
 
+class _TabClosingRepo extends Fake implements PluginRegistryRepository {
+  _TabClosingRepo({this.onFirstEnabledCheck, this.onPermissionCheck});
+  final VoidCallback? onFirstEnabledCheck;
+  final void Function(String pluginId)? onPermissionCheck;
+  bool _enabledFired = false;
+
+  @override
+  Future<bool> getIsEnabled(String pluginId) async {
+    await Future<void>.delayed(Duration.zero);
+    if (!_enabledFired) {
+      _enabledFired = true;
+      onFirstEnabledCheck?.call();
+    }
+    return true;
+  }
+
+  @override
+  Future<bool?> getPermission(String pluginId, String permission) async {
+    await Future<void>.delayed(Duration.zero);
+    onPermissionCheck?.call(pluginId);
+    return true;
+  }
+}
+
 // ── fake repository לסנכרון תרומות עלייה (הרשאות מוענקות, בלי SQLite) ──────
 class _ContributionsRepo extends Fake implements PluginRegistryRepository {
+  static const _granted = ['app.startup_contributions', 'reader.toolbar'];
+
   @override
   Future<List<PluginPermissionGrant>> getPluginPermissions(String id) async => [
-    for (final permission in const [
-      'app.startup_contributions',
-      'reader.toolbar',
-    ])
+    for (final permission in _granted)
       PluginPermissionGrant(
         pluginId: id,
         permission: permission,
@@ -47,6 +73,10 @@ class _ContributionsRepo extends Fake implements PluginRegistryRepository {
         grantedAt: DateTime(2026),
       ),
   ];
+
+  @override
+  Future<List<String>> getGrantedPermissionNames(String id) async =>
+      withBaselinePermissions(_granted);
 
   @override
   Future<List<PluginPublishedRecord>> getPluginPublishedRecords(
@@ -128,6 +158,49 @@ class _LifecycleFakeController extends Fake implements InAppWebViewController {
   }
 }
 
+// ── fake controller ש-evaluateJavascript שלו נעצר עד לשחרור gate ────────────
+// לבדיקת מסירה מקבילית: תוסף תקוע לא חוסם מסירה לשאר.
+class _GatedController extends Fake implements InAppWebViewController {
+  final List<String> jsEvents = [];
+  Completer<void>? gate;
+
+  @override
+  Future<dynamic> evaluateJavascript({
+    required String source,
+    ContentWorld? contentWorld,
+  }) async {
+    if (gate != null) await gate!.future;
+    jsEvents.add(source);
+    return null;
+  }
+}
+
+// ── fake controller שה-eval שלו פג בזמן (TimeoutException) ─────────────────
+// זורק ישירות במקום להיתקע 3 שניות אמיתיות: הדיספצ'ר עוטף כל eval ב-.timeout,
+// ומה שנבדק כאן הוא מה שקורה אחרי שפג הזמן — לא מנגנון ה-timeout של Dart.
+class _TimingOutController extends Fake implements InAppWebViewController {
+  bool timeOut = true;
+  int evalCalls = 0;
+  int pauseCalls = 0;
+  int resumeCalls = 0;
+
+  @override
+  Future<void> pause() async => pauseCalls++;
+
+  @override
+  Future<void> resume() async => resumeCalls++;
+
+  @override
+  Future<dynamic> evaluateJavascript({
+    required String source,
+    ContentWorld? contentWorld,
+  }) async {
+    evalCalls++;
+    if (timeOut) throw TimeoutException('eval timed out');
+    return null;
+  }
+}
+
 // ── fake controller עם pause/resume שניתן לעכב (gate) — לבדיקת serialization.
 // מתעד את רצף הפעולות הגלובלי בכל הבקרים כדי לוודא שאין חפיפה.
 class _SlowController extends Fake implements InAppWebViewController {
@@ -171,6 +244,12 @@ class _SlowController extends Fake implements InAppWebViewController {
 const _kPid = 'dispatcher.test.plugin';
 
 PluginRuntimeDispatcher get _d => PluginRuntimeDispatcher.instance;
+
+/// מפתח המופע הקדמי הדיפולטי של [pluginId] — קיצור לבדיקות.
+PluginInstanceKey _fg(
+  String pluginId, [
+  String instanceId = PluginInstanceIds.defaultForeground,
+]) => (pluginId: pluginId, instanceId: instanceId);
 
 void _cleanupControllers() {
   _d.unregisterController(_kPid);
@@ -262,6 +341,38 @@ void main() {
       // unregister סלקטיבי — כל אחד בנפרד
       _d.unregisterController(_kPid, instanceId: 'default');
       _d.unregisterController(_kPid, instanceId: 'background');
+    });
+
+    test('ניקוי מופע ישן אינו בעלים של controller חלופי', () {
+      final oldController = _FakeController();
+      final replacementController = _FakeController();
+      _d.registerController(
+        _kPid,
+        oldController,
+        instanceId: 'background',
+      );
+      _d.registerController(
+        _kPid,
+        replacementController,
+        instanceId: 'background',
+      );
+
+      expect(
+        _d.ownsController(
+          _kPid,
+          oldController,
+          instanceId: 'background',
+        ),
+        isFalse,
+      );
+      expect(
+        _d.ownsController(
+          _kPid,
+          replacementController,
+          instanceId: 'background',
+        ),
+        isTrue,
+      );
     });
 
     test('invalidatePlugin על plugin לא רשום אינו קורס', () {
@@ -601,6 +712,33 @@ void main() {
 
       expect(calls, equals(['fg']));
     });
+
+    test('token של מופע ישן אינו מסיר callback חלופי', () async {
+      final oldOwner = Object();
+      final replacementOwner = Object();
+      var replacementCalled = false;
+      _d.registerReloadCallback(
+        _kPid,
+        () async {},
+        instanceId: 'background',
+        token: oldOwner,
+      );
+      _d.registerReloadCallback(
+        _kPid,
+        () async => replacementCalled = true,
+        instanceId: 'background',
+        token: replacementOwner,
+      );
+
+      _d.unregisterReloadCallback(
+        _kPid,
+        instanceId: 'background',
+        token: oldOwner,
+      );
+      await _d.reloadPlugin(_kPid);
+
+      expect(replacementCalled, isTrue);
+    });
   });
 
   // ── השהיה/חידוש של ה-instance ה-foreground ────────────────────────────────
@@ -633,12 +771,12 @@ void main() {
       _d.registerController(pidA, a);
       _d.registerController(pidB, b);
 
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       await pumpEventQueue();
       expect(a.resumeCalls, 1);
       expect(a.jsEvents.last, contains('plugin.resumed'));
 
-      _d.setVisiblePluginTabs({pidB});
+      _d.setVisiblePluginInstances({_fg(pidB)});
       await pumpEventQueue();
       expect(a.pauseCalls, 1);
       expect(a.jsEvents, contains(contains('plugin.suspended')));
@@ -650,9 +788,9 @@ void main() {
       final a = _LifecycleFakeController();
       _d.registerController(pidA, a);
 
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       await pumpEventQueue();
-      _d.setVisiblePluginTabs(const {});
+      _d.setVisiblePluginInstances(const {});
       await pumpEventQueue();
 
       expect(a.resumeCalls, 0);
@@ -665,7 +803,7 @@ void main() {
       final a = _LifecycleFakeController();
       _d.registerController(pidA, a);
 
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       await pumpEventQueue();
       expect(a.resumeCalls, 1);
 
@@ -682,7 +820,7 @@ void main() {
       final bg = _LifecycleFakeController();
       _d.registerController(pidA, bg, instanceId: 'background');
 
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       _d.setReaderScreenVisible(false);
       await pumpEventQueue();
 
@@ -696,7 +834,7 @@ void main() {
       _d.registerController(pidA, fg, instanceId: 'default');
       _d.registerController(pidA, bg, instanceId: 'background');
 
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       await pumpEventQueue();
       _d.setReaderScreenVisible(false);
       await pumpEventQueue();
@@ -709,9 +847,9 @@ void main() {
       final a = _LifecycleFakeController();
       _d.registerController(pidA, a);
 
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       await pumpEventQueue();
-      _d.setVisiblePluginTabs(const {});
+      _d.setVisiblePluginInstances(const {});
       await pumpEventQueue();
 
       expect(a.pauseCalls, 1);
@@ -722,9 +860,9 @@ void main() {
       final a = _LifecycleFakeController();
       _d.registerController(pidA, a);
 
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       await pumpEventQueue();
-      _d.setVisiblePluginTabs(const {});
+      _d.setVisiblePluginInstances(const {});
       await pumpEventQueue();
       final resumeCalls = a.resumeCalls;
       final pauseCalls = a.pauseCalls;
@@ -753,9 +891,9 @@ void main() {
       final a = _LifecycleFakeController();
       _d.registerController(pidA, a);
 
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       await pumpEventQueue();
-      _d.setVisiblePluginTabs(const {});
+      _d.setVisiblePluginInstances(const {});
       await pumpEventQueue();
       a.jsEvents.clear();
       // מדמה את מצב הזומבי: ההרצה רצה אך לא ב-world של הדף האמיתי.
@@ -793,9 +931,9 @@ void main() {
       final a = _LifecycleFakeController();
       _d.registerController(pidA, a);
 
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       await pumpEventQueue();
-      _d.setVisiblePluginTabs(const {});
+      _d.setVisiblePluginInstances(const {});
       await pumpEventQueue();
       a.jsEvents.clear();
 
@@ -822,9 +960,9 @@ void main() {
       _d.registerController(pidA, foreground);
       _d.registerController(pidA, background, instanceId: 'background');
 
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       await pumpEventQueue();
-      _d.setVisiblePluginTabs(const {});
+      _d.setVisiblePluginInstances(const {});
       await pumpEventQueue();
       foreground.jsEvents.clear();
 
@@ -856,7 +994,7 @@ void main() {
         final a = _LifecycleFakeController();
         _d.registerController(pidA, a);
 
-        _d.setVisiblePluginTabs({pidA});
+        _d.setVisiblePluginInstances({_fg(pidA)});
         await pumpEventQueue();
 
         expect(a.resumeCalls, 1);
@@ -877,7 +1015,7 @@ void main() {
       final a = _LifecycleFakeController();
       _d.registerController(pidA, a);
 
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       await pumpEventQueue();
 
       expect(a.resumeCalls, 1);
@@ -891,7 +1029,7 @@ void main() {
       final a = _LifecycleFakeController();
       _d.registerController(pidA, a);
 
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       await pumpEventQueue();
 
       expect(a.jsEvents.any((e) => e.contains('theme.changed')), isFalse);
@@ -901,7 +1039,7 @@ void main() {
       final a = _LifecycleFakeController();
       _d.registerController(pidA, a);
 
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       await pumpEventQueue();
 
       expect(a.jsEvents.any((e) => e.contains('theme.changed')), isFalse);
@@ -941,10 +1079,12 @@ void main() {
         // חוסמים את resume של A כדי לדמות reconcile איטי שעדיין רץ.
         a.resumeGate = Completer<void>();
 
-        _d.setVisiblePluginTabs({pidA}); // reconcile #1: resume A (נחסם)
+        _d.setVisiblePluginInstances({
+          _fg(pidA),
+        }); // reconcile #1: resume A (נחסם)
         await pumpEventQueue();
         // המעבר ל-B נכנס לתור — אסור שיתחיל כל עוד #1 חסום.
-        _d.setVisiblePluginTabs({pidB});
+        _d.setVisiblePluginInstances({_fg(pidB)});
         await pumpEventQueue();
         expect(
           log,
@@ -997,7 +1137,7 @@ void main() {
 
     test('תוסף שנטען כשהוא ה-foreground הנבחר — אינו מושהה', () async {
       // הבחירה מגיעה לפני שה-controller קיים (טעינה ראשונה).
-      _d.setVisiblePluginTabs({pidA});
+      _d.setVisiblePluginInstances({_fg(pidA)});
       await pumpEventQueue();
 
       final a = _LifecycleFakeController();
@@ -1009,8 +1149,8 @@ void main() {
 
     test('תוסף שנטען כשכבר עברו ממנו — מושהה מיד', () async {
       // בוחרים A ואז B עוד לפני ש-A נטען; A נבנה בכרטיסיה שאינה מוצגת.
-      _d.setVisiblePluginTabs({pidA});
-      _d.setVisiblePluginTabs({pidB});
+      _d.setVisiblePluginInstances({_fg(pidA)});
+      _d.setVisiblePluginInstances({_fg(pidB)});
       await pumpEventQueue();
 
       final a = _LifecycleFakeController();
@@ -1123,6 +1263,449 @@ void main() {
       );
 
       expect(opened, isEmpty);
+    });
+
+    test('תנאי when שאינו מתקיים — האירוע נזרק ולא נפתח דף התוסף', () async {
+      final activated = <String>[];
+      PluginLazyActivationService.instance.backgroundActivator = (id) async {
+        activated.add(id);
+      };
+      PluginLazyActivationService.instance.syncPlugin(
+        'lazy-when',
+        broadcastTopics: const {},
+        scheduleStartup: false,
+        activationConditions: {
+          'reader.toolbar_item_clicked': PluginWhenCondition.fromJson(const {
+            'storage': {'key': 'on', 'equals': true},
+          }),
+        },
+      );
+      addTearDown(() {
+        PluginLazyActivationService.instance.removePlugin('lazy-when');
+        PluginLazyActivationService.instance.backgroundActivator = null;
+      });
+
+      await PluginRuntimeDispatcher.instance.dispatchEventToPlugin(
+        'lazy-when',
+        'reader.toolbar_item_clicked',
+        {'itemId': 'b1'},
+        preferBackground: true,
+      );
+
+      expect(opened, isEmpty);
+      expect(activated, isEmpty);
+    });
+
+    test('תנאי when שמתקיים — המנוע מוער כרגיל', () async {
+      final activated = <String>[];
+      PluginLazyActivationService.instance.backgroundActivator = (id) async {
+        activated.add(id);
+      };
+      PluginLazyActivationService.instance.syncPlugin(
+        'lazy-when-ok',
+        broadcastTopics: const {},
+        scheduleStartup: false,
+        activationConditions: {
+          'reader.toolbar_item_clicked': PluginWhenCondition.fromJson(const {
+            'storage': {'key': 'on', 'exists': false},
+          }),
+        },
+      );
+      addTearDown(() {
+        PluginLazyActivationService.instance.removePlugin('lazy-when-ok');
+        PluginLazyActivationService.instance.backgroundActivator = null;
+      });
+
+      await PluginRuntimeDispatcher.instance.dispatchEventToPlugin(
+        'lazy-when-ok',
+        'reader.toolbar_item_clicked',
+        {'itemId': 'b1'},
+        preferBackground: true,
+      );
+
+      expect(opened, isEmpty);
+      expect(activated, ['lazy-when-ok']);
+    });
+  });
+
+  // ── ריבוי מופעים קדמיים של אותו תוסף ──────────────────────────────────────
+
+  group('multi-instance foreground', () {
+    const pid = 'multi.test.plugin';
+    const i1 = 'instance-1';
+    const i2 = 'instance-2';
+
+    setUp(() {
+      _d.resetVisibilityForTesting();
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      _d.repositoryForTesting = _FakeRegistryRepo(
+        enabled: true,
+        permission: true,
+      );
+      _d.invalidatePlugin(pid);
+    });
+
+    tearDown(() {
+      _d.unregisterController(pid, instanceId: i1);
+      _d.unregisterController(pid, instanceId: i2);
+      _d.unregisterController(pid, instanceId: 'background');
+      _d.repositoryForTesting = PluginRegistryRepository();
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    test('broadcast מגיע לשני המופעים הקדמיים החיים ולא לרקע', () async {
+      final a = _LifecycleFakeController();
+      final b = _LifecycleFakeController();
+      final bg = _LifecycleFakeController();
+      _d.registerController(pid, a, instanceId: i1);
+      _d.registerController(pid, b, instanceId: i2);
+      _d.registerController(pid, bg, instanceId: 'background');
+
+      _d.setVisiblePluginInstances({_fg(pid, i1), _fg(pid, i2)});
+      await pumpEventQueue();
+      a.jsEvents.clear();
+      b.jsEvents.clear();
+
+      await _d.dispatchEvent('navigation.changed', {'screen': 'library'});
+
+      expect(a.jsEvents, contains(contains('navigation.changed')));
+      expect(b.jsEvents, contains(contains('navigation.changed')));
+      expect(bg.jsEvents, isEmpty);
+    });
+
+    test('השהיית מופע אחד אינה נוגעת במופע השני', () async {
+      final a = _LifecycleFakeController();
+      final b = _LifecycleFakeController();
+      _d.registerController(pid, a, instanceId: i1);
+      _d.registerController(pid, b, instanceId: i2);
+
+      _d.setVisiblePluginInstances({_fg(pid, i1), _fg(pid, i2)});
+      await pumpEventQueue();
+      expect(a.resumeCalls, 1);
+      expect(b.resumeCalls, 1);
+
+      // המופע השני יוצא מהתצוגה — רק הוא מושהה.
+      _d.setVisiblePluginInstances({_fg(pid, i1)});
+      await pumpEventQueue();
+
+      expect(b.pauseCalls, 1);
+      expect(a.pauseCalls, 0);
+
+      // broadcast ממשיך להגיע רק למופע החי.
+      a.jsEvents.clear();
+      b.jsEvents.clear();
+      await _d.dispatchEvent('navigation.changed', {'screen': 'reading'});
+      expect(a.jsEvents, contains(contains('navigation.changed')));
+      expect(b.jsEvents, isEmpty);
+    });
+
+    test(
+      'ביטול רישום מופע אחד אינו מוחק את השני ואינו מנקה registries',
+      () async {
+        PluginToolbarRegistry.instance.register(
+          pid,
+          const PluginToolbarItem(
+            id: 'toolbar',
+            title: 'Toolbar',
+            icon: 'apps_24_regular',
+          ),
+        );
+        addTearDown(() => PluginToolbarRegistry.instance.removeAll(pid));
+        final a = _LifecycleFakeController();
+        final b = _LifecycleFakeController();
+        _d.registerController(pid, a, instanceId: i1);
+        _d.registerController(pid, b, instanceId: i2);
+        _d.setVisiblePluginInstances({_fg(pid, i2)});
+        await pumpEventQueue();
+
+        _d.unregisterController(pid, instanceId: i1);
+
+        expect(
+          PluginToolbarRegistry.instance.getAll().where((r) => r.$1 == pid),
+          hasLength(1),
+        );
+        b.jsEvents.clear();
+        await _d.dispatchEvent('navigation.changed', {'screen': 'library'});
+        expect(b.jsEvents, contains(contains('navigation.changed')));
+      },
+    );
+
+    test('כשכל המופעים הקדמיים מושהים — האירוע נופל לרקע', () async {
+      final a = _LifecycleFakeController();
+      final bg = _LifecycleFakeController();
+      _d.registerController(pid, a, instanceId: i1);
+      _d.registerController(pid, bg, instanceId: 'background');
+
+      _d.setVisiblePluginInstances({_fg(pid, i1)});
+      await pumpEventQueue();
+      _d.setVisiblePluginInstances(const {});
+      await pumpEventQueue();
+      a.jsEvents.clear();
+
+      await _d.dispatchEvent('navigation.changed', {'screen': 'library'});
+
+      expect(bg.jsEvents, contains(contains('navigation.changed')));
+      expect(a.jsEvents, isEmpty);
+    });
+
+    test('אירוע ממוקד עם instanceId מגיע למופע הזה בלבד', () async {
+      final a = _LifecycleFakeController();
+      final b = _LifecycleFakeController();
+      _d.registerController(pid, a, instanceId: i1);
+      _d.registerController(pid, b, instanceId: i2);
+      _d.setVisiblePluginInstances({_fg(pid, i1), _fg(pid, i2)});
+      await pumpEventQueue();
+      a.jsEvents.clear();
+      b.jsEvents.clear();
+
+      await _d.dispatchEventToPlugin(
+        pid,
+        'reader.context_menu_item_clicked',
+        {'itemId': 'mark'},
+        instanceId: i2,
+      );
+
+      expect(b.jsEvents, contains(contains('context_menu_item_clicked')));
+      expect(a.jsEvents, isEmpty);
+    });
+
+    test(
+      'resetVisibilityForTesting מנקה השהיות ונראות של כל המופעים',
+      () async {
+        final a = _LifecycleFakeController();
+        final b = _LifecycleFakeController();
+        _d.registerController(pid, a, instanceId: i1);
+        _d.registerController(pid, b, instanceId: i2);
+        _d.setVisiblePluginInstances({_fg(pid, i1), _fg(pid, i2)});
+        await pumpEventQueue();
+        _d.setVisiblePluginInstances(const {});
+        await pumpEventQueue();
+
+        _d.resetVisibilityForTesting();
+
+        // דגלי ההשהיה נוקו — broadcast מגיע שוב לשני המופעים.
+        a.jsEvents.clear();
+        b.jsEvents.clear();
+        await _d.dispatchEvent('navigation.changed', {'screen': 'library'});
+        expect(a.jsEvents, contains(contains('navigation.changed')));
+        expect(b.jsEvents, contains(contains('navigation.changed')));
+      },
+    );
+  });
+
+  group('מסירת שידור מקבילית', () {
+    const pidStuck = 'parallel.stuck';
+    const pidFast = 'parallel.fast';
+
+    setUp(() {
+      _d.repositoryForTesting = _FakeRegistryRepo(
+        enabled: true,
+        permission: true,
+      );
+      _d.invalidatePlugin(pidStuck);
+      _d.invalidatePlugin(pidFast);
+    });
+
+    tearDown(() {
+      _d.unregisterController(pidStuck);
+      _d.unregisterController(pidFast);
+      _d.repositoryForTesting = PluginRegistryRepository();
+    });
+
+    test('WebView תקוע של תוסף אחד אינו חוסם מסירה לתוסף אחר', () async {
+      final stuck = _GatedController()..gate = Completer<void>();
+      final fast = _LifecycleFakeController();
+      _d.registerController(pidStuck, stuck);
+      _d.registerController(pidFast, fast);
+
+      final dispatch = _d.dispatchEvent('navigation.changed', {
+        'screen': 'library',
+      });
+      await pumpEventQueue();
+
+      // התוסף התקוע עדיין תלוי, אך התוסף המהיר כבר קיבל את האירוע.
+      expect(fast.jsEvents, contains(contains('navigation.changed')));
+      expect(stuck.jsEvents, isEmpty);
+
+      stuck.gate!.complete();
+      await dispatch;
+      expect(stuck.jsEvents, hasLength(1));
+    });
+  });
+
+  group('סימון controller שפג לו הזמן', () {
+    const pidA = 'timeout.a';
+    const pidB = 'timeout.b';
+
+    setUp(() {
+      _d.resetVisibilityForTesting();
+      _d.repositoryForTesting = _FakeRegistryRepo(
+        enabled: true,
+        permission: true,
+      );
+      _d.invalidatePlugin(pidA);
+      _d.invalidatePlugin(pidB);
+    });
+
+    tearDown(() {
+      _d.unregisterController(pidA);
+      _d.unregisterController(pidB);
+      _d.repositoryForTesting = PluginRegistryRepository();
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    test('מופע שפג לו הזמן מדולג בשידור הבא', () async {
+      final stuck = _TimingOutController();
+      _d.registerController(pidA, stuck);
+
+      await _d.dispatchEvent('navigation.changed', {'screen': 'library'});
+      expect(stuck.evalCalls, 1);
+
+      stuck.timeOut = false;
+      await _d.dispatchEvent('navigation.changed', {'screen': 'reading'});
+
+      expect(
+        stuck.evalCalls,
+        1,
+        reason: 'בלי הסימון כל שידור היה משלם שוב 3 שניות על אותו מופע',
+      );
+    });
+
+    test('מופע תקוע אינו מונע מסירה למופע אחר של אותו תוסף', () async {
+      final stuck = _TimingOutController();
+      final healthy = _LifecycleFakeController();
+      _d.registerController(pidA, stuck, instanceId: 'i1');
+      _d.registerController(pidA, healthy, instanceId: 'i2');
+      addTearDown(() {
+        _d.unregisterController(pidA, instanceId: 'i1');
+        _d.unregisterController(pidA, instanceId: 'i2');
+      });
+
+      await _d.dispatchEvent('navigation.changed', {'screen': 'library'});
+      healthy.jsEvents.clear();
+      stuck.timeOut = false;
+
+      await _d.dispatchEvent('navigation.changed', {'screen': 'reading'});
+
+      expect(stuck.evalCalls, 1);
+      expect(healthy.jsEvents, hasLength(1));
+    });
+
+    test('registerController מסיר את הסימון', () async {
+      final stuck = _TimingOutController();
+      _d.registerController(pidA, stuck);
+      await _d.dispatchEvent('navigation.changed', {'screen': 'library'});
+
+      stuck.timeOut = false;
+      _d.registerController(pidA, stuck);
+      await _d.dispatchEvent('navigation.changed', {'screen': 'reading'});
+
+      expect(stuck.evalCalls, 2);
+    });
+
+    test('unregisterController מסיר את הסימון', () async {
+      // אותו object משמש שני תוספים: הסימון הוא לפי controller, ולכן ביטול
+      // הרישום באחד נמדד דרך מסירה לשני — בלי register מחדש שגם הוא מנקה.
+      final shared = _TimingOutController();
+      _d.registerController(pidA, shared);
+      _d.registerController(pidB, shared);
+
+      await _d.dispatchEvent('navigation.changed', {'screen': 'library'});
+      final afterTimeout = shared.evalCalls;
+      shared.timeOut = false;
+      await _d.dispatchEvent('navigation.changed', {'screen': 'reading'});
+      expect(shared.evalCalls, afterTimeout, reason: 'שני התוספים מדלגים');
+
+      _d.unregisterController(pidA);
+      await _d.dispatchEvent('navigation.changed', {'screen': 'more'});
+
+      expect(shared.evalCalls, afterTimeout + 1);
+    });
+
+    test('החייאת מופע קדמי מסירה את הסימון', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      final stuck = _TimingOutController();
+      _d.registerController(pidA, stuck);
+
+      await _d.dispatchEvent('navigation.changed', {'screen': 'library'});
+      expect(stuck.evalCalls, 1);
+      stuck.timeOut = false;
+
+      // החייאה דרך מסך העיון — resume מסיר את הסימון.
+      _d.setVisiblePluginInstances({_fg(pidA)});
+      await pumpEventQueue();
+      final afterResume = stuck.evalCalls;
+
+      await _d.dispatchEvent('navigation.changed', {'screen': 'reading'});
+
+      expect(stuck.evalCalls, afterResume + 1);
+    });
+  });
+
+  group('סגירת טאב תוך כדי פעולה אסינכרונית', () {
+    tearDown(() => _d.repositoryForTesting = PluginRegistryRepository());
+
+    test('הסרת תוסף באמצע ה-await אינה מפילה את השידור', () async {
+      const pids = [
+        'crash.a',
+        'crash.b',
+        'crash.c',
+        'crash.d',
+        'crash.e',
+        'crash.f',
+      ];
+      final controllers = {
+        for (final pid in pids) pid: _FakeWebViewController(),
+      };
+      controllers.forEach(_d.registerController);
+      addTearDown(() {
+        for (final pid in pids) {
+          _d.unregisterController(pid);
+        }
+      });
+
+      _d.repositoryForTesting = _TabClosingRepo(
+        onFirstEnabledCheck: () => _d.unregisterController(pids.last),
+      );
+
+      await expectLater(
+        _d.dispatchEvent('navigation.changed', {'screen': 'library'}),
+        completes,
+      );
+
+      for (final pid in pids.take(pids.length - 1)) {
+        expect(controllers[pid]!.evaluateJavascriptCalls, 1, reason: pid);
+      }
+      expect(controllers[pids.last]!.evaluateJavascriptCalls, 0);
+    });
+
+    test('הסרת תוסף בבדיקת ההרשאה אינה מונעת resume מתוסף אחר', () async {
+      const closing = 'perm.closing';
+      const survivor = 'perm.survivor';
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      _d.resetVisibilityForTesting();
+      await _d.dispatchEvent('theme.changed', {'mode': 'dark'});
+
+      final closingController = _LifecycleFakeController();
+      final survivorController = _LifecycleFakeController();
+      _d.registerController(closing, closingController);
+      _d.registerController(survivor, survivorController);
+      addTearDown(() {
+        _d.unregisterController(closing);
+        _d.unregisterController(survivor);
+      });
+
+      _d.repositoryForTesting = _TabClosingRepo(
+        onPermissionCheck: (pluginId) {
+          if (pluginId == closing) _d.unregisterController(closing);
+        },
+      );
+
+      _d.setVisiblePluginInstances({_fg(closing), _fg(survivor)});
+      await pumpEventQueue();
+
+      expect(survivorController.resumeCalls, 1);
     });
   });
 }

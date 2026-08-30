@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:otzaria/core/focus_repository.dart';
@@ -5,8 +7,10 @@ import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
 import 'package:otzaria/navigation/bloc/navigation_event.dart';
 import 'package:otzaria/navigation/bloc/navigation_state.dart';
 import 'package:otzaria/navigation/view/main_window_screen.dart';
+import 'package:otzaria/navigation/view/tab_search_menu.dart';
 import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
 import 'package:otzaria/tabs/bloc/tabs_event.dart';
+import 'package:otzaria/tabs/models/combined_tab.dart';
 import 'package:otzaria/tabs/models/commentators_tab.dart';
 import 'package:otzaria/tools/tools_launcher_controller.dart';
 import 'package:otzaria/tabs/models/pdf_commentators_tab.dart';
@@ -20,6 +24,7 @@ import 'package:otzaria/tabs/models/searching_tab.dart';
 import 'package:otzaria/search/models/search_configuration.dart';
 import 'package:otzaria/search/view/search_dialog.dart';
 import 'package:otzaria/bookmarks/view/bookmark_screen.dart';
+import 'package:otzaria/bookmarks/view/save_group_bookmark_dialog.dart';
 import 'package:otzaria/history/view/history_screen.dart';
 import 'package:otzaria/workspaces/view/workspace_switcher_dialog.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -27,6 +32,7 @@ import 'package:otzaria/shortcuts/shortcut_helper.dart';
 import 'package:otzaria/shortcuts/shortcut_validator.dart';
 import 'package:otzaria/utils/ui/fullscreen_helper.dart';
 import 'package:otzaria/settings/settings_exports.dart';
+import 'package:otzaria/plugins/services/plugin_runtime_dispatcher.dart';
 
 class KeyboardShortcuts extends StatefulWidget {
   final Widget child;
@@ -150,6 +156,7 @@ class _KeyboardShortcutsState extends State<KeyboardShortcuts> {
     final restoreClosedTabShortcut = shortcutOf(
       'key-shortcut-restore-closed-tab',
     );
+    final searchTabsShortcut = shortcutOf('key-shortcut-search-tabs');
     final readingScreenShortcut = shortcutOf(
       'key-shortcut-open-reading-screen',
     );
@@ -193,6 +200,28 @@ class _KeyboardShortcutsState extends State<KeyboardShortcuts> {
     final isReadingScreen =
         !hasOpenOverlayRoute &&
         (currentScreen == Screen.reading || currentScreen == Screen.search);
+
+    if (isReadingScreen &&
+        context.read<TabsBloc>().state.currentTab is PdfBookTab) {
+      for (final entry in ShortcutValidator.pluginShortcuts.entries) {
+        final target = entry.value;
+        final shortcut = ShortcutValidator.getShortcutValue(entry.key) ?? '';
+        if (target.contextMenuItemId == null &&
+            target.command != null &&
+            shortcut.isNotEmpty &&
+            ShortcutHelper.matchesShortcut(event, shortcut)) {
+          unawaited(
+            PluginRuntimeDispatcher.instance.dispatchEventToPlugin(
+              target.pluginId,
+              'app.command',
+              {'command': target.command, 'shortcutId': target.shortcutId},
+              preferBackground: true,
+            ),
+          );
+          return KeyEventResult.handled;
+        }
+      }
+    }
 
     // פתח/סגור חלונית ניווט. אם הטאב הפעיל אינו ספר — מחזירים `ignored`
     // כדי לא לבלוע את הקיצור (כך מנוע ה-shortcut יכול להמשיך הלאה במקום
@@ -309,6 +338,15 @@ class _KeyboardShortcutsState extends State<KeyboardShortcuts> {
       final historyBloc = context.read<HistoryBloc>();
       // הקיצור סוגר את כל הבחירה המרובה כשהכרטיסיה הפעילה חלק ממנה.
       final closeGroup = tabsBloc.state.currentCloseGroup;
+      // בטאב מפוצל (שאינו חלק מבחירה מרובה) נסגרת רק החלונית הפעילה.
+      if (closeGroup.length <= 1 && tabsBloc.state.currentTab is CombinedTab) {
+        final pane = tabsBloc.state.activePane;
+        if (pane != null) {
+          historyBloc.add(AddHistory(pane));
+          tabsBloc.add(ClosePane(pane));
+          return KeyEventResult.handled;
+        }
+      }
       if (closeGroup.length > 1) {
         historyBloc.add(AddHistoryForTabs(closeGroup));
       } else if (closeGroup.isNotEmpty) {
@@ -335,6 +373,12 @@ class _KeyboardShortcutsState extends State<KeyboardShortcuts> {
     if (isReadingScreen &&
         ShortcutHelper.matchesShortcut(event, restoreClosedTabShortcut)) {
       context.read<TabsBloc>().add(const RestoreLastClosedTab());
+      return KeyEventResult.handled;
+    }
+
+    if (isReadingScreen &&
+        ShortcutHelper.matchesShortcut(event, searchTabsShortcut)) {
+      showTabSearchMenu(context);
       return KeyEventResult.handled;
     }
 
@@ -397,6 +441,17 @@ class _KeyboardShortcutsState extends State<KeyboardShortcuts> {
         context: context,
         builder: (context) => const BookmarksDialog(),
       );
+      return KeyEventResult.handled;
+    }
+
+    // סימניה מרוכזת לכל הספרים הפתוחים (אופציונלי, ללא ברירת מחדל)
+    final saveGroupBookmarkShortcut = shortcutOf(
+      'key-shortcut-save-group-bookmark',
+    );
+    if (saveGroupBookmarkShortcut.isNotEmpty &&
+        ShortcutHelper.matchesShortcut(event, saveGroupBookmarkShortcut)) {
+      closeOverlayRoutes();
+      showSaveGroupBookmarkDialog(context);
       return KeyEventResult.handled;
     }
 

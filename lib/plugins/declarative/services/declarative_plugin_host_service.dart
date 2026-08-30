@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:otzaria/models/books.dart';
 import 'package:otzaria/plugins/database/plugin_database_service.dart';
+import 'package:otzaria/plugins/declarative/compiler/declarative_action_compiler.dart';
 import 'package:otzaria/plugins/declarative/compiler/declarative_program_compiler.dart';
+import 'package:otzaria/plugins/declarative/compiler/declarative_selection_action.dart';
 import 'package:otzaria/plugins/declarative/compiler/declarative_toolbar_template_compiler.dart';
 import 'package:otzaria/plugins/declarative/models/declarative_program.dart';
 import 'package:otzaria/plugins/declarative/models/declarative_toolbar_template.dart';
@@ -14,6 +17,7 @@ import 'package:otzaria/plugins/declarative/services/declarative_toolbar_binding
 import 'package:otzaria/plugins/models/installed_plugin.dart';
 import 'package:otzaria/plugins/models/plugin_book_identity.dart';
 import 'package:otzaria/plugins/models/plugin_valid_permissions.dart';
+import 'package:otzaria/plugins/services/plugin_condition_evaluator.dart';
 import 'package:otzaria/plugins/services/plugin_toolbar_registry.dart';
 
 typedef DeclarativePluginLoader =
@@ -35,6 +39,12 @@ abstract interface class DeclarativePluginHost {
     CompiledDeclarativeAction action,
   );
 
+  Future<void> dispatchSelectionAction(
+    String pluginId,
+    Map<String, dynamic> actionTemplate,
+    Map<String, dynamic> selectionPayload,
+  );
+
   void dispose();
 }
 
@@ -54,6 +64,11 @@ class DeclarativePluginHostService implements DeclarativePluginHost {
     PluginToolbarRegistry? toolbarRegistry,
     PluginDatabaseService? databaseService,
     DeclarativeParallelEditionsFinder? parallelEditionsFinder,
+    DeclarativeStorageWriter? storageWriter,
+    DeclarativeReaderScroller? readerScroller,
+    DeclarativeSearchOpener? searchOpener,
+    DeclarativeSnackPresenter snackPresenter = const UiSnackPresenter(),
+    ValueListenable<int>? settingsRevision,
     DeclarativeHostErrorHandler? onError,
   }) {
     final programs = DeclarativeProgramRepository(
@@ -76,7 +91,16 @@ class DeclarativePluginHostService implements DeclarativePluginHost {
       loadPermissions: loadPermissions,
       programRepository: programs,
       toolbarBinding: binding,
-      actionExecutor: DeclarativeHostActionExecutor(bookOpener: bookOpener),
+      actionExecutor: DeclarativeHostActionExecutor(
+        bookOpener: bookOpener,
+        storageWriter: storageWriter,
+        readerScroller: readerScroller,
+        searchOpener: searchOpener,
+        snackPresenter: snackPresenter,
+      ),
+      settingsRevision:
+          settingsRevision ??
+          PluginConditionEvaluator.instance.settingsRevision,
       onError: onError,
     );
   }
@@ -87,10 +111,22 @@ class DeclarativePluginHostService implements DeclarativePluginHost {
     required this.programRepository,
     required this.toolbarBinding,
     required this._actionExecutor,
+    required this._settingsRevision,
     required this.onError,
-  });
+  }) {
+    _settingsRevision.addListener(_onSettingsChanged);
+  }
+
+  /// גרסת ההגדרות — כל שינוי מדליק את הטריגר `settings.changed`.
+  final ValueListenable<int> _settingsRevision;
+  Timer? _settingsDebounce;
 
   final Set<String> _registeredPluginIds = {};
+
+  /// חתימת הקלט שממנו קומפלו התכניות של כל תוסף. חתימה זהה בסנכרון חוזר
+  /// (נעיצה, סדר) שומרת את הרישום והפלט, ולכן `app.startup` לא נורה שוב.
+  final Map<String, String> _fingerprints = {};
+  bool _disposed = false;
   int _syncGeneration = 0;
   String? _readerContextSignature;
   Book? _readerBook;
@@ -99,16 +135,6 @@ class DeclarativePluginHostService implements DeclarativePluginHost {
   @override
   Future<void> syncPlugins(List<InstalledPlugin> plugins) async {
     final generation = ++_syncGeneration;
-    final idsToClear = {
-      ..._registeredPluginIds,
-      ...plugins.map((plugin) => plugin.pluginId),
-    };
-    for (final pluginId in idsToClear) {
-      programRepository.removePlugin(pluginId);
-      toolbarBinding.removePlugin(pluginId);
-    }
-    _registeredPluginIds.clear();
-
     final registrations = <_CompiledPluginRegistration>[];
     for (final plugin in plugins) {
       if (!plugin.enabled || plugin.manifest.startup == null) continue;
@@ -125,12 +151,28 @@ class DeclarativePluginHostService implements DeclarativePluginHost {
     }
     if (_syncGeneration != generation) return;
 
+    final nextIds = registrations
+        .map((registration) => registration.plugin.pluginId)
+        .toSet();
+    for (final pluginId in _registeredPluginIds.difference(nextIds)) {
+      programRepository.removePlugin(pluginId);
+      toolbarBinding.removePlugin(pluginId);
+      _fingerprints.remove(pluginId);
+    }
+    _registeredPluginIds.clear();
+
+    final recompiled = <String>{};
     for (final registration in registrations) {
       final plugin = registration.plugin;
+      final fingerprint = registration.fingerprint;
+      final unchanged = _fingerprints[plugin.pluginId] == fingerprint;
+      if (!unchanged) recompiled.add(plugin.pluginId);
+      _fingerprints[plugin.pluginId] = fingerprint;
       programRepository.syncPlugin(
         plugin: plugin,
         programs: registration.programs,
         grantedPermissions: registration.grantedPermissions,
+        preserveOutputs: unchanged,
       );
       toolbarBinding.syncPlugin(
         plugin: plugin,
@@ -141,13 +183,63 @@ class DeclarativePluginHostService implements DeclarativePluginHost {
       );
       _registeredPluginIds.add(plugin.pluginId);
     }
+    await _runStartupTrigger(recompiled);
+    if (_syncGeneration != generation) return;
     await _evaluateReaderContext(force: true);
+  }
+
+  /// `app.startup` נורה פעם אחת לכל תוסף בכל חיי התהליך: רק כשהתכניות שלו
+  /// קומפלו מחדש והפלט אופס. תוסף שנרשם לראשונה אחרי העלייה כן מקבל אותו,
+  /// כמו ההפעלה העצלה ב-`plugin_lazy_activation_service`.
+  Future<void> _runStartupTrigger(Set<String> pluginIds) async {
+    if (_disposed) return;
+    final pending = pluginIds.intersection(_registeredPluginIds);
+    if (pending.isEmpty) return;
+    await programRepository.runTrigger(
+      trigger: 'app.startup',
+      context: _buildContext(),
+      contextSignature:
+          _readerContextSignature ?? 'app:${_settingsRevision.value}',
+      pluginIds: pending,
+    );
+  }
+
+  /// טריגר שאינו נגזר מהקשר הקריאה. כשספר פתוח נשמרת חתימת הקריאה, כדי
+  /// שהגנת ה-stale של פעולות הפקדים תמשיך לתאר את ההקשר האמיתי.
+  Future<void> _runContextFreeTrigger(String trigger) async {
+    if (_disposed || _registeredPluginIds.isEmpty) return;
+    await programRepository.runTrigger(
+      trigger: trigger,
+      context: _buildContext(),
+      contextSignature:
+          _readerContextSignature ?? 'app:${_settingsRevision.value}',
+    );
+  }
+
+  void _onSettingsChanged() {
+    _settingsDebounce?.cancel();
+    _settingsDebounce = Timer(const Duration(milliseconds: 150), () {
+      _runContextFreeTrigger('settings.changed');
+    });
+  }
+
+  Map<String, dynamic> _buildContext() {
+    final book = _readerBook;
+    final context = _readerContext;
+    if (book == null || context == null) return const {};
+    return {
+      'reader': {
+        'context': context,
+        'book': PluginBookIdentity.toJson(book),
+      },
+    };
   }
 
   @override
   void removePlugin(String pluginId) {
     _syncGeneration++;
     _registeredPluginIds.remove(pluginId);
+    _fingerprints.remove(pluginId);
     programRepository.removePlugin(pluginId);
     toolbarBinding.removePlugin(pluginId);
   }
@@ -193,14 +285,65 @@ class DeclarativePluginHostService implements DeclarativePluginHost {
     }
   }
 
+  /// חתימה מלאכותית לפעולת סימון: הפתרון והביצוע אטומיים בזמן הלחיצה,
+  /// כך שמגן ה-stale_action של ה-executor מסופק תמיד ובצדק.
+  static const String _selectionSignature = 'reader.selection';
+
+  @override
+  Future<void> dispatchSelectionAction(
+    String pluginId,
+    Map<String, dynamic> actionTemplate,
+    Map<String, dynamic> selectionPayload,
+  ) async {
+    try {
+      final plugin = await _loadPlugin(pluginId);
+      if (plugin == null) {
+        throw const DeclarativeProgramException(
+          'declarative.plugin_unavailable',
+          'The plugin is no longer installed',
+        );
+      }
+      final declaredPermissions = plugin.manifest.permissions.toSet();
+      DeclarativeSelectionAction.validateTemplate(
+        actionTemplate,
+        declaredPermissions: declaredPermissions,
+      );
+      final action =
+          DeclarativeActionCompiler(
+            declaredPermissions: declaredPermissions,
+          ).compileResolved(
+            DeclarativeSelectionAction.resolve(
+              actionTemplate,
+              selectionPayload,
+            ),
+            contextSignature: _selectionSignature,
+            programGeneration: 1,
+          );
+      final permissions = await _loadPermissions(pluginId);
+      await _actionExecutor.execute(
+        action: action,
+        plugin: plugin,
+        grantedPermissions: permissions,
+        currentContextSignature: _selectionSignature,
+        currentProgramGeneration: 1,
+      );
+    } catch (error, stackTrace) {
+      onError?.call(pluginId, error, stackTrace);
+    }
+  }
+
   @override
   void dispose() {
+    _disposed = true;
     _syncGeneration++;
+    _settingsDebounce?.cancel();
+    _settingsRevision.removeListener(_onSettingsChanged);
     for (final pluginId in _registeredPluginIds.toList()) {
       programRepository.removePlugin(pluginId);
       toolbarBinding.removePlugin(pluginId);
     }
     _registeredPluginIds.clear();
+    _fingerprints.clear();
     toolbarBinding.dispose();
     programRepository.dispose();
   }
@@ -280,6 +423,13 @@ class DeclarativePluginHostService implements DeclarativePluginHost {
       programs: List.unmodifiable(programs),
       toolbarTemplates: List.unmodifiable(templates),
       grantedPermissions: Set.unmodifiable(grantedPermissions),
+      fingerprint: jsonEncode({
+        'version': plugin.version,
+        'startup': startup.toJson(),
+        'declared': declaredPermissions.toList()..sort(),
+        'granted': grantedPermissions.toList()..sort(),
+        'sources': sourceIds.toList()..sort(),
+      }),
     );
   }
 
@@ -297,9 +447,7 @@ class DeclarativePluginHostService implements DeclarativePluginHost {
     _readerContextSignature = signature;
     await programRepository.runTrigger(
       trigger: 'reader.activeBookChanged',
-      context: {
-        'reader': {'context': context, 'book': identity},
-      },
+      context: _buildContext(),
       contextSignature: signature,
     );
   }
@@ -310,11 +458,13 @@ class _CompiledPluginRegistration {
   final List<CompiledDeclarativeProgram> programs;
   final List<CompiledDeclarativeToolbarTemplate> toolbarTemplates;
   final Set<String> grantedPermissions;
+  final String fingerprint;
 
   const _CompiledPluginRegistration({
     required this.plugin,
     required this.programs,
     required this.toolbarTemplates,
     required this.grantedPermissions,
+    required this.fingerprint,
   });
 }

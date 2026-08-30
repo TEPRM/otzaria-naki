@@ -5,13 +5,16 @@ import 'dart:io';
 import 'dart:io' as io show Link;
 
 import 'package:archive/archive_io.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:kosher_dart/kosher_dart.dart';
 import 'package:path/path.dart' as p;
 import 'package:mockito/mockito.dart';
+import 'package:otzaria/core/app_paths.dart';
 import 'package:otzaria/core/connectivity_status_service.dart';
 import 'package:otzaria/data/data_providers/book_composite_key.dart';
 import 'package:otzaria/data/data_providers/library_provider.dart';
@@ -27,17 +30,25 @@ import 'package:otzaria/plugins/bridge/plugin_bridge_adapter.dart';
 import 'package:otzaria/plugins/models/installed_plugin.dart';
 import 'package:otzaria/plugins/models/plugin_manifest.dart';
 import 'package:otzaria/plugins/models/plugin_permission_grant.dart';
+import 'package:otzaria/plugins/models/plugin_valid_permissions.dart';
 import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
 import 'package:otzaria/plugins/services/context_menu_registry.dart';
+import 'package:otzaria/plugins/services/plugin_condition_evaluator.dart';
+import 'package:otzaria/plugins/services/plugin_shortcut_registry.dart';
 import 'package:otzaria/plugins/services/plugin_toolbar_registry.dart';
 import 'package:otzaria/plugins/services/plugin_network_access_resolver.dart';
 import 'package:otzaria/plugins/services/plugin_page_launcher.dart';
+import 'package:otzaria/plugins/services/plugin_runtime_dispatcher.dart';
 import 'package:otzaria/plugins/services/plugin_file_download_service.dart';
 import 'package:otzaria/plugins/services/plugin_fs_service.dart';
 import 'package:otzaria/plugins/services/plugin_file_server.dart';
 import 'package:otzaria/plugins/services/plugin_network_fetch_service.dart';
+import 'package:otzaria/data/repository/hive_list_repository.dart';
+import 'package:otzaria/plugins/models/plugin_report_record.dart';
+import 'package:otzaria/plugins/services/plugin_report_service.dart';
 import 'package:otzaria/plugins/utils/reader_location_resolver.dart';
 import 'package:otzaria/search/models/search_configuration.dart';
+import 'package:otzaria/search/search_defaults.dart';
 import 'package:otzaria/search/search_repository.dart';
 import 'package:otzaria/settings/engine/settings_repository.dart';
 import 'package:otzaria_search_engine/otzaria_search_engine.dart'
@@ -51,6 +62,7 @@ import 'package:otzaria_search_engine/otzaria_search_engine.dart'
         SearchStreamUpdate,
         WordMatchMode;
 import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
+import 'package:otzaria/tabs/bloc/tabs_event.dart';
 import 'package:otzaria/tabs/bloc/tabs_state.dart';
 import 'package:otzaria/tabs/models/pdf_tab.dart';
 import 'package:otzaria/tabs/models/text_tab.dart';
@@ -70,6 +82,22 @@ class _StubTabsBloc extends Mock implements TabsBloc {
 
   @override
   TabsState get state => currentState;
+}
+
+/// לוכד את ה-events ששולח ה-bridge אל TabsBloc (בעיקר AddTab) כדי שנוכל
+/// לבחון את הטאב שנפתח על ידי `reader.openSearchTab`.
+class _CapturingTabsBloc extends Cubit<TabsState> implements TabsBloc {
+  _CapturingTabsBloc() : super(const TabsState(tabs: [], currentTabIndex: 0));
+
+  final List<TabsEvent> captured = [];
+
+  @override
+  void add(TabsEvent event) {
+    captured.add(event);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _MockNavigationBloc extends Mock implements NavigationBloc {}
@@ -263,8 +291,53 @@ class _StubPluginRegistryRepository extends PluginRegistryRepository {
   }
 
   @override
+  Future<Map<String, String>> getKVMany(
+    String pluginId,
+    String namespace,
+    Iterable<String> keys,
+  ) async {
+    final out = <String, String>{};
+    for (final key in keys) {
+      final value = kv['$namespace/$key'];
+      if (value != null) out[key] = value;
+    }
+    return out;
+  }
+
+  @override
   Future<void> removeKV(String pluginId, String namespace, String key) async {
     kv.remove('$namespace/$key');
+  }
+
+  /// התוספים ה"מותקנים" — plugin.openOther נבדק מולם.
+  List<InstalledPlugin> installed = [];
+
+  List<InstalledPlugin> installedPlugins = [];
+
+  @override
+  Future<List<InstalledPlugin>> getAllPlugins() async => [
+    ...installed,
+    ...installedPlugins,
+  ];
+}
+
+class _EnabledRegistryRepo extends Fake implements PluginRegistryRepository {
+  @override
+  Future<bool> getIsEnabled(String pluginId) async => true;
+}
+
+/// קולט את ה-JS שהאירוע נמסר בו, לאימות תוכן ה-payload.
+class _RecordingWebViewController extends Fake
+    implements InAppWebViewController {
+  final List<String> jsCalls = [];
+
+  @override
+  Future<dynamic> evaluateJavascript({
+    required String source,
+    ContentWorld? contentWorld,
+  }) async {
+    jsCalls.add(source);
+    return null;
   }
 }
 
@@ -272,9 +345,10 @@ InstalledPlugin _buildInstalledPlugin({
   List<String> permissions = const [],
   bool networkEnabled = false,
   List<String> networkAllowlist = const [],
+  String pluginId = 'test.plugin',
 }) {
   return InstalledPlugin(
-    pluginId: 'test.plugin',
+    pluginId: pluginId,
     name: 'Test Plugin',
     version: '1.0.0',
     installPath: '/',
@@ -283,7 +357,7 @@ InstalledPlugin _buildInstalledPlugin({
     pinned: true,
     manifest: PluginManifest(
       schemaVersion: 1,
-      id: 'test.plugin',
+      id: pluginId,
       name: 'Test Plugin',
       version: '1.0.0',
       description: '',
@@ -456,38 +530,203 @@ Future<void> main() async {
 
     setUp(() {
       adapter = PluginBridgeAdapter(
-        _buildInstalledPlugin(
-          permissions: const ['settings.read'],
-        ),
+        _buildInstalledPlugin(permissions: const ['settings.read']),
         dependencies: _buildNetworkDeps(),
         pluginRepository: _StubPluginRegistryRepository(),
       );
     });
 
-    test('מחזיר את מיקום HebrewBooks שהוגדר', () async {
+    test('מחזיר הגדרת תצוגה שאינה חסומה', () async {
+      await Settings.setValue<double>(SettingsRepository.keyFontSize, 25);
+
+      final result = await adapter.execute('settings', 'get', {
+        'key': SettingsRepository.keyFontSize,
+      });
+
+      expect(result, 25);
+    });
+
+    test('מפתח חסום מוחזר כ-error.forbidden ולא כ-null', () async {
       await Settings.setValue<String>(
         SettingsRepository.keyHebrewBooksPath,
         '/books/hebrewbooks',
       );
 
-      final result = await adapter.execute('settings', 'get', {
-        'key': SettingsRepository.keyHebrewBooksPath,
-      });
-
-      expect(result, '/books/hebrewbooks');
+      await expectLater(
+        adapter.execute('settings', 'get', {
+          'key': SettingsRepository.keyHebrewBooksPath,
+        }),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('error.forbidden'),
+          ),
+        ),
+      );
     });
 
-    test('מחזיר מחרוזת ריקה כשהמיקום לא הוגדר', () async {
+    test('getMany מדלג על מפתח חסום ומחזיר את המותר', () async {
+      await Settings.setValue<double>(SettingsRepository.keyFontSize, 22);
       await Settings.setValue<String>(
-        SettingsRepository.keyHebrewBooksPath,
-        '',
+        SettingsRepository.keyLibraryPath,
+        '/library',
       );
 
-      final result = await adapter.execute('settings', 'get', {
-        'key': SettingsRepository.keyHebrewBooksPath,
-      });
+      final result =
+          await adapter.execute('settings', 'getMany', {
+                'keys': [
+                  SettingsRepository.keyFontSize,
+                  SettingsRepository.keyLibraryPath,
+                ],
+              })
+              as Map;
 
-      expect(result, '');
+      expect(result[SettingsRepository.keyFontSize], 22);
+      expect(result.containsKey(SettingsRepository.keyLibraryPath), isFalse);
+    });
+  });
+
+  group('PluginBridgeAdapter fs.* — המרחב הפרטי', () {
+    late Directory dataRoot;
+    late PluginBridgeAdapter adapter;
+
+    setUp(() async {
+      dataRoot = await Directory.systemTemp.createTemp('plugin_ws_adapter_');
+      AppPaths.debugOverrideDataRootPath(dataRoot.path);
+      // ללא הרשאות בכלל — המרחב הפרטי אינו דורש הרשאת manifest.
+      adapter = PluginBridgeAdapter(
+        _buildInstalledPlugin(permissions: const []),
+        dependencies: _buildNetworkDeps(),
+        pluginRepository: _StubPluginRegistryRepository(),
+      );
+    });
+
+    tearDown(() async {
+      AppPaths.debugOverrideDataRootPath(null);
+      if (await dataRoot.exists()) await dataRoot.delete(recursive: true);
+    });
+
+    test('כתיבה, stat, listDir וקריאה — סבב שלם', () async {
+      final written =
+          await adapter.execute('fs', 'writeFile', {
+                'path': 'cache/a.json',
+                'content': '{"a":1}',
+              })
+              as Map;
+      expect(written['size'], 7);
+      expect(written['quotaBytes'], isPositive);
+
+      final stat =
+          await adapter.execute('fs', 'stat', {'path': 'cache/a.json'}) as Map;
+      expect(stat['exists'], isTrue);
+      expect(stat['type'], 'file');
+
+      final listed =
+          await adapter.execute('fs', 'listDir', {'path': 'cache'}) as Map;
+      expect((listed['entries'] as List).single['name'], 'a.json');
+
+      final read =
+          await adapter.execute('fs', 'readFile', {'path': 'cache/a.json'})
+              as Map;
+      expect(read['content'], '{"a":1}');
+    });
+
+    test('base64 עובר סבב שלם ללא שינוי', () async {
+      final bytes = [0, 1, 2, 250, 255];
+      await adapter.execute('fs', 'writeFile', {
+        'path': 'bin/blob',
+        'content': base64Encode(bytes),
+        'encoding': 'base64',
+      });
+      final read =
+          await adapter.execute('fs', 'readFile', {
+                'path': 'bin/blob',
+                'encoding': 'base64',
+              })
+              as Map;
+      expect(base64Decode(read['content'] as String), bytes);
+    });
+
+    test('נתיב שיוצא מהשורש נדחה ב-error.forbidden', () async {
+      final victim = File(p.join(dataRoot.path, 'victim.txt'))
+        ..writeAsStringSync('חשוב');
+      await expectLater(
+        adapter.execute('fs', 'writeFile', {
+          'path': '../../../../victim.txt',
+          'content': 'נדרס',
+        }),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('error.forbidden'),
+          ),
+        ),
+      );
+      expect(victim.readAsStringSync(), 'חשוב');
+    });
+
+    test('deleteEntry idempotent, ו-makeDir יוצר תיקייה', () async {
+      expect(await adapter.execute('fs', 'makeDir', {'path': 'x/y'}), isTrue);
+      expect(
+        await adapter.execute('fs', 'deleteEntry', {
+          'path': 'x',
+          'recursive': true,
+        }),
+        isTrue,
+      );
+      expect(
+        await adapter.execute('fs', 'deleteEntry', {'path': 'x'}),
+        isFalse,
+      );
+    });
+
+    test('stat על נתיב שאינו קיים מחזיר exists:false', () async {
+      final stat = await adapter.execute('fs', 'stat', {'path': 'nope'}) as Map;
+      expect(stat, {'exists': false});
+    });
+
+    test('קידוד לא מוכר ותוכן שאינו מחרוזת נדחים', () async {
+      await expectLater(
+        adapter.execute('fs', 'writeFile', {
+          'path': 'a.txt',
+          'content': 'x',
+          'encoding': 'utf16',
+        }),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('error.invalid_params'),
+          ),
+        ),
+      );
+      await expectLater(
+        adapter.execute('fs', 'writeFile', {'path': 'a.txt', 'content': 5}),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('error.invalid_params'),
+          ),
+        ),
+      );
+    });
+
+    test('המרחב מבודד בין תוספים', () async {
+      await adapter.execute('fs', 'writeFile', {
+        'path': 'mine.txt',
+        'content': 'א',
+      });
+      final other = PluginBridgeAdapter(
+        _buildInstalledPlugin(pluginId: 'other.plugin', permissions: const []),
+        dependencies: _buildNetworkDeps(),
+        pluginRepository: _StubPluginRegistryRepository(),
+      );
+      final listed =
+          await other.execute('fs', 'listDir', <String, dynamic>{}) as Map;
+      expect(listed['entries'], isEmpty);
     });
   });
 
@@ -553,9 +792,93 @@ Future<void> main() async {
             await adapter.execute('app', 'getGrantedPermissions', {})
                 as Map<String, dynamic>;
 
-        expect(response['permissions'], ['app.info.read', 'reader.open']);
+        // הרשאות הבסיס מצטרפות אוטומטית; notes.write שנשללה אינה מופיעה.
+        expect(
+          response['permissions'],
+          withBaselinePermissions(['app.info.read', 'reader.open']),
+        );
       },
     );
+
+    group('app.registerShortcut / unregisterShortcut / updateShortcut', () {
+      const pluginId = 'test.plugin';
+
+      tearDown(() => PluginShortcutRegistry.instance.removeAll(pluginId));
+
+      test('registerShortcut רושם קיצור פקודה ב-registry', () async {
+        final response = await adapter.execute('app', 'registerShortcut', {
+          'id': 'my-command',
+          'label': 'הפעלת פקודה',
+          'key': 'ctrl+alt+c',
+          'command': 'runCommand',
+        });
+
+        expect(response, isTrue);
+        final shortcut = PluginShortcutRegistry.instance.find(
+          pluginId,
+          'my-command',
+        );
+        expect(shortcut, isNotNull);
+        expect(shortcut!.command, 'runCommand');
+        expect(shortcut.key, 'ctrl+alt+c');
+      });
+
+      test('registerShortcut רושם קיצור שקשור לפעולת תפריט ההקשר', () async {
+        await adapter.execute('app', 'registerShortcut', {
+          'id': 'ctx-action',
+          'label': 'פעולת תפריט',
+          'contextMenuItemId': 'menu-item-1',
+        });
+
+        final shortcut = PluginShortcutRegistry.instance.find(
+          pluginId,
+          'ctx-action',
+        );
+        expect(shortcut!.contextMenuItemId, 'menu-item-1');
+      });
+
+      test('updateShortcut משנה את הקיצור', () async {
+        await adapter.execute('app', 'registerShortcut', {
+          'id': 's',
+          'label': 'קיצור',
+          'key': 'ctrl+alt+x',
+          'command': 'x',
+        });
+        await adapter.execute('app', 'updateShortcut', {
+          'id': 's',
+          'patch': {'key': 'ctrl+alt+y'},
+        });
+
+        expect(
+          PluginShortcutRegistry.instance.find(pluginId, 's')!.key,
+          'ctrl+alt+y',
+        );
+      });
+
+      test('unregisterShortcut מסיר את הקיצור', () async {
+        await adapter.execute('app', 'registerShortcut', {
+          'id': 's',
+          'label': 'קיצור',
+          'command': 'x',
+        });
+        await adapter.execute('app', 'unregisterShortcut', {'id': 's'});
+
+        expect(PluginShortcutRegistry.instance.find(pluginId, 's'), isNull);
+      });
+
+      test(
+        'registerShortcut ללא command וללא contextMenuItemId זורק',
+        () async {
+          expect(
+            () => adapter.execute('app', 'registerShortcut', {
+              'id': 'empty',
+              'label': 'ריק',
+            }),
+            throwsA(isA<PluginShortcutException>()),
+          );
+        },
+      );
+    });
 
     group('app.getConnectivity', () {
       late ConnectivityStatusService original;
@@ -1863,10 +2186,7 @@ Future<void> main() async {
       final payload = '$prefix😀${'b' * 10000}';
       final fetchService = PluginNetworkFetchService(
         client: MockClient.streaming((request, bodyStream) async {
-          return http.StreamedResponse(
-            Stream.value(utf8.encode(payload)),
-            200,
-          );
+          return http.StreamedResponse(Stream.value(utf8.encode(payload)), 200);
         }),
       );
       final adapter = buildAdapter(fetchService);
@@ -1905,15 +2225,10 @@ Future<void> main() async {
       );
       final adapter = buildAdapter(fetchService);
 
-      final execution = adapter.execute(
-        'network',
-        'fetchStream',
-        const {
-          'url': 'https://nakdan.dicta.org.il/api',
-          '__streamId': 'network_cancel_1',
-        },
-        eventSink: (topic, payload) async {},
-      );
+      final execution = adapter.execute('network', 'fetchStream', const {
+        'url': 'https://nakdan.dicta.org.il/api',
+        '__streamId': 'network_cancel_1',
+      }, eventSink: (topic, payload) async {});
       await requestStarted.future;
       final cancellation =
           await adapter.execute('network', 'fetchStream', const {
@@ -1940,15 +2255,10 @@ Future<void> main() async {
       );
       final adapter = buildAdapter(fetchService);
 
-      final execution = adapter.execute(
-        'network',
-        'fetchStream',
-        const {
-          'url': 'https://nakdan.dicta.org.il/api',
-          '__streamId': 'network_pending_cancel_1',
-        },
-        eventSink: (topic, payload) async {},
-      );
+      final execution = adapter.execute('network', 'fetchStream', const {
+        'url': 'https://nakdan.dicta.org.il/api',
+        '__streamId': 'network_pending_cancel_1',
+      }, eventSink: (topic, payload) async {});
       await Future<void>.delayed(Duration.zero);
       final cancellation =
           await adapter.execute('network', 'fetchStream', const {
@@ -1974,16 +2284,11 @@ Future<void> main() async {
       final adapter = buildAdapter(fetchService);
 
       await expectLater(
-        adapter.execute(
-          'network',
-          'fetchStream',
-          const {
-            'url': 'https://nakdan.dicta.org.il/api',
-            'timeoutMs': 5,
-            '__streamId': 'network_timeout_1',
-          },
-          eventSink: (topic, payload) async {},
-        ),
+        adapter.execute('network', 'fetchStream', const {
+          'url': 'https://nakdan.dicta.org.il/api',
+          'timeoutMs': 5,
+          '__streamId': 'network_timeout_1',
+        }, eventSink: (topic, payload) async {}),
         throwsA(isA<TimeoutException>()),
       );
       await responseBody.close();
@@ -2099,6 +2404,36 @@ Future<void> main() async {
       });
       expect(del, isTrue);
       expect(file.existsSync(), isFalse);
+    });
+
+    test('ui.pickFolder דוחה תיקייה מוגנת ואינו מעניק הרשאה', () async {
+      final protectedFolder = p.dirname(Platform.resolvedExecutable);
+      final adapter = buildAdapter(
+        pickFolder: ({title}) async => protectedFolder,
+      );
+
+      await expectLater(
+        adapter.execute('ui', 'pickFolder', {}),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('error.forbidden'),
+          ),
+        ),
+      );
+
+      final file = File(p.join(protectedFolder, 'plugin_probe.tmp'));
+      await expectLater(
+        adapter.execute('fs', 'deleteFile', {'path': file.path}),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('forbidden'),
+          ),
+        ),
+      );
     });
 
     test('ביטול ui.pickFolder מחזיר {path:null} ואינו מעניק הרשאה', () async {
@@ -2306,9 +2641,19 @@ Future<void> main() async {
         String? title,
       })
       pickFile,
+      Future<String?> Function({
+        required String suggestedName,
+        List<String>? allowedExtensions,
+        String? title,
+      })?
+      pickSaveLocation,
+      List<String> permissions = const [
+        'fs.user_files.read',
+        'fs.user_files.write',
+      ],
     }) {
       return PluginBridgeAdapter(
-        _buildInstalledPlugin(permissions: const ['fs.user_files.read']),
+        _buildInstalledPlugin(permissions: permissions),
         dependencies: PluginBridgeDependencies(
           historyBloc: _MockHistoryBloc(),
           tabsBloc: _StubTabsBloc(),
@@ -2326,6 +2671,7 @@ Future<void> main() async {
               ({required title, required content, required subtitle}) async =>
                   true,
           pickFile: pickFile,
+          pickSaveLocation: pickSaveLocation,
         ),
         pluginRepository: registry,
         fileServer: fileServer,
@@ -2432,6 +2778,26 @@ Future<void> main() async {
       expect(content, 'תוכן טקסטואלי');
     });
 
+    test('readTextFile קורא גם קובץ ב-ANSI עברית', () async {
+      // הקובץ שהמשתמש בוחר יכול להיות בכל קידוד; `readAsString` היה זורק
+      // עליו והתוסף היה מקבל שגיאה במקום את התוכן.
+      final file = File(p.join(tempDir.path, 'ansi.txt'))
+        ..writeAsBytesSync(const [
+          0xFA, 0xE5, 0xEB, 0xEF, 0x20, // "תוכן " ב-Windows-1255
+          0xE1, 0xF2, 0xE1, 0xF8, 0xE9, 0xFA, // "בעברית"
+        ]);
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => file.path,
+      );
+
+      final picked = await adapter.execute('fs', 'pickUserFile', {}) as Map;
+      final content = await adapter.execute('fs', 'readTextFile', {
+        'token': picked['token'],
+      });
+
+      expect(content, 'תוכן בעברית');
+    });
+
     test('revokeFile מסיר את ה-grant — resolveFileUrl לאחריו נכשל', () async {
       final file = File(p.join(tempDir.path, 'x.txt'))..writeAsStringSync('x');
       final adapter = buildAdapter(
@@ -2458,18 +2824,639 @@ Future<void> main() async {
         ),
       );
     });
+
+    // ======================================================================
+    // כתיבה: beginBinaryWrite -> PUT -> commitUserFileWrite
+    // ======================================================================
+
+    /// שולח את הבייטים ל-uploadUrl, כמו ש-fetch עם body: blob עושה.
+    Future<int> upload(String url, String content) async {
+      final bytes = utf8.encode(content);
+      final request = await client.putUrl(Uri.parse(url));
+      request.headers.contentType = ContentType('application', 'octet-stream');
+      request.contentLength = bytes.length;
+      request.add(bytes);
+      final response = await request.close();
+      await response.drain();
+      return response.statusCode;
+    }
+
+    Map<String, dynamic> grants() =>
+        jsonDecode(registry.kv['_internal/user_file_grants']!)
+            as Map<String, dynamic>;
+
+    test('pickUserFile עם access קריאה-בלבד שומר grant לקריאה', () async {
+      final file = File(p.join(tempDir.path, 'a.docx'))..writeAsStringSync('x');
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => file.path,
+      );
+
+      final res = await adapter.execute('fs', 'pickUserFile', {}) as Map;
+
+      expect(res['access'], 'read');
+      final grant = grants()[res['token']] as Map;
+      expect(grant['access'], 'read');
+    });
+
+    test('pickUserFile עם readwrite שומר grant לכתיבה', () async {
+      final file = File(p.join(tempDir.path, 'a.docx'))..writeAsStringSync('x');
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => file.path,
+      );
+
+      final res =
+          await adapter.execute('fs', 'pickUserFile', {'access': 'readwrite'})
+              as Map;
+
+      expect(res['access'], 'readwrite');
+      expect((grants()[res['token']] as Map)['access'], 'readwrite');
+    });
+
+    test('readwrite בלי הרשאת כתיבה נדחה', () async {
+      registry.permissionGrant = null;
+      registry.permissionGrants = {
+        'fs.user_files.read': true,
+        'fs.user_files.write': false,
+      };
+      final file = File(p.join(tempDir.path, 'a.docx'))..writeAsStringSync('x');
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => file.path,
+      );
+
+      await expectLater(
+        adapter.execute('fs', 'pickUserFile', {'access': 'readwrite'}),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('permission_denied'),
+          ),
+        ),
+      );
+    });
+
+    test('access לא חוקי נדחה', () async {
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => null,
+      );
+
+      await expectLater(
+        adapter.execute('fs', 'pickUserFile', {'access': 'append'}),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('invalid_params'),
+          ),
+        ),
+      );
+    });
+
+    test('„שמור בשם”: העלאה נכתבת לקובץ חדש ומחזירה token לכתיבה', () async {
+      final target = p.join(tempDir.path, 'חידושים.docx');
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => null,
+        pickSaveLocation:
+            ({required suggestedName, allowedExtensions, title}) async {
+              expect(suggestedName, 'חידושים.docx');
+              expect(allowedExtensions, ['docx']);
+              return target;
+            },
+      );
+
+      final ticket =
+          await adapter.execute('fs', 'beginBinaryWrite', {
+                'purpose': 'user-file',
+                'expectedSize': 5,
+              })
+              as Map;
+      expect(ticket['maxBytes'], isA<int>());
+      expect(await upload(ticket['uploadUrl'] as String, 'DOCX1'), 204);
+
+      final res =
+          await adapter.execute('fs', 'commitUserFileWrite', {
+                'writeToken': ticket['writeToken'],
+                'suggestedName': 'חידושים',
+                'extension': 'docx',
+              })
+              as Map;
+
+      expect(res['cancelled'], isFalse);
+      expect(res['name'], 'חידושים.docx');
+      expect(res['size'], 5);
+      expect(File(target).readAsStringSync(), 'DOCX1');
+      // ה-token שחוזר ניתן לכתיבה, וגם משמש לקריאה.
+      expect((grants()[res['token']] as Map)['access'], 'readwrite');
+      final resolved =
+          await adapter.execute('fs', 'resolveFileUrl', {'token': res['token']})
+              as Map;
+      expect(await fetch(resolved['url'] as String), 'DOCX1');
+      // ה-session שוחרר וה-temp נמחק. בלי האסרשן הזאת שמירה מוצלחת יכולה
+      // להדליף העלאה שנשארת committing לנצח — ואחרי שתיים התוסף חוסם את עצמו.
+      expect(fileServer.activeUploadsFor('test.plugin'), 0);
+      expect(
+        File(
+          '${Directory.systemTemp.path}/otzaria_plugin_uploads/'
+          '${ticket['writeToken']}.part',
+        ).existsSync(),
+        isFalse,
+      );
+      // אין שאריות staging בתיקייה.
+      expect(
+        Directory(
+          tempDir.path,
+        ).listSync().where((e) => e.path.endsWith('.otztmp')).toList(),
+        isEmpty,
+      );
+    });
+
+    test('„שמור”: כתיבה חוזרת ל-token דורסת את הקובץ בלי דיאלוג', () async {
+      final file = File(p.join(tempDir.path, 'a.docx'))
+        ..writeAsStringSync('גרסה ראשונה');
+      var saveDialogOpened = false;
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => file.path,
+        pickSaveLocation:
+            ({required suggestedName, allowedExtensions, title}) async {
+              saveDialogOpened = true;
+              return null;
+            },
+      );
+
+      final picked =
+          await adapter.execute('fs', 'pickUserFile', {'access': 'readwrite'})
+              as Map;
+      final ticket = await adapter.execute('fs', 'beginBinaryWrite', {}) as Map;
+      await upload(ticket['uploadUrl'] as String, 'גרסה שנייה');
+
+      final res =
+          await adapter.execute('fs', 'commitUserFileWrite', {
+                'writeToken': ticket['writeToken'],
+                'targetToken': picked['token'],
+              })
+              as Map;
+
+      expect(res['cancelled'], isFalse);
+      expect(res['token'], picked['token']);
+      expect(file.readAsStringSync(), 'גרסה שנייה');
+      expect(saveDialogOpened, isFalse);
+      expect(fileServer.activeUploadsFor('test.plugin'), 0);
+      expect(
+        File(
+          '${Directory.systemTemp.path}/otzaria_plugin_uploads/'
+          '${ticket['writeToken']}.part',
+        ).existsSync(),
+        isFalse,
+      );
+    });
+
+    test('token לקריאה בלבד אינו יעד כתיבה, והקובץ אינו נוגע', () async {
+      final file = File(p.join(tempDir.path, 'a.docx'))
+        ..writeAsStringSync('מקורי');
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => file.path,
+      );
+
+      final picked = await adapter.execute('fs', 'pickUserFile', {}) as Map;
+      final ticket = await adapter.execute('fs', 'beginBinaryWrite', {}) as Map;
+      await upload(ticket['uploadUrl'] as String, 'דריסה');
+
+      await expectLater(
+        adapter.execute('fs', 'commitUserFileWrite', {
+          'writeToken': ticket['writeToken'],
+          'targetToken': picked['token'],
+        }),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('permission_denied'),
+          ),
+        ),
+      );
+      expect(file.readAsStringSync(), 'מקורי');
+    });
+
+    test('grant בפורמט הישן נקרא כקריאה בלבד', () async {
+      final file = File(p.join(tempDir.path, 'legacy.docx'))
+        ..writeAsStringSync('מקורי');
+      // הפורמט שלפני הכתיבה: token -> path כמחרוזת.
+      registry.kv['_internal/user_file_grants'] = jsonEncode({
+        'legacytoken': file.path,
+      });
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => null,
+      );
+
+      // קריאה ממשיכה לעבוד.
+      final resolved =
+          await adapter.execute('fs', 'resolveFileUrl', {
+                'token': 'legacytoken',
+              })
+              as Map;
+      expect(await fetch(resolved['url'] as String), 'מקורי');
+
+      // כתיבה אליו נדחית, כי grant ישן אינו יכול להיות readwrite.
+      final ticket = await adapter.execute('fs', 'beginBinaryWrite', {}) as Map;
+      await upload(ticket['uploadUrl'] as String, 'דריסה');
+      await expectLater(
+        adapter.execute('fs', 'commitUserFileWrite', {
+          'writeToken': ticket['writeToken'],
+          'targetToken': 'legacytoken',
+        }),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('permission_denied'),
+          ),
+        ),
+      );
+      expect(file.readAsStringSync(), 'מקורי');
+    });
+
+    test('ביטול „שמור בשם” אינו כותב קובץ ואינו יוצר grant', () async {
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => null,
+        pickSaveLocation:
+            ({required suggestedName, allowedExtensions, title}) async => null,
+      );
+
+      final ticket = await adapter.execute('fs', 'beginBinaryWrite', {}) as Map;
+      await upload(ticket['uploadUrl'] as String, 'DOCX');
+
+      final res =
+          await adapter.execute('fs', 'commitUserFileWrite', {
+                'writeToken': ticket['writeToken'],
+                'suggestedName': 'מסמך',
+                'extension': 'docx',
+              })
+              as Map;
+
+      expect(res['cancelled'], isTrue);
+      expect(registry.kv['_internal/user_file_grants'], isNull);
+      expect(
+        Directory(tempDir.path).listSync().map((e) => p.basename(e.path)),
+        isNot(contains('מסמך.docx')),
+      );
+    });
+
+    test('abortBinaryWrite משחרר את ההעלאה ואת המכסה מיד', () async {
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => null,
+      );
+
+      final ticket = await adapter.execute('fs', 'beginBinaryWrite', {}) as Map;
+      await upload(ticket['uploadUrl'] as String, 'DOCX');
+      final temp = File(
+        '${Directory.systemTemp.path}/otzaria_plugin_uploads/'
+        '${ticket['writeToken']}.part',
+      );
+      expect(temp.existsSync(), isTrue);
+      expect(fileServer.activeUploadsFor('test.plugin'), 1);
+
+      final aborted = await adapter.execute('fs', 'abortBinaryWrite', {
+        'writeToken': ticket['writeToken'],
+      });
+
+      expect(aborted, isTrue);
+      expect(temp.existsSync(), isFalse);
+      expect(fileServer.activeUploadsFor('test.plugin'), 0);
+      // ואחריו commit על אותו token נדחה — אין מה לכתוב.
+      await expectLater(
+        adapter.execute('fs', 'commitUserFileWrite', {
+          'writeToken': ticket['writeToken'],
+        }),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('not_found'),
+          ),
+        ),
+      );
+    });
+
+    test('abortBinaryWrite בלי writeToken נדחה', () async {
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => null,
+      );
+
+      await expectLater(
+        adapter.execute('fs', 'abortBinaryWrite', const <String, dynamic>{}),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('invalid_params'),
+          ),
+        ),
+      );
+    });
+
+    test('commit על writeToken לא מוכר נדחה', () async {
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => null,
+      );
+
+      await expectLater(
+        adapter.execute('fs', 'commitUserFileWrite', {
+          'writeToken': 'nosuchtoken',
+        }),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('not_found'),
+          ),
+        ),
+      );
+    });
+
+    test('commit שני על אותה העלאה נדחה', () async {
+      final target = p.join(tempDir.path, 'once.docx');
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => null,
+        pickSaveLocation:
+            ({required suggestedName, allowedExtensions, title}) async =>
+                target,
+      );
+
+      final ticket = await adapter.execute('fs', 'beginBinaryWrite', {}) as Map;
+      await upload(ticket['uploadUrl'] as String, 'DOCX');
+      await adapter.execute('fs', 'commitUserFileWrite', {
+        'writeToken': ticket['writeToken'],
+      });
+
+      await expectLater(
+        adapter.execute('fs', 'commitUserFileWrite', {
+          'writeToken': ticket['writeToken'],
+        }),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('not_found'),
+          ),
+        ),
+      );
+    });
+
+    test('commit לפני שההעלאה הושלמה נדחה', () async {
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => null,
+      );
+
+      final ticket = await adapter.execute('fs', 'beginBinaryWrite', {}) as Map;
+
+      await expectLater(
+        adapter.execute('fs', 'commitUserFileWrite', {
+          'writeToken': ticket['writeToken'],
+        }),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('not_found'),
+          ),
+        ),
+      );
+    });
+
+    test('purpose שאינו user-file נדחה', () async {
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => null,
+      );
+
+      await expectLater(
+        adapter.execute('fs', 'beginBinaryWrite', {'purpose': 'plugin-file'}),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('unsupported'),
+          ),
+        ),
+      );
+    });
+
+    test(
+      'כשל באמצע הכתיבה אינו פוגע בקובץ הקיים',
+      () async {
+        final file = File(p.join(tempDir.path, 'protected.docx'))
+          ..writeAsStringSync('הגרסה שאסור לאבד');
+        final adapter = buildAdapter(
+          pickFile: ({allowedExtensions, title}) async => file.path,
+        );
+        final picked =
+            await adapter.execute('fs', 'pickUserFile', {'access': 'readwrite'})
+                as Map;
+        final ticket =
+            await adapter.execute('fs', 'beginBinaryWrite', {}) as Map;
+        await upload(ticket['uploadUrl'] as String, 'גרסה חדשה');
+
+        // תיקייה לקריאה בלבד: ה-staging אינו יכול להיווצר, ולכן הכתיבה נכשלת
+        // בדיוק בשלב שבו הקובץ המקורי עוד שלם.
+        final dir = Directory(tempDir.path);
+        // ההרשאה משוחזרת לערך קבוע ולא לזו שנקראה מהדיסק: `stat -f '%Lp'` הוא
+        // תחביר BSD, וב-Linux הדגל `-f` מדפיס מידע על מערכת הקבצים ולא על
+        // הקובץ. שם ה-chmod המשחזר קיבל זבל, התיקייה נשארה 555, ומחיקת תיקיית
+        // ה-temp ב-tearDown נכשלה ב-EACCES — הבדיקה עברה במקומי ונפלה ב-CI.
+        // 700 הוא ההרשאה שתיקיית temp מקבלת מ-createTemp בלאו הכי.
+        const restoreMode = '700';
+        Process.runSync('chmod', ['555', dir.path]);
+        addTearDown(() => Process.runSync('chmod', [restoreMode, dir.path]));
+
+        await expectLater(
+          adapter.execute('fs', 'commitUserFileWrite', {
+            'writeToken': ticket['writeToken'],
+            'targetToken': picked['token'],
+          }),
+          throwsA(isA<Exception>()),
+        );
+
+        Process.runSync('chmod', [restoreMode, dir.path]);
+        expect(file.readAsStringSync(), 'הגרסה שאסור לאבד');
+        expect(
+          Directory(
+            tempDir.path,
+          ).listSync().where((e) => e.path.endsWith('.otztmp')).toList(),
+          isEmpty,
+        );
+      },
+      skip: Platform.isWindows ? 'chmod אינו זמין ב-Windows' : null,
+    );
+
+    test('אין מסלול שכותב ישירות על קובץ היעד', () {
+      // בדיקת מקור ולא בדיקת התנהגות, בכוונה: כדי לתפוס fallback של copy
+      // צריך מצב שבו rename נכשל ו-copy מצליח, ואת זה אי אפשר לביים מקומית
+      // (rename באותה תיקייה נכשל רק כשגם copy ייכשל). מה שכן אפשר לקבע הוא
+      // שהמסלול הזה לא קיים בקוד — וזאת הדרישה: כשל rename נכשל, ולא מתדרדר
+      // להעתקה לא אטומית על מסמך של המשתמש.
+      final source = File(
+        'lib/plugins/bridge/plugin_bridge_adapter.dart',
+      ).readAsStringSync();
+      final atomicWrite = source.substring(
+        source.indexOf('Future<void> _atomicWrite('),
+        source.indexOf('static const String _stagingExt'),
+      );
+
+      // קיבוע חיובי ולא רשימת איסורים: כל שורה שנוגעת ביעד מפורטת כאן, ולכן
+      // כל דרך חדשה לכתוב אליו — copy, writeAsBytes, openWrite — מפילה את
+      // הבדיקה. רשימת שלילות הייתה מפספסת בדיוק את הצורה שלא חשבנו עליה.
+      final targetLines = atomicWrite
+          .split('\n')
+          .map((line) => line.trim())
+          .where(
+            (line) =>
+                !line.startsWith('//') &&
+                !line.startsWith('///') &&
+                (line.contains('targetPath') || line.contains('target.')),
+          )
+          .toList();
+
+      expect(targetLines, [
+        'Future<void> _atomicWrite(File source, String targetPath) async {',
+        'final target = File(targetPath);',
+        'target.parent.path,',
+        "'.\${p.basename(targetPath)}.\$suffix\$_stagingExt',",
+        'await _sweepStagingLeftovers(target.parent);',
+        'await staging.rename(targetPath);',
+      ]);
+    });
+
+    test('כשל בהחלפת היעד אינו הורס אותו', () async {
+      // יעד שהוא תיקייה: ה-copy ל-staging מצליח וה-rename נכשל. זה בדיוק
+      // המסלול שבו fallback של copy היה כותב ישירות על היעד — כלומר על מסמך
+      // של המשתמש, בלי אטומיות.
+      final targetDir = Directory(p.join(tempDir.path, 'target-as-dir'))
+        ..createSync();
+      final marker = File(p.join(targetDir.path, 'inside.txt'))
+        ..writeAsStringSync('התוכן שאסור לאבד');
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => null,
+        pickSaveLocation:
+            ({required suggestedName, allowedExtensions, title}) async =>
+                targetDir.path,
+      );
+
+      final ticket = await adapter.execute('fs', 'beginBinaryWrite', {}) as Map;
+      await upload(ticket['uploadUrl'] as String, 'DOCX');
+
+      await expectLater(
+        adapter.execute('fs', 'commitUserFileWrite', {
+          'writeToken': ticket['writeToken'],
+        }),
+        throwsA(isA<Exception>()),
+      );
+
+      // היעד לא נדרס, מה שבתוכו שלם, ואין שאריות staging.
+      expect(targetDir.existsSync(), isTrue);
+      expect(marker.readAsStringSync(), 'התוכן שאסור לאבד');
+      expect(
+        Directory(
+          tempDir.path,
+        ).listSync().where((e) => e.path.endsWith('.otztmp')).toList(),
+        isEmpty,
+      );
+    });
+
+    test('ביטול „שמור בשם” מוחק את קובץ ההעלאה', () async {
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => null,
+        pickSaveLocation:
+            ({required suggestedName, allowedExtensions, title}) async => null,
+      );
+
+      final ticket = await adapter.execute('fs', 'beginBinaryWrite', {}) as Map;
+      await upload(ticket['uploadUrl'] as String, 'DOCX');
+      final temp = File(
+        '${Directory.systemTemp.path}/otzaria_plugin_uploads/'
+        '${ticket['writeToken']}.part',
+      );
+      expect(temp.existsSync(), isTrue);
+
+      await adapter.execute('fs', 'commitUserFileWrite', {
+        'writeToken': ticket['writeToken'],
+      });
+
+      // ה-session נסגר ב-finally, ולכן ה-temp אינו נשאר יתום.
+      expect(temp.existsSync(), isFalse);
+      expect(fileServer.activeUploadsFor('test.plugin'), 0);
+    });
+
+    test('extension עם מפרידי נתיב אינו מגיע לדיאלוג', () async {
+      String? seenName;
+      List<String>? seenExtensions;
+      final target = p.join(tempDir.path, 'clean.docx');
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => null,
+        pickSaveLocation:
+            ({required suggestedName, allowedExtensions, title}) async {
+              seenName = suggestedName;
+              seenExtensions = allowedExtensions;
+              return target;
+            },
+      );
+
+      final ticket = await adapter.execute('fs', 'beginBinaryWrite', {}) as Map;
+      await upload(ticket['uploadUrl'] as String, 'DOCX');
+      await adapter.execute('fs', 'commitUserFileWrite', {
+        'writeToken': ticket['writeToken'],
+        'suggestedName': 'מסמך',
+        'extension': '../../Windows/System32/x',
+      });
+
+      // סיומת לא חוקית נזרקת לגמרי; אין מפרידי נתיב בשם ואין בסינון.
+      expect(seenName, 'מסמך');
+      expect(seenExtensions, isNull);
+    });
+
+    test('כתיבה ליעד שנמחק נדחית ומנקה את ה-grant', () async {
+      final file = File(p.join(tempDir.path, 'gone.docx'))
+        ..writeAsStringSync('x');
+      final adapter = buildAdapter(
+        pickFile: ({allowedExtensions, title}) async => file.path,
+      );
+
+      final picked =
+          await adapter.execute('fs', 'pickUserFile', {'access': 'readwrite'})
+              as Map;
+      file.deleteSync();
+
+      final ticket = await adapter.execute('fs', 'beginBinaryWrite', {}) as Map;
+      await upload(ticket['uploadUrl'] as String, 'DOCX');
+
+      await expectLater(
+        adapter.execute('fs', 'commitUserFileWrite', {
+          'writeToken': ticket['writeToken'],
+          'targetToken': picked['token'],
+        }),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('not_found'),
+          ),
+        ),
+      );
+      expect(grants(), isNot(contains(picked['token'])));
+    });
   });
 
   group('PluginBridgeAdapter plugin.openSelf + context menu openPlugin', () {
     late PluginBridgeAdapter adapter;
 
+    late _StubPluginRegistryRepository registry;
+
     setUp(() {
+      registry = _StubPluginRegistryRepository();
       adapter = PluginBridgeAdapter(
         _buildInstalledPlugin(
           permissions: const ['navigation.write', 'reader.context_menu'],
         ),
         dependencies: _buildNetworkDeps(),
-        pluginRepository: _StubPluginRegistryRepository(),
+        pluginRepository: registry,
       );
     });
 
@@ -2488,6 +3475,67 @@ Future<void> main() async {
 
       expect(result, isTrue);
       expect(navigations, ['test.plugin']);
+    });
+
+    test('plugin.openOther מנווט לתוסף היעד ומוסר לו openedBy', () async {
+      registry.installed = [_buildInstalledPlugin(pluginId: 'other.plugin')];
+      final navigations = <String>[];
+      PluginPageLauncher.instance.navigator = navigations.add;
+      final dispatcher = PluginRuntimeDispatcher.instance;
+      final controller = _RecordingWebViewController();
+      dispatcher.repositoryForTesting = _EnabledRegistryRepo();
+      dispatcher.registerController('other.plugin', controller);
+      addTearDown(() {
+        PluginPageLauncher.instance.markPageClosed('other.plugin');
+        dispatcher.unregisterController('other.plugin');
+        dispatcher.repositoryForTesting = PluginRegistryRepository();
+      });
+
+      final result = await adapter.execute('plugin', 'openOther', {
+        'pluginId': 'other.plugin',
+        'param': 'x',
+      });
+      PluginPageLauncher.instance.markPageReady('other.plugin');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(result, isTrue);
+      expect(navigations, ['other.plugin']);
+      expect(controller.jsCalls.single, contains('plugin.page_opened'));
+      expect(controller.jsCalls.single, contains('"openedBy":"test.plugin"'));
+    });
+
+    test(
+      'plugin.openOther על תוסף שאינו מותקן → not_found, בלי ניווט',
+      () async {
+        registry.installed = [_buildInstalledPlugin(pluginId: 'other.plugin')];
+        final navigations = <String>[];
+        PluginPageLauncher.instance.navigator = navigations.add;
+
+        await expectLater(
+          adapter.execute('plugin', 'openOther', {'pluginId': 'ghost.plugin'}),
+          throwsA(
+            isA<Exception>().having(
+              (e) => e.toString(),
+              'message',
+              contains('not_found'),
+            ),
+          ),
+        );
+        expect(navigations, isEmpty);
+      },
+    );
+
+    test('plugin.openOther ללא pluginId → invalid_params', () async {
+      await expectLater(
+        adapter.execute('plugin', 'openOther', <String, dynamic>{}),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('invalid_params'),
+          ),
+        ),
+      );
     });
 
     test('addContextMenuItem שומר openPlugin ו-param ב-registry', () async {
@@ -2515,6 +3563,32 @@ Future<void> main() async {
       expect(item.openPlugin, isFalse);
       expect(item.param, isNull);
     });
+
+    test(
+      'updateContextMenuItem עם when על storage רושם את המפתח למעקב',
+      () async {
+        addTearDown(
+          () => PluginConditionEvaluator.instance.removePlugin('test.plugin'),
+        );
+        registry.kv['default/flag'] = '"on"';
+
+        await adapter.execute('reader', 'addContextMenuItem', {
+          'id': 'item-3',
+          'label': 'מותנה',
+        });
+        await adapter.execute('reader', 'updateContextMenuItem', {
+          'id': 'item-3',
+          'patch': {
+            'when': {
+              'storage': {'key': 'flag', 'equals': 'on'},
+            },
+          },
+        });
+
+        // בלי רישום המפתח, הערך הקיים ב-KV לא נטען והפריט היה מוסתר לצמיתות.
+        expect(ContextMenuRegistry.instance.getAll(), hasLength(1));
+      },
+    );
   });
 
   group('PluginBridgeAdapter — reader.addToolbarItem', () {
@@ -2566,6 +3640,34 @@ Future<void> main() async {
 
       await adapter.execute('reader', 'removeToolbarItem', {'id': 'mark'});
       expect(PluginToolbarRegistry.instance.getAll(), isEmpty);
+    });
+
+    test('updateToolbarItem עם when על storage רושם את המפתח למעקב', () async {
+      addTearDown(
+        () => PluginConditionEvaluator.instance.removePlugin('test.plugin'),
+      );
+      final repo = _StubPluginRegistryRepository()..kv['default/flag'] = '"on"';
+      final conditionedAdapter = PluginBridgeAdapter(
+        _buildInstalledPlugin(permissions: const ['reader.toolbar']),
+        dependencies: _buildNetworkDeps(),
+        pluginRepository: repo,
+      );
+
+      await conditionedAdapter.execute('reader', 'addToolbarItem', {
+        'id': 'mark',
+        'title': 'סמן',
+        'icon': 'bookmark_24_regular',
+      });
+      await conditionedAdapter.execute('reader', 'updateToolbarItem', {
+        'id': 'mark',
+        'patch': {
+          'when': {
+            'storage': {'key': 'flag', 'equals': 'on'},
+          },
+        },
+      });
+
+      expect(PluginToolbarRegistry.instance.getAll(), hasLength(1));
     });
   });
 
@@ -2709,6 +3811,7 @@ Future<void> main() async {
           'id': 10,
           'type': 'text',
           'bookId': 'בראשית',
+          'bookUid': 'id:10',
           'source': 'library',
           'title': 'בראשית',
           'count': 812,
@@ -2731,10 +3834,7 @@ Future<void> main() async {
         await adapter.execute(
           'search',
           'query',
-          {
-            'query': 'בראשית',
-            '__streamId': 'test_search_2',
-          },
+          {'query': 'בראשית', '__streamId': 'test_search_2'},
           eventSink: (topic, payload) async {
             chunks.add(payload['chunk'] as Map<String, dynamic>);
           },
@@ -2880,18 +3980,10 @@ Future<void> main() async {
     // --- library.getBookMetadata ---
 
     test('library.getBookMetadata תומך בחיפוש לפי id בלבד', () async {
-      final adapter = buildAdapter(
-        books: [
-          TextBook(id: 42, title: 'שמות'),
-        ],
-      );
+      final adapter = buildAdapter(books: [TextBook(id: 42, title: 'שמות')]);
 
       final result =
-          await adapter.execute(
-                'library',
-                'getBookMetadata',
-                {'id': 42},
-              )
+          await adapter.execute('library', 'getBookMetadata', {'id': 42})
               as Map;
 
       expect(result['bookId'], 'שמות');
@@ -2900,49 +3992,34 @@ Future<void> main() async {
     });
 
     test('library.getBookMetadata: id נכון + שם שגוי → null', () async {
-      final adapter = buildAdapter(
-        books: [
-          TextBook(id: 42, title: 'שמות'),
-        ],
-      );
+      final adapter = buildAdapter(books: [TextBook(id: 42, title: 'שמות')]);
 
-      final result = await adapter.execute(
-        'library',
-        'getBookMetadata',
-        {'id': 42, 'bookId': 'שם_שגוי'},
-      );
+      final result = await adapter.execute('library', 'getBookMetadata', {
+        'id': 42,
+        'bookId': 'שם_שגוי',
+      });
 
       expect(result, isNull);
     });
 
     test('library.getBookMetadata: שם נכון + id שגוי → null', () async {
-      final adapter = buildAdapter(
-        books: [
-          TextBook(id: 42, title: 'שמות'),
-        ],
-      );
+      final adapter = buildAdapter(books: [TextBook(id: 42, title: 'שמות')]);
 
-      final result = await adapter.execute(
-        'library',
-        'getBookMetadata',
-        {'bookId': 'שמות', 'id': 99},
-      );
+      final result = await adapter.execute('library', 'getBookMetadata', {
+        'bookId': 'שמות',
+        'id': 99,
+      });
 
       expect(result, isNull);
     });
 
     test('library.getBookMetadata: type שגוי → null', () async {
-      final adapter = buildAdapter(
-        books: [
-          TextBook(id: 42, title: 'שמות'),
-        ],
-      );
+      final adapter = buildAdapter(books: [TextBook(id: 42, title: 'שמות')]);
 
-      final result = await adapter.execute(
-        'library',
-        'getBookMetadata',
-        {'bookId': 'שמות', 'type': 'pdf'},
-      );
+      final result = await adapter.execute('library', 'getBookMetadata', {
+        'bookId': 'שמות',
+        'type': 'pdf',
+      });
 
       expect(result, isNull);
     });
@@ -2950,18 +4027,12 @@ Future<void> main() async {
     test(
       'library.getBookMetadata: קריאה ישנה עם bookId בלבד ממשיכה לעבוד',
       () async {
-        final adapter = buildAdapter(
-          books: [
-            TextBook(id: 42, title: 'שמות'),
-          ],
-        );
+        final adapter = buildAdapter(books: [TextBook(id: 42, title: 'שמות')]);
 
         final result =
-            await adapter.execute(
-                  'library',
-                  'getBookMetadata',
-                  {'bookId': 'שמות'},
-                )
+            await adapter.execute('library', 'getBookMetadata', {
+                  'bookId': 'שמות',
+                })
                 as Map;
 
         expect(result['bookId'], 'שמות');
@@ -2971,13 +4042,7 @@ Future<void> main() async {
 
     test('library.resolveBooks פותר זהויות באצווה ומחזיר קטגוריה', () async {
       final adapter = buildAdapter(
-        books: [
-          TextBook(
-            id: 42,
-            title: 'שמות',
-            categoryPath: 'תנך, תורה',
-          ),
-        ],
+        books: [TextBook(id: 42, title: 'שמות', categoryPath: 'תנך, תורה')],
       );
 
       final result =
@@ -2999,11 +4064,10 @@ Future<void> main() async {
       final book = TextBook(id: 5, title: 'ויקרא');
       final adapter = buildAdapter(books: [book]);
 
-      final result = await adapter.execute(
-        'reader',
-        'openBook',
-        {'id': 5, 'index': 0},
-      );
+      final result = await adapter.execute('reader', 'openBook', {
+        'id': 5,
+        'index': 0,
+      });
 
       expect(result, isTrue);
       verify(
@@ -3015,11 +4079,10 @@ Future<void> main() async {
       final book = TextBook(id: 5, title: 'ויקרא');
       final adapter = buildAdapter(books: [book]);
 
-      final result = await adapter.execute(
-        'reader',
-        'openBook',
-        {'id': 5, 'bookId': 'שם_שגוי'},
-      );
+      final result = await adapter.execute('reader', 'openBook', {
+        'id': 5,
+        'bookId': 'שם_שגוי',
+      });
 
       expect(result, isFalse);
       verifyZeroInteractions(mockCoordinator);
@@ -3029,11 +4092,10 @@ Future<void> main() async {
       final book = TextBook(id: 5, title: 'ויקרא');
       final adapter = buildAdapter(books: [book]);
 
-      final result = await adapter.execute(
-        'reader',
-        'openBook',
-        {'bookId': 'ויקרא', 'id': 999},
-      );
+      final result = await adapter.execute('reader', 'openBook', {
+        'bookId': 'ויקרא',
+        'id': 999,
+      });
 
       expect(result, isFalse);
       verifyZeroInteractions(mockCoordinator);
@@ -3043,11 +4105,10 @@ Future<void> main() async {
       final book = TextBook(id: 5, title: 'ויקרא');
       final adapter = buildAdapter(books: [book]);
 
-      final result = await adapter.execute(
-        'reader',
-        'openBook',
-        {'bookId': 'ויקרא', 'type': 'pdf'},
-      );
+      final result = await adapter.execute('reader', 'openBook', {
+        'bookId': 'ויקרא',
+        'type': 'pdf',
+      });
 
       expect(result, isFalse);
       verifyZeroInteractions(mockCoordinator);
@@ -3057,11 +4118,9 @@ Future<void> main() async {
       final book = TextBook(id: 5, title: 'ויקרא');
       final adapter = buildAdapter(books: [book]);
 
-      final result = await adapter.execute(
-        'reader',
-        'openBook',
-        {'bookId': 'ויקרא'},
-      );
+      final result = await adapter.execute('reader', 'openBook', {
+        'bookId': 'ויקרא',
+      });
 
       expect(result, isTrue);
       verify(
@@ -3073,11 +4132,11 @@ Future<void> main() async {
       final book = TextBook(id: 5, title: 'ויקרא');
       final adapter = buildAdapter(books: [book]);
 
-      final result = await adapter.execute(
-        'reader',
-        'openBook',
-        {'id': 5, 'bookId': 'ויקרא', 'type': 'text'},
-      );
+      final result = await adapter.execute('reader', 'openBook', {
+        'id': 5,
+        'bookId': 'ויקרא',
+        'type': 'text',
+      });
 
       expect(result, isTrue);
       verify(
@@ -3129,11 +4188,7 @@ Future<void> main() async {
         pageNumber: 10,
       )..currentTitle.value = 'עמוד 10';
 
-      final adapter = buildAdapter(
-        books: [],
-        tabs: [tab],
-        currentTabIndex: 0,
-      );
+      final adapter = buildAdapter(books: [], tabs: [tab], currentTabIndex: 0);
 
       final result =
           await adapter.execute('reader', 'getCurrentRef', {})
@@ -3174,21 +4229,19 @@ Future<void> main() async {
         final adapter = buildAdapter(books: [text, pdf]);
 
         final resultPdf =
-            await adapter.execute(
-                  'library',
-                  'getBookMetadata',
-                  {'bookId': 'ספר', 'type': 'pdf'},
-                )
+            await adapter.execute('library', 'getBookMetadata', {
+                  'bookId': 'ספר',
+                  'type': 'pdf',
+                })
                 as Map;
         expect(resultPdf['id'], 2);
         expect(resultPdf['type'], 'pdf');
 
         final resultText =
-            await adapter.execute(
-                  'library',
-                  'getBookMetadata',
-                  {'bookId': 'ספר', 'type': 'text'},
-                )
+            await adapter.execute('library', 'getBookMetadata', {
+                  'bookId': 'ספר',
+                  'type': 'text',
+                })
                 as Map;
         expect(resultText['id'], 1);
         expect(resultText['type'], 'text');
@@ -3208,22 +4261,10 @@ Future<void> main() async {
 
       final results = await adapter.execute('library', 'findBooks', {}) as List;
 
-      expect(
-        results.firstWhere((r) => r['bookId'] == 'טקסט')['type'],
-        'text',
-      );
-      expect(
-        results.firstWhere((r) => r['bookId'] == 'PDF')['type'],
-        'pdf',
-      );
-      expect(
-        results.firstWhere((r) => r['bookId'] == 'Docx')['type'],
-        'docx',
-      );
-      expect(
-        results.firstWhere((r) => r['bookId'] == 'Epub')['type'],
-        'epub',
-      );
+      expect(results.firstWhere((r) => r['bookId'] == 'טקסט')['type'], 'text');
+      expect(results.firstWhere((r) => r['bookId'] == 'PDF')['type'], 'pdf');
+      expect(results.firstWhere((r) => r['bookId'] == 'Docx')['type'], 'docx');
+      expect(results.firstWhere((r) => r['bookId'] == 'Epub')['type'], 'epub');
       expect(
         results.firstWhere((r) => r['bookId'] == 'External')['type'],
         'external',
@@ -3267,6 +4308,689 @@ Future<void> main() async {
         'index': 1,
       };
       expect(pdfResult['type'], 'pdf');
+    });
+  });
+
+  group('PluginBridgeAdapter feedback.report', () {
+    PluginBridgeDependencies buildDeps({
+      required Future<bool> Function(String title, String content) onConfirm,
+    }) {
+      return PluginBridgeDependencies(
+        historyBloc: _MockHistoryBloc(),
+        tabsBloc: _StubTabsBloc(),
+        navigationBloc: _MockNavigationBloc(),
+        calendarCubit: _StubCalendarCubit(
+          _buildCalendarState(DateTime(2026, 1, 1), inIsrael: true),
+        ),
+        workspaceBloc: _MockWorkspaceBloc(),
+        searchRepository: _MockSearchRepository(),
+        personalNotesRepository: _MockPersonalNotesRepository(),
+        bookOpenCoordinator: _MockBookOpenCoordinator(),
+        themePayloadBuilder: () => <String, dynamic>{},
+        showConfirmDialog: ({required title, required content}) =>
+            onConfirm(title, content),
+        showWarningDialog:
+            ({required title, required content, required subtitle}) async =>
+                true,
+      );
+    }
+
+    PluginBridgeAdapter buildAdapter({
+      required Future<bool> Function(String title, String content) onConfirm,
+      required http.Client client,
+      _InMemoryPluginReportQueue? queue,
+    }) {
+      return PluginBridgeAdapter(
+        _buildInstalledPlugin(),
+        dependencies: buildDeps(onConfirm: onConfirm),
+        pluginRepository: _StubPluginRegistryRepository(),
+        reportService: PluginReportService(
+          client: client,
+          queueRepository: queue ?? _InMemoryPluginReportQueue(),
+          sentRepository: _InMemoryPluginReportQueue(),
+        ),
+      );
+    }
+
+    setUp(() async {
+      await Settings.setValue<String>(
+        SettingsRepository.keyErrorReportSenderEmail,
+        '',
+      );
+    });
+
+    test('details חסר → שגיאה, ואין דיאלוג ואין שליחה', () async {
+      var confirmCalls = 0;
+      var posted = false;
+      final adapter = buildAdapter(
+        onConfirm: (_, _) async {
+          confirmCalls++;
+          return true;
+        },
+        client: MockClient((_) async {
+          posted = true;
+          return http.Response('{}', 200);
+        }),
+      );
+
+      await expectLater(
+        adapter.execute('feedback', 'report', {'details': '   '}),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('details required'),
+          ),
+        ),
+      );
+      expect(confirmCalls, 0);
+      expect(posted, isFalse);
+    });
+
+    test('ביטול בדיאלוג → cancelled ואין שליחה', () async {
+      var posted = false;
+      final adapter = buildAdapter(
+        onConfirm: (_, _) async => false,
+        client: MockClient((_) async {
+          posted = true;
+          return http.Response('{}', 200);
+        }),
+      );
+
+      final result = await adapter.execute('feedback', 'report', {
+        'details': 'התוסף קורס',
+      });
+
+      expect(result, 'cancelled');
+      expect(posted, isFalse);
+    });
+
+    test('אישור → POST עם שדות התוסף, סוג לא מוכר הופך ל-other', () async {
+      String? dialogTitle;
+      String? dialogContent;
+      late Map<String, dynamic> body;
+      final adapter = buildAdapter(
+        onConfirm: (title, content) async {
+          dialogTitle = title;
+          dialogContent = content;
+          return true;
+        },
+        client: MockClient((request) async {
+          body = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response('{"success":true}', 200);
+        }),
+      );
+
+      final result = await adapter.execute('feedback', 'report', {
+        'details': 'התוסף קורס',
+        'reportType': 'nonsense',
+      });
+
+      expect(result, 'sent');
+      expect(dialogTitle, 'שליחת דיווח למפתח התוסף');
+      expect(dialogContent, contains('Test Plugin'));
+      expect(dialogContent, contains('התוסף קורס'));
+      expect(body['pluginUid'], 'test.plugin');
+      expect(body['pluginName'], 'Test Plugin');
+      expect(body['pluginVersion'], '1.0.0');
+      expect(body['reportType'], 'other');
+      expect(body['details'], 'התוסף קורס');
+      expect(body.containsKey('reporterEmail'), isFalse);
+    });
+
+    test('פירוט ארוך נחתך ל-5000 תווים גם בתצוגה המקדימה', () async {
+      String? dialogContent;
+      late Map<String, dynamic> body;
+      final adapter = buildAdapter(
+        onConfirm: (_, content) async {
+          dialogContent = content;
+          return true;
+        },
+        client: MockClient((request) async {
+          body = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response('{"success":true}', 200);
+        }),
+      );
+
+      await adapter.execute('feedback', 'report', {'details': 'א' * 6000});
+
+      expect((body['details'] as String).length, 5000);
+      expect(dialogContent!.length, lessThan(600));
+    });
+
+    test('כתובת חוזרת נלקחת מהגדרות דיווח השגיאות כשלא נמסרה', () async {
+      await Settings.setValue<String>(
+        SettingsRepository.keyErrorReportSenderEmail,
+        'user@example.com',
+      );
+      String? dialogContent;
+      late Map<String, dynamic> body;
+      final adapter = buildAdapter(
+        onConfirm: (_, content) async {
+          dialogContent = content;
+          return true;
+        },
+        client: MockClient((request) async {
+          body = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response('{"success":true}', 200);
+        }),
+      );
+
+      await adapter.execute('feedback', 'report', {'details': 'משהו'});
+
+      expect(body['reporterEmail'], 'user@example.com');
+      expect(dialogContent, contains('user@example.com'));
+    });
+
+    test('כתובת שמורה בהגדרות גוברת על כתובת שנמסרה מהתוסף', () async {
+      await Settings.setValue<String>(
+        SettingsRepository.keyErrorReportSenderEmail,
+        'saved@example.com',
+      );
+      late Map<String, dynamic> body;
+      final adapter = buildAdapter(
+        onConfirm: (_, _) async => true,
+        client: MockClient((request) async {
+          body = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response('{"success":true}', 200);
+        }),
+      );
+
+      await adapter.execute('feedback', 'report', {
+        'details': 'משהו',
+        'reporterEmail': 'plugin@example.com',
+      });
+
+      expect(body['reporterEmail'], 'saved@example.com');
+    });
+
+    test('כתובת מהתוסף משמשת רק כשאין כתובת שמורה', () async {
+      await Settings.setValue<String>(
+        SettingsRepository.keyErrorReportSenderEmail,
+        '',
+      );
+      late Map<String, dynamic> body;
+      final adapter = buildAdapter(
+        onConfirm: (_, _) async => true,
+        client: MockClient((request) async {
+          body = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response('{"success":true}', 200);
+        }),
+      );
+
+      await adapter.execute('feedback', 'report', {
+        'details': 'משהו',
+        'reporterEmail': 'plugin@example.com',
+      });
+
+      expect(body['reporterEmail'], 'plugin@example.com');
+    });
+
+    test('hasReporterEmail מחזירה קיום בלבד, בלי הכתובת', () async {
+      final adapter = buildAdapter(
+        onConfirm: (_, _) async => true,
+        client: MockClient((_) async => http.Response('{}', 200)),
+      );
+
+      await Settings.setValue<String>(
+        SettingsRepository.keyErrorReportSenderEmail,
+        '',
+      );
+      expect(
+        await adapter.execute('feedback', 'hasReporterEmail', {}),
+        isFalse,
+      );
+
+      await Settings.setValue<String>(
+        SettingsRepository.keyErrorReportSenderEmail,
+        'user@example.com',
+      );
+      expect(await adapter.execute('feedback', 'hasReporterEmail', {}), isTrue);
+    });
+
+    test('דחייה קבועה (400) → חריגה מוחזרת לתוסף ולא נשמר בתור', () async {
+      final queue = _InMemoryPluginReportQueue();
+      final adapter = buildAdapter(
+        onConfirm: (_, _) async => true,
+        client: MockClient((_) async => http.Response('bad', 400)),
+        queue: queue,
+      );
+
+      await expectLater(
+        adapter.execute('feedback', 'report', {'details': 'משהו'}),
+        throwsA(
+          isA<Exception>().having(
+            (e) => e.toString(),
+            'message',
+            contains('400'),
+          ),
+        ),
+      );
+      expect(await queue.load(), isEmpty);
+    });
+
+    test('כשל זמני (500) → queued והדיווח נשמר בתור', () async {
+      final queue = _InMemoryPluginReportQueue();
+      final adapter = buildAdapter(
+        onConfirm: (_, _) async => true,
+        client: MockClient((_) async => http.Response('nope', 500)),
+        queue: queue,
+      );
+
+      final result = await adapter.execute('feedback', 'report', {
+        'details': 'משהו',
+      });
+
+      expect(result, 'queued');
+      final queued = await queue.load();
+      expect(queued.single.pluginUid, 'test.plugin');
+      expect(queued.single.details, 'משהו');
+    });
+
+    test('מצב לא-מקוון עם תור כבוי → חריגה, בלי רשת ובלי תור', () async {
+      await Settings.setValue<bool>(SettingsRepository.keyOfflineMode, true);
+      await Settings.setValue<bool>(
+        SettingsRepository.keyQueueErrorReportsWhenOffline,
+        false,
+      );
+      addTearDown(() async {
+        await Settings.setValue<bool>(SettingsRepository.keyOfflineMode, false);
+        await Settings.setValue<bool>(
+          SettingsRepository.keyQueueErrorReportsWhenOffline,
+          true,
+        );
+      });
+
+      var posted = false;
+      final queue = _InMemoryPluginReportQueue();
+      final adapter = buildAdapter(
+        onConfirm: (_, _) async => true,
+        client: MockClient((_) async {
+          posted = true;
+          return http.Response('{}', 200);
+        }),
+        queue: queue,
+      );
+
+      await expectLater(
+        adapter.execute('feedback', 'report', {'details': 'משהו'}),
+        throwsA(isA<Exception>()),
+      );
+      expect(posted, isFalse);
+      expect(await queue.load(), isEmpty);
+    });
+  });
+
+  group('PluginBridgeAdapter.reader.openSearchTab', () {
+    late _CapturingTabsBloc tabsBloc;
+    late PluginBridgeAdapter adapter;
+
+    setUp(() {
+      tabsBloc = _CapturingTabsBloc();
+      adapter = PluginBridgeAdapter(
+        _buildInstalledPlugin(permissions: const ['reader.open']),
+        dependencies: PluginBridgeDependencies(
+          historyBloc: _MockHistoryBloc(),
+          tabsBloc: tabsBloc,
+          navigationBloc: _MockNavigationBloc(),
+          calendarCubit: _StubCalendarCubit(
+            _buildCalendarState(DateTime(2026, 1, 1), inIsrael: true),
+          ),
+          workspaceBloc: _MockWorkspaceBloc(),
+          searchRepository: _MockSearchRepository(),
+          personalNotesRepository: _MockPersonalNotesRepository(),
+          bookOpenCoordinator: BookOpenCoordinator(
+            tabsBloc: tabsBloc,
+            historyBloc: _MockHistoryBloc(),
+            navigationBloc: _MockNavigationBloc(),
+          ),
+          themePayloadBuilder: () => <String, dynamic>{},
+          showConfirmDialog: ({required title, required content}) async => true,
+          showWarningDialog:
+              ({required title, required content, required subtitle}) async =>
+                  true,
+        ),
+        pluginRepository: _StubPluginRegistryRepository(),
+      );
+    });
+
+    SearchingTab capturedSearchTab() {
+      final addTab = tabsBloc.captured.whereType<AddTab>().first;
+      return addTab.tab as SearchingTab;
+    }
+
+    test(
+      'פותח טאב חיפוש עם השאילתה ומריץ אותה אוטומטית כברירת מחדל',
+      () async {
+        final response = await adapter.execute('reader', 'openSearchTab', {
+          'query': 'ברכת המזון',
+        });
+        expect(response, isTrue);
+        final tab = capturedSearchTab();
+        expect(tab.queryController.text, 'ברכת המזון');
+        expect(tab.autoRunInitialSearch, isTrue);
+        final config = tab.searchBloc.state.configuration;
+        expect(config.searchMode, SearchMode.advanced);
+        expect(config.distance, 0);
+        expect(config.proximityScope, SearchScope.wordDistance);
+        expect(config.wordMatchMode, WordMatchMode.all);
+        expect(config.wordMatchCount, 2);
+        expect(tab.searchOptions, isEmpty);
+        // החיפוש מופעל אוטומטית — השאילתה נכנסה ל-state. החיפוש עצמו
+        // עובר דרך מנוע ה-Rust (sanitizeQuery), ולכן דורש build נייטיבי.
+        await pumpEventQueue();
+        expect(tab.searchBloc.state.searchQuery, 'ברכת המזון');
+      },
+      skip: engineReady ? false : searchEngineSkipReason,
+    );
+
+    test('autoSearch: false פותח עם השאילתה בשדה בלי להריץ חיפוש', () async {
+      await adapter.execute('reader', 'openSearchTab', {
+        'query': 'ברכת המזון',
+        'autoSearch': false,
+      });
+      final tab = capturedSearchTab();
+      expect(tab.autoRunInitialSearch, isFalse);
+      expect(tab.queryController.text, 'ברכת המזון');
+      await pumpEventQueue();
+      expect(tab.searchBloc.state.searchQuery, isEmpty);
+    });
+
+    test('settings מעבירים מצב, מרחק ומדיניות התאמה לטאב', () async {
+      // autoSearch: false — בודקים את מיפוי ההגדרות בלי להריץ חיפוש, כדי
+      // שהטסט לא יהיה תלוי במנוע הנייטיבי.
+      await adapter.execute('reader', 'openSearchTab', {
+        'query': 'ואהבת לרעך',
+        'autoSearch': false,
+        'settings': {
+          'mode': 'advanced',
+          'distance': 2,
+          'proximityScope': 'sameParagraph',
+          'wordMatchMode': 'atLeast',
+          'wordMatchCount': 3,
+        },
+      });
+      final tab = capturedSearchTab();
+      final config = tab.searchBloc.state.configuration;
+      expect(config.searchMode, SearchMode.advanced);
+      expect(config.distance, 2);
+      expect(config.proximityScope, SearchScope.sameParagraph);
+      expect(config.wordMatchMode, WordMatchMode.atLeast);
+      expect(config.wordMatchCount, 3);
+      expect(tab.searchOptions, isEmpty);
+    });
+
+    test(
+      'settings.options נשמרים למסלול החיפוש הידני',
+      () async {
+        await adapter.execute('reader', 'openSearchTab', {
+          'query': 'ואהבת לרעך',
+          'autoSearch': false,
+          'settings': {
+            'mode': 'advanced',
+            'options': {'קידומות דקדוקיות': true},
+          },
+        });
+        final tab = capturedSearchTab();
+        expect(tab.searchOptions, isNotEmpty);
+        for (final options in tab.searchOptions.values) {
+          expect(options['קידומות דקדוקיות'], isTrue);
+        }
+        expect(tab.useGlobalSearchOptions.value, isFalse);
+        expect(tab.effectiveSearchOptions(), tab.searchOptions);
+      },
+      skip: engineReady ? false : searchEngineSkipReason,
+    );
+
+    test('שומר את העדפות תצוגת התוצאות של המשתמש', () async {
+      SearchDefaults.saveSortOrderDefault(ResultsOrder.relevance);
+      SearchDefaults.saveResultGroupingDefault(ResultGroupingMode.sameSection);
+      addTearDown(() {
+        SearchDefaults.saveSortOrderDefault(ResultsOrder.catalogue);
+        SearchDefaults.saveResultGroupingDefault(ResultGroupingMode.none);
+      });
+
+      await adapter.execute('reader', 'openSearchTab', {
+        'query': 'ברכת המזון',
+        'autoSearch': false,
+      });
+
+      final config = capturedSearchTab().searchBloc.state.configuration;
+      expect(config.sortBy, ResultsOrder.relevance);
+      expect(config.resultGrouping, ResultGroupingMode.sameSection);
+    });
+
+    test(
+      'settings.wordOptions נשמרים פר-מילה בטאב',
+      () async {
+        await adapter.execute('reader', 'openSearchTab', {
+          'query': 'ואהבת לרעך',
+          'settings': {
+            'mode': 'advanced',
+            'wordOptions': {
+              'ואהבת_0': {'קידומות': true},
+            },
+          },
+        });
+        final tab = capturedSearchTab();
+        expect(tab.searchOptions['ואהבת_0'], {'קידומות': true});
+      },
+      skip: engineReady ? false : searchEngineSkipReason,
+    );
+
+    test('settings לא חוקיים נדחים בלי לפתוח טאב', () async {
+      await expectLater(
+        adapter.execute('reader', 'openSearchTab', {
+          'query': 'ברכת המזון',
+          'settings': {'unknownParam': 1},
+        }),
+        throwsA(isA<Exception>()),
+      );
+      expect(tabsBloc.captured.whereType<AddTab>(), isEmpty);
+    });
+
+    test(
+      'wordOptions מפתח שאינו תואם לשאילתה נדחה',
+      () async {
+        await expectLater(
+          adapter.execute('reader', 'openSearchTab', {
+            'query': 'ואהבת לרעך',
+            'settings': {
+              'mode': 'advanced',
+              'wordOptions': {
+                'מילה_5': {'קידומות': true},
+              },
+            },
+          }),
+          throwsA(isA<Exception>()),
+        );
+        expect(tabsBloc.captured.whereType<AddTab>(), isEmpty);
+      },
+      skip: engineReady ? false : searchEngineSkipReason,
+    );
+  });
+
+  // ---------------------------------------------------------------
+  // plugin.listInstalled
+  // ---------------------------------------------------------------
+  group('plugin.listInstalled', () {
+    late _StubPluginRegistryRepository repo;
+    late PluginBridgeAdapter adapter;
+
+    InstalledPlugin makePlugin({
+      required String pluginId,
+      required String name,
+      required String version,
+      bool enabled = true,
+      bool showInTools = true,
+      String? toolTabIconName,
+    }) {
+      return InstalledPlugin(
+        pluginId: pluginId,
+        name: name,
+        version: version,
+        installPath: '/',
+        entrypointPath: 'index.html',
+        enabled: enabled,
+        pinned: false,
+        showInTools: showInTools,
+        manifest: PluginManifest(
+          schemaVersion: 1,
+          id: pluginId,
+          name: name,
+          version: version,
+          description: '',
+          author: '',
+          homepage: '',
+          entrypoint: 'index.html',
+          minAppVersion: '1.0.0',
+          sdkVersion: '1.x',
+          permissions: const [],
+          networkEnabled: false,
+          networkAllowlist: const [],
+          toolTabTitle: name,
+          toolTabOrder: 1,
+          defaultPinned: false,
+          toolTabIconName: toolTabIconName,
+          publishedDataTypes: const [],
+        ),
+        installedAt: DateTime(2026),
+        updatedAt: DateTime(2026),
+      );
+    }
+
+    setUp(() {
+      repo = _StubPluginRegistryRepository();
+      adapter = PluginBridgeAdapter(
+        _buildInstalledPlugin(),
+        dependencies: _buildNetworkDeps(),
+        pluginRepository: repo,
+      );
+    });
+
+    test('מחזיר את כל השדות הנדרשים לכל תוסף', () async {
+      repo.installedPlugins = [
+        makePlugin(
+          pluginId: 'org.test.alpha',
+          name: 'Alpha',
+          version: '2.0.0',
+          enabled: true,
+          showInTools: true,
+          toolTabIconName: 'calendar_24_regular',
+        ),
+      ];
+
+      final result =
+          await adapter.execute('plugin', 'listInstalled', {}) as List;
+
+      expect(result, hasLength(1));
+      final entry = result.first as Map<String, dynamic>;
+      expect(entry['pluginId'], 'org.test.alpha');
+      expect(entry['name'], 'Alpha');
+      expect(entry['version'], '2.0.0');
+      expect(entry['enabled'], isTrue);
+      expect(entry['showInTools'], isTrue);
+      expect(entry['toolTabIconName'], 'calendar_24_regular');
+    });
+
+    test(
+      'toolTabIconName: שם אייקון לא קיים → fallback puzzle_piece_24_regular',
+      () async {
+        repo.installedPlugins = [
+          makePlugin(
+            pluginId: 'org.test.beta',
+            name: 'Beta',
+            version: '1.0.0',
+            toolTabIconName: 'nonexistent_icon_name',
+          ),
+        ];
+
+        final result =
+            await adapter.execute('plugin', 'listInstalled', {}) as List;
+        final entry = result.first as Map<String, dynamic>;
+
+        expect(entry['toolTabIconName'], 'puzzle_piece_24_regular');
+      },
+    );
+
+    test(
+      'toolTabIconName: null במניפסט → fallback puzzle_piece_24_regular',
+      () async {
+        repo.installedPlugins = [
+          makePlugin(
+            pluginId: 'org.test.gamma',
+            name: 'Gamma',
+            version: '1.0.0',
+            toolTabIconName: null,
+          ),
+        ];
+
+        final result =
+            await adapter.execute('plugin', 'listInstalled', {}) as List;
+        final entry = result.first as Map<String, dynamic>;
+
+        expect(entry['toolTabIconName'], 'puzzle_piece_24_regular');
+      },
+    );
+
+    test('enabled=false ו-showInTools=false מוחזרים נכון', () async {
+      repo.installedPlugins = [
+        makePlugin(
+          pluginId: 'org.test.delta',
+          name: 'Delta',
+          version: '0.1.0',
+          enabled: false,
+          showInTools: false,
+        ),
+      ];
+
+      final result =
+          await adapter.execute('plugin', 'listInstalled', {}) as List;
+      final entry = result.first as Map<String, dynamic>;
+
+      expect(entry['enabled'], isFalse);
+      expect(entry['showInTools'], isFalse);
+    });
+
+    test('רשימה ריקה → מחזיר []', () async {
+      repo.installedPlugins = [];
+
+      final result =
+          await adapter.execute('plugin', 'listInstalled', {}) as List;
+
+      expect(result, isEmpty);
+    });
+
+    test('מספר תוספים — כולם מוחזרים', () async {
+      repo.installedPlugins = [
+        makePlugin(pluginId: 'a', name: 'A', version: '1.0.0'),
+        makePlugin(pluginId: 'b', name: 'B', version: '2.0.0'),
+      ];
+
+      final result =
+          await adapter.execute('plugin', 'listInstalled', {}) as List;
+
+      expect(result, hasLength(2));
+      expect(
+        result.map((e) => (e as Map)['pluginId']),
+        containsAll(['a', 'b']),
+      );
+    });
+
+    test('סדר הרשימה נשמר כפי שמגיע מ-getAllPlugins ללא מיון נוסף', () async {
+      repo.installedPlugins = [
+        makePlugin(pluginId: 'zzz', name: 'ZPlugin', version: '1.0.0'),
+        makePlugin(pluginId: 'aaa', name: 'APlugin', version: '1.0.0'),
+        makePlugin(pluginId: 'mmm', name: 'MPlugin', version: '1.0.0'),
+      ];
+
+      final result =
+          await adapter.execute('plugin', 'listInstalled', {}) as List;
+
+      expect(
+        result.map((e) => (e as Map)['pluginId']),
+        orderedEquals(['zzz', 'aaa', 'mmm']),
+      );
     });
   });
 }
@@ -3455,4 +5179,32 @@ CalendarState _buildCalendarState(
     dayTransition: CalendarDayTransition.sunset,
     inIsrael: inIsrael,
   );
+}
+
+class _InMemoryPluginReportQueue
+    extends HiveListRepository<PluginReportRecord> {
+  List<PluginReportRecord> _items = [];
+
+  _InMemoryPluginReportQueue()
+    : super(
+        boxName: 'in_memory',
+        key: 'pending_reports',
+        fromJson: PluginReportRecord.fromJson,
+        toJson: (record) => record.toJson(),
+      );
+
+  @override
+  Future<List<PluginReportRecord>> load() async {
+    return List<PluginReportRecord>.from(_items);
+  }
+
+  @override
+  Future<void> save(List<PluginReportRecord> items) async {
+    _items = List<PluginReportRecord>.from(items);
+  }
+
+  @override
+  Future<void> clear() async {
+    _items = [];
+  }
 }

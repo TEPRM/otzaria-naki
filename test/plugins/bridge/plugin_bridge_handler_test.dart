@@ -5,7 +5,9 @@ import 'package:otzaria/plugins/bridge/plugin_bridge_adapter.dart';
 import 'package:otzaria/plugins/bridge/plugin_bridge_handler.dart';
 import 'package:otzaria/plugins/models/installed_plugin.dart';
 import 'package:otzaria/plugins/models/plugin_manifest.dart';
+import 'package:otzaria/plugins/models/plugin_valid_permissions.dart';
 import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
+import 'package:otzaria/plugins/services/plugin_extended_validator.dart';
 
 /// adapter פיקטיבי: מיישם רק את execute (השאר דרך noSuchMethod), סופר קריאות
 /// ומחזיר ערך מוגדר מראש — כך אפשר לוודא אם execute נקרא בכלל ובאילו ארגומנטים.
@@ -112,6 +114,30 @@ List<dynamic> _shortcutCreateRequest() => [
   },
 ];
 
+/// בקשת RPC ל-plugin.openOther.
+List<dynamic> _openOtherRequest() => [
+  {
+    'method': 'plugin.openOther',
+    'payload': {'pluginId': 'other.plugin'},
+  },
+];
+
+/// בקשת RPC ל-feedback.report.
+List<dynamic> _feedbackReportRequest() => [
+  {
+    'method': 'feedback.report',
+    'payload': {'details': 'התוסף קורס'},
+  },
+];
+
+/// בקשת RPC ל-feedback.sendEmail.
+List<dynamic> _feedbackSendEmailRequest() => [
+  {
+    'method': 'feedback.sendEmail',
+    'payload': {'to': 'a@b.c', 'subject': 'x', 'body': 'y'},
+  },
+];
+
 /// בקשת RPC ל-app.openUrl.
 List<dynamic> _openUrlRequest() => [
   {
@@ -179,6 +205,11 @@ void main() {
       expect(PluginBridgeHandler.hasOwnTimeout('network.fetchStream'), isTrue);
       expect(PluginBridgeHandler.hasOwnTimeout('network.download'), isTrue);
       expect(PluginBridgeHandler.hasOwnTimeout('fs.extractZip'), isTrue);
+      // ממתין לדיאלוג אישור — timeout גנרי היה מדווח כשל אחרי שליחה בפועל.
+      expect(PluginBridgeHandler.hasOwnTimeout('feedback.report'), isTrue);
+      // דיאלוג ההדפסה של המערכת ממתין לבחירת מדפסת ללא הגבלת זמן.
+      expect(PluginBridgeHandler.hasOwnTimeout('ui.print'), isTrue);
+      expect(PluginBridgeHandler.hasOwnTimeout('ui.exportPdf'), isTrue);
     });
 
     test('שאר הקריאות נשארות תחת timeout ברירת המחדל', () {
@@ -285,6 +316,104 @@ void main() {
       expect(adapter.executeCalls, 0);
     });
 
+    test(
+      'plugin.openOther עם navigation.write בלבד → permission_denied',
+      () async {
+        // openSelf מסתפק ב-navigation.write; פתיחת תוסף אחר דורשת הרשאה נפרדת,
+        // ולכן תוסף ותיק שהצהיר רק על ניווט אינו מקבל אותה בירושה.
+        final adapter = _FakeAdapter();
+        final handler = buildHandler(
+          declaredPermissions: const ['navigation.write'],
+          granted: true,
+          adapter: adapter,
+        );
+
+        final resp =
+            await handler.handleRpcForTesting(_openOtherRequest())
+                as Map<String, dynamic>;
+
+        expect(resp['success'], isFalse);
+        expect(resp['error']['code'], 'permission_denied');
+        expect(adapter.executeCalls, 0);
+      },
+    );
+
+    test(
+      'plugin.openOther עם plugin.open_other מוצהרת ומוענקת → execute נקרא',
+      () async {
+        final adapter = _FakeAdapter(result: true);
+        final handler = buildHandler(
+          declaredPermissions: const [pluginOpenOtherPermission],
+          granted: true,
+          adapter: adapter,
+        );
+
+        final resp =
+            await handler.handleRpcForTesting(_openOtherRequest())
+                as Map<String, dynamic>;
+
+        expect(resp['success'], isTrue);
+        expect(adapter.lastDomain, 'plugin');
+        expect(adapter.lastAction, 'openOther');
+      },
+    );
+
+    test('feedback.report ללא הרשאה כלשהי במניפסט → execute נקרא', () async {
+      // גבול האבטחה של report הוא דיאלוג האישור של המשתמש, ולכן היא אינה
+      // דורשת הרשאת manifest — בשונה מ-feedback.sendEmail.
+      final adapter = _FakeAdapter(result: true);
+      final handler = buildHandler(
+        declaredPermissions: const [],
+        granted: null,
+        adapter: adapter,
+      );
+
+      final resp =
+          await handler.handleRpcForTesting(_feedbackReportRequest())
+              as Map<String, dynamic>;
+
+      expect(resp['success'], isTrue);
+      expect(adapter.executeCalls, 1);
+      expect(adapter.lastDomain, 'feedback');
+      expect(adapter.lastAction, 'report');
+    });
+
+    test('feedback.hasReporterEmail ללא הרשאה כלשהי → execute נקרא', () async {
+      final adapter = _FakeAdapter(result: false);
+      final handler = buildHandler(
+        declaredPermissions: const [],
+        granted: null,
+        adapter: adapter,
+      );
+
+      final resp =
+          await handler.handleRpcForTesting([
+                {'method': 'feedback.hasReporterEmail', 'payload': {}},
+              ])
+              as Map<String, dynamic>;
+
+      expect(resp['success'], isTrue);
+      expect(adapter.executeCalls, 1);
+      expect(adapter.lastAction, 'hasReporterEmail');
+    });
+
+    test('feedback.sendEmail עדיין דורשת feedback.send_email', () async {
+      final adapter = _FakeAdapter(result: true);
+      final handler = buildHandler(
+        declaredPermissions: const [],
+        granted: true,
+        adapter: adapter,
+      );
+
+      final resp =
+          await handler.handleRpcForTesting(_feedbackSendEmailRequest())
+              as Map<String, dynamic>;
+
+      expect(resp['success'], isFalse);
+      expect(resp['error']['code'], 'permission_denied');
+      expect(adapter.executeCalls, 0);
+    });
+
     test('app.openUrl ללא app.open_url במניפסט → permission_denied, '
         'execute לא נקרא', () async {
       final adapter = _FakeAdapter();
@@ -321,22 +450,30 @@ void main() {
       expect(adapter.lastAction, 'openUrl');
     });
 
-    test('app.getConnectivity ללא app.info.read → permission_denied', () async {
-      final adapter = _FakeAdapter();
-      final handler = buildHandler(
-        declaredPermissions: const [],
-        granted: true,
-        adapter: adapter,
-      );
+    test(
+      'app.getConnectivity ללא הצהרה → מותר (app.info.read הרשאת בסיס)',
+      () async {
+        final adapter = _FakeAdapter(
+          result: const {
+            'isOfflineMode': false,
+            'hasNetwork': true,
+            'isOnline': true,
+          },
+        );
+        final handler = buildHandler(
+          declaredPermissions: const [],
+          granted: true,
+          adapter: adapter,
+        );
 
-      final resp =
-          await handler.handleRpcForTesting(_getConnectivityRequest())
-              as Map<String, dynamic>;
+        final resp =
+            await handler.handleRpcForTesting(_getConnectivityRequest())
+                as Map<String, dynamic>;
 
-      expect(resp['success'], isFalse);
-      expect(resp['error']['code'], 'permission_denied');
-      expect(adapter.executeCalls, 0);
-    });
+        expect(resp['success'], isTrue);
+        expect(adapter.executeCalls, 1);
+      },
+    );
 
     test('app.getConnectivity עם app.info.read → execute נקרא', () async {
       final adapter = _FakeAdapter(
@@ -559,7 +696,7 @@ void main() {
         expect(resp['error']['message'], 'path outside a user-selected folder');
         expect(resp['error']['schemaVersion'], 1);
         expect(resp['error']['retryable'], isFalse);
-        expect(resp['error']['category'], 'validation');
+        expect(resp['error']['category'], 'permission');
       },
     );
 
@@ -673,6 +810,61 @@ void main() {
       expect(adapter.lastAction, 'pickUserFile');
     });
 
+    test('כתיבה דורשת fs.user_files.write, ולא מספיקה הרשאת קריאה', () async {
+      for (final method in ['fs.beginBinaryWrite', 'fs.commitUserFileWrite']) {
+        final adapter = _FakeAdapter();
+        final handler = PluginBridgeHandler(
+          // קריאה בלבד: מי שמצהיר על read אינו יכול לכתוב.
+          _buildInstalledPlugin(permissions: const ['fs.user_files.read']),
+          adapter: adapter,
+          registry: _StubRegistry(true),
+        );
+
+        final resp =
+            await handler.handleRpcForTesting([
+                  {'method': method, 'payload': const <String, dynamic>{}},
+                ])
+                as Map;
+
+        expect(resp['success'], isFalse, reason: method);
+        expect(resp['error']['code'], 'permission_denied', reason: method);
+        expect(adapter.executeCalls, 0, reason: method);
+      }
+    });
+
+    test('כתיבה עם ההרשאה המוצהרת והמוענקת → execute נקרא', () async {
+      final adapter = _FakeAdapter(result: {'cancelled': true});
+      final handler = PluginBridgeHandler(
+        _buildInstalledPlugin(
+          permissions: const ['fs.user_files.read', 'fs.user_files.write'],
+        ),
+        adapter: adapter,
+        registry: _StubRegistry(true),
+      );
+
+      final resp =
+          await handler.handleRpcForTesting([
+                {
+                  'method': 'fs.commitUserFileWrite',
+                  'payload': {'writeToken': 'x'},
+                },
+              ])
+              as Map;
+
+      expect(resp['success'], isTrue);
+      expect(adapter.lastAction, 'commitUserFileWrite');
+    });
+
+    test('commitUserFileWrite אינו כפוף ל-timeout הגנרי', () {
+      // הוא ממתין לדיאלוג „שמור בשם”; timeout גנרי היה מחזיר error.timeout
+      // בזמן שהמשתמש בוחר תיקייה, אחרי שהבייטים כבר עלו.
+      expect(
+        PluginBridgeHandler.hasOwnTimeout('fs.commitUserFileWrite'),
+        isTrue,
+      );
+      expect(PluginBridgeHandler.hasOwnTimeout('fs.beginBinaryWrite'), isFalse);
+    });
+
     test(
       'deleteFile נשאר ללא הרשאת manifest (execute נקרא גם בלי הרשאה)',
       () async {
@@ -696,5 +888,136 @@ void main() {
         expect(adapter.executeCalls, 1);
       },
     );
+  });
+
+  // iframe עוין יכול לקרוא ל-otzaria_rpc בלי ה-nonce; אסור שקריאה כזו תסמן
+  // "עבודה התחילה" (מחזיק מופע רקע חי) או תעקוף את מגביל הקצב.
+  group('PluginBridgeHandler — דחייה לפני onWorkStarted', () {
+    test('קריאה ללא nonce תקין אינה מסמנת תחילת עבודה ונספרת במגביל', () async {
+      var workStarted = 0;
+      final limiter = _BlockingRateLimiter();
+      final handler = PluginBridgeHandler(
+        _buildInstalledPlugin(),
+        adapter: _FakeAdapter(),
+        registry: _StubRegistry(true),
+        rateLimiter: limiter,
+        onWorkStarted: () => workStarted++,
+      );
+
+      final resp =
+          await handler.handleRpcForTesting(
+                _getBookContentRequest(),
+                nonce: 'wrong-nonce',
+              )
+              as Map<String, dynamic>;
+
+      expect(resp['error']['code'], 'error.rate_limited');
+      expect(limiter.consumeCalls, 1);
+      expect(workStarted, 0);
+    });
+
+    test('קריאה עם nonce תקין מסמנת תחילת עבודה וסיומה', () async {
+      var workStarted = 0;
+      var workEnded = 0;
+      final handler = PluginBridgeHandler(
+        _buildInstalledPlugin(permissions: const ['library.content.read']),
+        adapter: _FakeAdapter(result: const {'ok': true}),
+        registry: _StubRegistry(true),
+        onWorkStarted: () => workStarted++,
+        onWorkEnded: () => workEnded++,
+      );
+
+      await handler.handleRpcForTesting(_getBookContentRequest());
+
+      expect(workStarted, 1);
+      expect(workEnded, 1);
+    });
+
+    test('method לא מוכר נספר במגביל הקצב', () async {
+      final limiter = _BlockingRateLimiter();
+      final handler = PluginBridgeHandler(
+        _buildInstalledPlugin(),
+        adapter: _FakeAdapter(),
+        registry: _StubRegistry(true),
+        rateLimiter: limiter,
+      );
+
+      final resp =
+          await handler.handleRpcForTesting([
+                {'method': 'no.such_method', 'payload': {}},
+              ])
+              as Map<String, dynamic>;
+
+      expect(resp['error']['code'], 'error.rate_limited');
+      expect(limiter.consumeCalls, 1);
+    });
+  });
+
+  group('התאמה בין ההרשאה שנאכפת לזו שהאריזה מסתמכת עליה', () {
+    // ההרשאה שנאכפת ב-runtime וזו שהאריזה בודקת מוגדרות בשני מקומות נפרדים,
+    // וסטייה ביניהן עוברת אריזה בשקט ונכשלת רק אצל המשתמש.
+
+    /// ההרשאה נגזרת מכתובת היעד (`network.localhost` מול `network.access`)
+    /// ולכן נאכפת באדפטר; מפורש ולא `startsWith`, כדי ש-network חדש יחייב
+    /// החלטה מודעת.
+    const enforcedInAdapter = {
+      'network.fetch',
+      'network.fetchStream',
+      'network.download',
+    };
+
+    PluginBridgeHandler buildHandler() => PluginBridgeHandler(
+      _buildInstalledPlugin(permissions: const []),
+      adapter: _FakeAdapter(),
+      registry: _StubRegistry(true),
+    );
+
+    test('כל method ידוע נאכף בדיוק לפי methodRequiredPermissions', () {
+      final handler = buildHandler();
+      final expected = PluginExtendedValidator.methodRequiredPermissions;
+
+      final mismatches = <String>[];
+      for (final method in PluginExtendedValidator.knownApiMethods) {
+        if (enforcedInAdapter.contains(method)) continue;
+        final parts = method.split('.');
+        if (parts.length != 2) {
+          fail('method בעל יותר משני חלקים אינו נתמך בבדיקה: $method');
+        }
+        final enforced = handler.requiredPermissionForTesting(
+          parts[0],
+          parts[1],
+        );
+        if (enforced != expected[method]) {
+          mismatches.add(
+            '$method: runtime=$enforced, אריזה=${expected[method]}',
+          );
+        }
+      }
+
+      expect(mismatches, isEmpty, reason: mismatches.join('\n'));
+    });
+
+    test('אין רשומת הרשאה ל-method שאינו ב-knownApiMethods', () {
+      // הכיוון ההפוך של הבדיקה שמעליה, שרצה על knownApiMethods בלבד: רשומה
+      // שנוספה למפה בלי להוסיף אותה לקבוצה לא הייתה מבוקרת כלל.
+      expect(
+        PluginExtendedValidator.methodRequiredPermissions.keys.where(
+          (m) => !PluginExtendedValidator.knownApiMethods.contains(m),
+        ),
+        isEmpty,
+      );
+    });
+
+    test('הרשאות ה-network נאכפות באדפטר ולא בגשר', () {
+      final handler = buildHandler();
+      for (final method in enforcedInAdapter) {
+        final parts = method.split('.');
+        expect(
+          handler.requiredPermissionForTesting(parts[0], parts[1]),
+          isNull,
+          reason: '$method לא אמור להיות מגודר לפי שם ה-method',
+        );
+      }
+    });
   });
 }

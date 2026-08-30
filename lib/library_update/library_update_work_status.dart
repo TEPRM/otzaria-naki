@@ -5,6 +5,9 @@ import 'package:otzaria/work_status/work_status_item.dart';
 /// מזהה פריט חיווי העבודה של עדכון הספרייה.
 const kLibraryUpdateWorkStatusId = 'library_update';
 
+/// משך הצגת כשל בדיקת העדכונים לפני סגירה אוטומטית.
+const kCheckFailureAutoDismiss = Duration(seconds: 8);
+
 /// פריט חיווי העבודה לעדכון הספרייה, או `null` כשאין מה להציג.
 ///
 /// [LibraryUpdateStatus.checking] שקט; עבודה ממשית ממופה למצבים הפעילים.
@@ -25,17 +28,34 @@ WorkStatusItem? libraryUpdateWorkStatusItem(
   }
 
   if (state.status == LibraryUpdateStatus.error) {
+    // כשל בבדיקה בלבד נסגר מעצמו — סמל הכשל בכפתור עדכון הספרייה נשאר
+    // כעוגן לניסיון חוזר. כשל בהורדה/החלה נשאר עד סגירה ידנית.
     return WorkStatusItem(
       id: kLibraryUpdateWorkStatusId,
       title: 'עדכון ספרייה',
-      message: state.message,
+      message: _messageWithErrorDetail(state),
       detail: 'לחץ לניסיון חוזר',
       kind: WorkStatusKind.failed,
       onTap: onRetry,
+      autoDismissAfter: state.isCheckFailure ? kCheckFailureAutoDismiss : null,
     );
   }
 
   return null;
+}
+
+/// מצרף את סיבת הכשל להודעה — בלעדיה המשתמש נותר עם "שגיאה" בלי לדעת מה
+/// נכשל. נחתך כדי שהחיווי לא יתנפח על הודעות שגיאה ארוכות.
+String _messageWithErrorDetail(LibraryUpdateState state) {
+  final error = state.errorMessage?.trim();
+  if (error == null || error.isEmpty || error == state.message) {
+    return state.message;
+  }
+  const maxChars = 200;
+  final trimmed = error.length <= maxChars
+      ? error
+      : '${error.substring(0, maxChars)}…';
+  return '${state.message}\n$trimmed';
 }
 
 /// מד הבתים תקף רק בזמן ההורדה — בשלבים הבאים הוא שארית דבוקה על 100%.

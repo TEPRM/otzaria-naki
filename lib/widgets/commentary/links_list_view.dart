@@ -1,3 +1,4 @@
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:otzaria/theme/app_fonts.dart';
 import 'package:otzaria/theme/app_tokens.dart';
@@ -167,9 +168,6 @@ const Key linkTypeChipsRowKey = Key('link_type_chips_row');
 
 @visibleForTesting
 const Key linkEraChipsRowKey = Key('link_era_chips_row');
-
-@visibleForTesting
-const Key chipAxesDividerKey = Key('chip_axes_divider');
 
 /// מפתחות הצ׳יפים מפוצלים לשני צירי המיון: `types` (סוג הקישור) ו-`eras`
 /// (דור המחבר). הסדר בתוך כל ציר נשמר כפי שהתקבל.
@@ -392,7 +390,9 @@ class _LinksListViewState extends State<LinksListView> {
                 controller: _searchController,
                 decoration: InputDecoration(
                   hintText: 'חפש בתוך הקישורים המוצגים...',
-                  prefixIcon: const Icon(FluentIcons.search_24_regular),
+                  prefixIcon: const Icon(
+                    OtzariaIcons.search_in_titles_24_regular,
+                  ),
                   suffixIcon: _searchQuery.isNotEmpty
                       ? IconButton(
                           icon: const Icon(FluentIcons.dismiss_24_regular),
@@ -443,45 +443,31 @@ class _LinksListViewState extends State<LinksListView> {
               AppTokens.spaceSM,
               AppTokens.spaceXS,
             ),
-            // IntrinsicHeight נותן לקו המפריד גובה גם כשציר אחד גולש לשתי שורות
-            child: IntrinsicHeight(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Expanded ולא Flexible: חצי-חצי קבוע, כדי שהקו המפריד
-                  // יישאר במרכז ולא ינוע לפי רוחב התוכן של כל ציר.
-                  if (chipAxes.eras.isNotEmpty)
-                    Expanded(
-                      child: _buildChipGroup(
-                        key: linkEraChipsRowKey,
-                        keys: chipAxes.eras,
-                        savedTypes: widget.selectedLinkTypes,
-                        effectiveTypes: effectiveTypes,
-                        chipLabel: chipLabel,
-                      ),
-                    ),
-                  if (chipAxes.eras.isNotEmpty && chipAxes.types.isNotEmpty)
-                    const VerticalDivider(
-                      key: chipAxesDividerKey,
-                      // width הוא הרוחב הכולל והקו מצויר במרכזו — כך נוצר
-                      // ריווח משני צדיו וצ׳יפ בקצה הציר אינו נצמד אליו.
-                      width: AppTokens.spaceSM * 2 + 1,
-                      thickness: 1,
-                      indent: AppTokens.spaceXS,
-                      endIndent: AppTokens.spaceXS,
-                    ),
-                  if (chipAxes.types.isNotEmpty)
-                    Expanded(
-                      child: _buildChipGroup(
-                        key: linkTypeChipsRowKey,
-                        keys: chipAxes.types,
-                        savedTypes: widget.selectedLinkTypes,
-                        effectiveTypes: effectiveTypes,
-                        chipLabel: chipLabel,
-                      ),
-                    ),
-                ],
-              ),
+            // Wrap ולא Row: שני הצירים מתאחדים לשורה אחת רק כשיש רוחב לשניהם,
+            // אחרת כל ציר יורד לשורה משלו. הריווח האנכי מגיע מריפוד הקבוצה.
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: AppTokens.spaceMD,
+              runSpacing: 0,
+              children: [
+                if (chipAxes.types.isNotEmpty)
+                  _buildChipGroup(
+                    key: linkTypeChipsRowKey,
+                    keys: chipAxes.types,
+                    savedTypes: widget.selectedLinkTypes,
+                    effectiveTypes: effectiveTypes,
+                    chipLabel: chipLabel,
+                  ),
+                if (chipAxes.eras.isNotEmpty)
+                  _buildChipGroup(
+                    key: linkEraChipsRowKey,
+                    keys: chipAxes.eras,
+                    savedTypes: widget.selectedLinkTypes,
+                    effectiveTypes: effectiveTypes,
+                    chipLabel: chipLabel,
+                  ),
+              ],
             ),
           ),
           const SizedBox(height: AppTokens.spaceSM),

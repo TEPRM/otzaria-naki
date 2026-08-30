@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -621,6 +622,193 @@ void main() {
       );
     },
   );
+
+  // ───────────────────────────────────────────────────────────────────────
+  // שמירת הבחירה בלחיצה ארוכה במגע (issue #841)
+  //
+  // ה-TapAndHorizontalDragGestureRecognizer של SelectableRegion יורה onTapDown
+  // אחרי kPressTimeout (100ms) גם בלי לזכות בזירה, וב-Windows זה מריץ
+  // clearSelection — הבחירה נמחקת לפני שהלחיצה הארוכה נורית. כשיש בחירה,
+  // AppContextMenuRegion זוכה בזירה לפני ה-deadline ופותח את התפריט בעצמו.
+  // האב מדומה ב-GestureDetector עם onTapDown, שנורה ב-deadline באותו מנגנון.
+  // ───────────────────────────────────────────────────────────────────────
+
+  Future<bool> touchHoldAndReportOuterTapDown(
+    WidgetTester tester, {
+    required bool preserveSelection,
+    Duration hold = const Duration(milliseconds: 600),
+    Offset moveBy = Offset.zero,
+  }) async {
+    var outerFired = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(
+            // מדמה את ה-onTapDown הנורה ב-deadline של SelectableRegion (אב)
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTapDown: (_) => outerFired = true,
+              child: AppContextMenuRegion(
+                shouldPreserveSelectionOnSecondaryTap: (_) => preserveSelection,
+                menuBuilder: (_, _) => [
+                  AppContextMenuEntry(label: 'העתק', onTap: () {}),
+                ],
+                child: const SizedBox(
+                  width: 100,
+                  height: 100,
+                  child: ColoredBox(color: Colors.amber),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final gesture = await tester.createGesture(kind: PointerDeviceKind.touch);
+    addTearDown(gesture.removePointer);
+
+    final regionCenter = tester.getCenter(find.byType(AppContextMenuRegion));
+    await gesture.down(regionCenter);
+    if (moveBy != Offset.zero) {
+      await tester.pump(const Duration(milliseconds: 20));
+      await gesture.moveBy(moveBy);
+    }
+    await tester.pump(hold);
+    await gesture.up();
+    await tester.pumpAndSettle();
+    return outerFired;
+  }
+
+  testWidgets(
+    'בחירה פעילה: לחיצה ארוכה במגע חוסמת את ה-recognizer החיצוני ופותחת תפריט',
+    (tester) async {
+      final outerFired = await touchHoldAndReportOuterTapDown(
+        tester,
+        preserveSelection: true,
+      );
+
+      expect(
+        outerFired,
+        isFalse,
+        reason:
+            'כשיש בחירה, הזכייה לפני kPressTimeout דוחה את האב מהזירה — '
+            'ה-onTapDown שלו (שמשחרר את הבחירה ב-Windows) אינו נורה',
+      );
+      expect(
+        find.text('העתק'),
+        findsOneWidget,
+        reason: 'התפריט נפתח בתום kLongPressTimeout כשהבחירה שמורה',
+      );
+    },
+  );
+
+  testWidgets(
+    'בלי בחירה: לחיצה ארוכה במגע אינה חוסמת את ה-recognizer החיצוני',
+    (tester) async {
+      final outerFired = await touchHoldAndReportOuterTapDown(
+        tester,
+        preserveSelection: false,
+      );
+
+      expect(
+        outerFired,
+        isTrue,
+        reason: 'בלי בחירה ה-recognizer אינו מצטרף לזירה — האב מתנהג כרגיל',
+      );
+      expect(
+        find.text('העתק'),
+        findsOneWidget,
+        reason: 'התפריט נפתח דרך מסלול הלחיצה הארוכה הקיים',
+      );
+    },
+  );
+
+  testWidgets('בחירה פעילה: הקשה קצרה במגע אינה נחסמת ואינה פותחת תפריט', (
+    tester,
+  ) async {
+    final outerFired = await touchHoldAndReportOuterTapDown(
+      tester,
+      preserveSelection: true,
+      hold: const Duration(milliseconds: 40),
+    );
+
+    expect(
+      outerFired,
+      isTrue,
+      reason:
+          'הרמה לפני הזכייה דוחה את ה-recognizer — ההקשה מגיעה לאב '
+          '(כיווץ הבחירה כרגיל)',
+    );
+    expect(find.text('העתק'), findsNothing);
+  });
+
+  testWidgets('בחירה פעילה: הרמה אחרי הזכייה פותחת תפריט ואינה נבלעת', (
+    tester,
+  ) async {
+    final outerFired = await touchHoldAndReportOuterTapDown(
+      tester,
+      preserveSelection: true,
+      hold: const Duration(milliseconds: 200),
+    );
+
+    expect(outerFired, isFalse);
+    expect(find.text('העתק'), findsOneWidget);
+  });
+
+  testWidgets('בחירה פעילה: גרירה במגע אינה נחסמת ואינה פותחת תפריט', (
+    tester,
+  ) async {
+    await touchHoldAndReportOuterTapDown(
+      tester,
+      preserveSelection: true,
+      moveBy: const Offset(0, 40),
+    );
+
+    expect(
+      find.text('העתק'),
+      findsNothing,
+      reason: 'תנועה מעבר ל-slop לפני הזכייה דוחה את ה-recognizer — גלילה חיה',
+    );
+  });
+
+  testWidgets('בחירה פעילה: גרירה שמתחילה אחרי הזכייה ממשיכה לגלול', (
+    tester,
+  ) async {
+    final controller = ScrollController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AppContextMenuRegion(
+            shouldPreserveSelectionOnSecondaryTap: (_) => true,
+            menuBuilder: (_, _) => [
+              AppContextMenuEntry(label: 'העתק', onTap: () {}),
+            ],
+            child: ListView(
+              controller: controller,
+              children: const [
+                SizedBox(height: 1200),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final gesture = await tester.createGesture(kind: PointerDeviceKind.touch);
+    addTearDown(gesture.removePointer);
+    const start = Offset(200, 300);
+    await gesture.down(start);
+    await tester.pump(const Duration(milliseconds: 150));
+    await gesture.moveBy(const Offset(0, -80));
+    await tester.pump();
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(controller.offset, greaterThan(0));
+    expect(find.text('העתק'), findsNothing);
+  });
 
   testWidgets('onSecondaryTapDown נקרא בלחיצה ימנית עבור שמירת ההקשר', (
     tester,
@@ -1644,7 +1832,7 @@ void main() {
           AppContextMenuIconAction(
             label: 'חיפוש',
             tooltip: 'חיפוש בכל המאגר',
-            icon: FluentIcons.library_24_regular,
+            icon: OtzariaIcons.bookshelf_24_regular,
           ),
           AppContextMenuIconAction(
             label: 'העתקה',
@@ -1660,7 +1848,7 @@ void main() {
         trailingEntries: [AppContextMenuEntry(label: 'פריט', onTap: () {})],
       );
 
-      expect(find.byIcon(FluentIcons.library_24_regular), findsOneWidget);
+      expect(find.byIcon(OtzariaIcons.bookshelf_24_regular), findsOneWidget);
       expect(find.byIcon(FluentIcons.copy_24_regular), findsOneWidget);
       expect(find.byIcon(FluentIcons.note_add_24_regular), findsOneWidget);
       expect(
@@ -1717,7 +1905,7 @@ void main() {
         actions: [
           AppContextMenuIconAction(
             label: 'א',
-            icon: FluentIcons.library_24_regular,
+            icon: OtzariaIcons.bookshelf_24_regular,
             onTap: () => tapped.add('a'),
           ),
           AppContextMenuIconAction(
@@ -1756,7 +1944,7 @@ void main() {
           ),
           AppContextMenuIconAction(
             label: 'מושבת',
-            icon: FluentIcons.library_24_regular,
+            icon: OtzariaIcons.bookshelf_24_regular,
             enabled: false,
             onTap: () => disabledTapped = true,
           ),
@@ -1764,7 +1952,7 @@ void main() {
         trailingEntries: [AppContextMenuEntry(label: 'פריט', onTap: () {})],
       );
 
-      await tester.tap(find.byIcon(FluentIcons.library_24_regular));
+      await tester.tap(find.byIcon(OtzariaIcons.bookshelf_24_regular));
       await tester.pumpAndSettle();
       expect(disabledTapped, isFalse);
       expect(
@@ -1786,7 +1974,7 @@ void main() {
         actions: const [
           AppContextMenuIconAction(
             label: 'כיתוב ארוך מאוד שלא נכנס לכפתור צר',
-            icon: FluentIcons.library_24_regular,
+            icon: OtzariaIcons.bookshelf_24_regular,
           ),
           AppContextMenuIconAction(
             label: 'עוד כיתוב ארוך במיוחד לבדיקה',
@@ -1818,7 +2006,7 @@ void main() {
           AppContextMenuIconAction(
             label: 'חיפוש',
             tooltip: 'חיפוש בכל המאגר',
-            icon: FluentIcons.library_24_regular,
+            icon: OtzariaIcons.bookshelf_24_regular,
           ),
         ],
       );
@@ -1868,7 +2056,7 @@ void main() {
           AppContextMenuIconAction(
             label: 'חיפוש',
             tooltip: 'חיפוש בכל הספרים',
-            icon: FluentIcons.library_24_regular,
+            icon: OtzariaIcons.bookshelf_24_regular,
           ),
         ],
       );
@@ -1924,14 +2112,14 @@ void main() {
         actions: [
           AppContextMenuIconAction(
             tooltip: 'חיפוש בכל המאגר',
-            icon: FluentIcons.library_24_regular,
+            icon: OtzariaIcons.bookshelf_24_regular,
             enabled: false,
             onTap: () => tapped = true,
           ),
         ],
       );
 
-      await tester.tap(find.byIcon(FluentIcons.library_24_regular));
+      await tester.tap(find.byIcon(OtzariaIcons.bookshelf_24_regular));
       await tester.pumpAndSettle();
 
       expect(
@@ -2025,7 +2213,7 @@ void main() {
           AppContextMenuIconAction(
             label: 'קישור ישיר',
             tooltip: 'העתק קישור ישיר',
-            icon: FluentIcons.link_24_regular,
+            icon: OtzariaIcons.link_24_regular,
             submenuBuilder: () => [
               AppContextMenuSubAction(
                 label: 'העתק קישור למקטע',
@@ -2043,7 +2231,7 @@ void main() {
         reason: 'פעולה עם submenuBuilder מציגה חץ למטה',
       );
 
-      await tester.tap(find.byIcon(FluentIcons.link_24_regular));
+      await tester.tap(find.byIcon(OtzariaIcons.link_24_regular));
       await tester.pumpAndSettle();
       expect(
         find.text('העתק קישור למקטע'),

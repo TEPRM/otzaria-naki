@@ -15,6 +15,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:otzaria/settings/engine/settings_bloc.dart';
 import 'package:otzaria/theme/theme_exports.dart';
 import 'package:otzaria/widgets/text/rtl_text_field.dart';
@@ -155,6 +156,71 @@ class _ActionButton extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  OtzariaSearchDisplayBar
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// סרגל בעיצוב [OtzariaSearchField] המציג תוכן קבוע, ולחיצה עליו — בכל
+/// שטחו — מפעילה את [onTap].
+///
+/// [child] — התוכן המוצג (טקסט / תצוגת מילות חיפוש).
+/// [icon] — האייקון בראש הסרגל, ומרמז על הפעולה שהלחיצה מבצעת.
+/// [slim] = null: יורש אוטומטית מ-[SettingsBloc.compactMenuMode].
+class OtzariaSearchDisplayBar extends StatelessWidget {
+  final Widget child;
+  final IconData icon;
+  final VoidCallback? onTap;
+  final String? tooltip;
+  final bool? slim;
+
+  const OtzariaSearchDisplayBar({
+    super.key,
+    required this.child,
+    this.icon = FluentIcons.search_24_regular,
+    this.onTap,
+    this.tooltip,
+    this.slim,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isSlim =
+        slim ?? context.read<SettingsBloc?>()?.state.compactMenuMode ?? false;
+
+    Widget bar = Container(
+      height: isSlim ? _ST.heightSlim : _ST.height,
+      padding: const EdgeInsets.symmetric(horizontal: AppTokens.spaceSM),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: isSlim ? 18 : 20, color: cs.onSurfaceVariant),
+          const SizedBox(width: AppTokens.spaceSM),
+          Flexible(child: child),
+        ],
+      ),
+    );
+
+    if (onTap != null) {
+      bar = InkWell(
+        onTap: onTap,
+        borderRadius: AppTokens.borderRadiusAll,
+        child: bar,
+      );
+    }
+    if (tooltip != null) {
+      bar = Tooltip(message: tooltip!, child: bar);
+    }
+
+    return Material(
+      color: cs.onSurface.withValues(alpha: _ST.fillAlphaUnfocused),
+      borderRadius: AppTokens.borderRadiusAll,
+      clipBehavior: Clip.antiAlias,
+      child: bar,
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  OtzariaSearchField
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -177,6 +243,10 @@ class OtzariaSearchField extends StatefulWidget {
   final Widget? leading;
   final List<Widget>? trailingActions;
 
+  /// אייקון החיפוש. עדיף למקד אותו לפי מה שמחפשים בו — למשל
+  /// `search_in_the_library_24_regular` בספרייה. `leading` דוחה אותו.
+  final IconData icon;
+
   /// `null` = יורש אוטומטית מ-compactMenuMode אם זמין.
   /// `true` = שדה צר, `false` = שדה רחב.
   final bool? slim;
@@ -185,6 +255,10 @@ class OtzariaSearchField extends StatefulWidget {
   final bool isCompact;
   final VoidCallback? onExpand;
   final bool selectAllOnFocus;
+
+  /// שדה מושבת — מוצג בצבע עמום ואינו מקבל קלט. משמש בסרגל שמעל חלונית
+  /// ניווט כשללשונית הנבחרת אין פעולת חיפוש.
+  final bool enabled;
 
   const OtzariaSearchField({
     super.key,
@@ -198,10 +272,12 @@ class OtzariaSearchField extends StatefulWidget {
     this.maxWidth,
     this.leading,
     this.trailingActions,
+    this.icon = OtzariaIcons.search_24_regular,
     this.slim,
     this.isCompact = false,
     this.onExpand,
     this.selectAllOnFocus = true,
+    this.enabled = true,
   });
 
   @override
@@ -233,6 +309,7 @@ class _OtzariaSearchFieldState extends State<OtzariaSearchField> {
       _effectiveFocusNode.removeListener(_onFocusChange);
       if (oldWidget.focusNode == null) _effectiveFocusNode.dispose();
       _effectiveFocusNode = widget.focusNode ?? FocusNode();
+      _hasFocus = _effectiveFocusNode.hasFocus;
       _effectiveFocusNode.addListener(_onFocusChange);
     }
     if (oldWidget.controller != widget.controller) {
@@ -287,7 +364,7 @@ class _OtzariaSearchFieldState extends State<OtzariaSearchField> {
         padding: EdgeInsets.zero,
         visualDensity: VisualDensity.compact,
         icon: Icon(
-          FluentIcons.search_24_regular,
+          widget.icon,
           size: 20,
           color: cs.onSurfaceVariant,
         ),
@@ -310,9 +387,15 @@ class _OtzariaSearchFieldState extends State<OtzariaSearchField> {
     final double prefixIconSize = isSlim ? 18.0 : 20.0;
 
     // Fill
-    final fillColor = _hasFocus
+    final fillColor = _hasFocus && widget.enabled
         ? cs.primary.withValues(alpha: _ST.fillAlphaFocused)
         : cs.onSurface.withValues(alpha: _ST.fillAlphaUnfocused);
+    final contentColor = widget.enabled
+        ? cs.onSurface
+        : cs.onSurfaceVariant.withValues(alpha: 0.5);
+    final hintColor = widget.enabled
+        ? cs.onSurfaceVariant
+        : cs.onSurfaceVariant.withValues(alpha: 0.5);
 
     // Borders
     final noBorder = OutlineInputBorder(
@@ -361,9 +444,9 @@ class _OtzariaSearchFieldState extends State<OtzariaSearchField> {
     final prefixIcon =
         widget.leading ??
         Icon(
-          FluentIcons.search_24_regular,
+          widget.icon,
           size: prefixIconSize,
-          color: _hasFocus ? focusedIconColor : cs.onSurfaceVariant,
+          color: _hasFocus && widget.enabled ? focusedIconColor : hintColor,
         );
 
     final contentPadding = EdgeInsets.symmetric(
@@ -376,6 +459,7 @@ class _OtzariaSearchFieldState extends State<OtzariaSearchField> {
       child: RtlTextField(
         controller: widget.controller,
         focusNode: _effectiveFocusNode,
+        enabled: widget.enabled,
         autofocus: widget.autofocus,
         onChanged: widget.onChanged,
         onSubmitted: widget.onSubmitted,
@@ -384,7 +468,7 @@ class _OtzariaSearchFieldState extends State<OtzariaSearchField> {
         cursorColor: cs.onSurface.withValues(alpha: 0.87),
         style: TextStyle(
           fontSize: effectiveFontSize,
-          color: cs.onSurface,
+          color: contentColor,
           height: 1.0,
           leadingDistribution: TextLeadingDistribution.even,
         ),
@@ -412,7 +496,7 @@ class _OtzariaSearchFieldState extends State<OtzariaSearchField> {
           hintText: widget.hintText,
           hintStyle: TextStyle(
             fontSize: effectiveFontSize,
-            color: cs.onSurfaceVariant,
+            color: hintColor,
             height: 1.0,
             leadingDistribution: TextLeadingDistribution.even,
           ),

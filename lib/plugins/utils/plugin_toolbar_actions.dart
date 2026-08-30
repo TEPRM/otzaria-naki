@@ -4,7 +4,7 @@ import 'package:otzaria/plugins/declarative/models/declarative_program.dart';
 import 'package:otzaria/plugins/models/plugin_toolbar_item.dart';
 import 'package:otzaria/plugins/services/plugin_page_launcher.dart';
 import 'package:otzaria/plugins/services/plugin_runtime_dispatcher.dart';
-import 'package:otzaria/plugins/utils/fluent_icon_resolver.dart';
+import 'package:otzaria/plugins/utils/plugin_icon_resolver.dart';
 import 'package:otzaria/widgets/misc/app_popup_menu.dart';
 import 'package:otzaria/widgets/navigation/responsive_action_bar.dart';
 
@@ -102,7 +102,7 @@ ActionButtonData _buildAction({
   required PluginHostActionDispatcher? hostActionDispatcher,
 }) {
   final icon =
-      fluentIconFromName(item.icon) ?? FluentIcons.puzzle_piece_24_regular;
+      pluginIconFromName(item.icon) ?? FluentIcons.puzzle_piece_24_regular;
   if (item.type == 'menu' || item.type == 'split') {
     final visibleChildren = [
       for (final child in item.children)
@@ -125,7 +125,7 @@ ActionButtonData _buildAction({
       for (final child in visibleChildren)
         ActionButtonData(
           widget: const SizedBox.shrink(),
-          icon: fluentIconFromName(child.icon),
+          icon: pluginIconFromName(child.icon),
           tooltip: child.title,
           onPressed: () => dispatchChild(child.id),
         ),
@@ -157,7 +157,7 @@ ActionButtonData _buildAction({
             AppMenuEntry(
               value: child.id,
               label: child.title,
-              icon: fluentIconFromName(child.icon),
+              icon: pluginIconFromName(child.icon),
             ),
         ],
         onSelected: dispatchChild,

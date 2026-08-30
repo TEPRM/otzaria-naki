@@ -36,10 +36,13 @@ import 'package:otzaria/pdf_book/bloc/pdf_book_event.dart' as pdf_events;
 import 'package:otzaria/pdf_book/bloc/pdf_book_state.dart';
 import 'package:otzaria/pdf_book/utils/pdf_spread_layout.dart';
 import 'package:otzaria/pdf_book/utils/trackpad_axis_lock.dart';
+import 'package:otzaria/pdf_book/utils/trackpad_pan_recognizer.dart';
 import 'package:otzaria/widgets/misc/app_cursors.dart';
 import 'package:otzaria/pdf_book/view/page_turn_geometry.dart';
 import 'package:otzaria/pdf_book/view/pdf_page_number_display.dart';
 import 'package:otzaria/pdf_book/view/pdf_commentary_panel.dart';
+import 'package:otzaria/library/bloc/library_bloc.dart';
+import 'package:otzaria/library/bloc/library_state.dart';
 import 'package:otzaria/library/services/parallel_editions_service.dart';
 import 'package:otzaria/pdf_book/view/pdf_external_matches_bar.dart';
 import 'package:otzaria/plugins/models/plugin_book_identity.dart';
@@ -72,8 +75,7 @@ import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:otzaria/utils/file/page_converter.dart';
 import 'package:otzaria/utils/ui/reading_left_pane_policy.dart';
 import 'package:otzaria/widgets/widgets_exports.dart';
-import 'package:otzaria/widgets/layout/dual_adaptive_reader_pane.dart';
-import 'package:otzaria/widgets/layout/split_pane_content_inset.dart';
+import 'package:otzaria/widgets/layout/adaptive_side_pane.dart';
 import 'package:otzaria/widgets/navigation/responsive_action_bar.dart';
 import 'package:otzaria/plugins/services/plugin_toolbar_registry.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_bloc.dart';
@@ -95,6 +97,8 @@ import 'package:otzaria/shortcuts/shortcut_helper.dart';
 import 'package:otzaria/shortcuts/shortcut_validator.dart';
 import 'package:otzaria/utils/link_helpers.dart';
 import 'package:otzaria/widgets/navigation/panel_tab_header.dart';
+import 'package:otzaria/widgets/navigation/nav_panel_search.dart';
+import 'package:otzaria/widgets/navigation/nav_side_panel.dart';
 import 'package:otzaria/theme/theme_exports.dart';
 import 'package:otzaria/widgets/navigation/app_top_bar.dart';
 
@@ -141,6 +145,28 @@ int pdfImageCacheBytesForPanes(int pdfPaneCount) {
   return perPane < kPdfImageCacheMinBytesPerPane
       ? kPdfImageCacheMinBytesPerPane
       : perPane;
+}
+
+/// מלבן הכפולה במרחב התצוגה, בלי חיתוך לגבולותיה. גאומטריית הדפדוף נשענת
+/// עליו: מרכזו הוא השדרה, וחצי מרוחבו הוא עמוד אחד.
+@visibleForTesting
+Rect pdfSpreadTurnViewportRect(Matrix4 matrix, Rect spreadRect) =>
+    MatrixUtils.transformRect(matrix, spreadRect);
+
+/// החלק הנראה של הכפולה — למסכת התצוגה ולאזורי הגרירה, שחייבים להישאר
+/// בתוך המסך. אסור להאכיל בו את גאומטריית הדפדוף: הוא מזיז את השדרה.
+@visibleForTesting
+Rect? pdfSpreadVisibleViewportRect(
+  Matrix4 matrix,
+  Rect spreadRect,
+  Size viewportSize,
+) {
+  final clippedRect = pdfSpreadTurnViewportRect(
+    matrix,
+    spreadRect,
+  ).intersect(Offset.zero & viewportSize);
+  if (clippedRect.width <= 0 || clippedRect.height <= 0) return null;
+  return clippedRect;
 }
 
 /// מחזיר את מדיניות שינוי גודל ה-PDF לפי מצב התצוגה.
@@ -262,7 +288,7 @@ AppContextMenuEntry buildPdfLinksContextMenuEntry({
 
   return AppContextMenuEntry(
     label: 'קישורים',
-    icon: FluentIcons.link_24_regular,
+    icon: OtzariaIcons.link_24_regular,
     enabled: relevantLinks.isNotEmpty,
     childrenBuilder: buildLinkChildren,
   );
@@ -367,6 +393,9 @@ class _PdfBookScreenState extends State<PdfBookScreen>
   late PdfDocumentRefFile _pdfDocumentRef;
   PdfTextSearcher? textSearcher;
   TabController? _leftPaneTabController;
+
+  /// פעולות החיפוש של לשוניות החלונית — מוזנות לסרגל שבסרגל העליון.
+  final NavPanelSearchHost _searchHost = NavPanelSearchHost();
   int _currentLeftPaneTabIndex = 0;
   final FocusNode _searchFieldFocusNode = FocusNode();
   final FocusNode _navigationFieldFocusNode = FocusNode();
@@ -374,6 +403,7 @@ class _PdfBookScreenState extends State<PdfBookScreen>
   final GlobalKey _pdfViewportBoundaryKey = GlobalKey();
   final GlobalKey<AppContextMenuRegionState> _pdfContextMenuKey = GlobalKey();
   late final StreamSubscription<SettingsState> _settingsSub;
+  StreamSubscription<LibraryState>? _libraryReloadSub;
   late final AnimationController _pageTurnController;
 
   // גלילה רציפה
@@ -401,6 +431,9 @@ class _PdfBookScreenState extends State<PdfBookScreen>
   bool _readerFocusAndHideQueued = false;
   bool _bookHasCommentaryLinks = false;
 
+  /// מצב יד — גרירת עכבר גוללת את הדף במקום לסמן טקסט (issue #916).
+  bool _isHandMode = false;
+
   /// פעיל רק בפתיחה לעמוד שאינו ראשון (דף יומי, חיפוש, היסטוריה,
   /// קישור מטקסט). כשהדגל true:
   ///   1. ה-overlay נשאר על המסך עד שה-layout מתייצב על עמוד היעד.
@@ -416,6 +449,9 @@ class _PdfBookScreenState extends State<PdfBookScreen>
   /// שה-layout התייצב, ה-controller באמת נמצא בעמוד זה (ולא נדחף
   /// משם בגלל ממדי עמודי רקע שהתעדכנו).
   int? _stableLayoutTargetPage;
+
+  /// מתי התחיל ה-tracking הנוכחי — בסיס לתקרת [_kStableLayoutMaxWait].
+  DateTime? _stableLayoutStartedAt;
 
   /// הגנה מפני לולאת תיקון אינסופית: אם אחרי [_kStableLayoutMaxRetries]
   /// נסיונות עוד לא הגענו לעמוד היעד, מסתפקים במה שיש ומסירים את
@@ -443,11 +479,18 @@ class _PdfBookScreenState extends State<PdfBookScreen>
   // its queued turn play out).
   final Set<LogicalKeyboardKey> _heldArrowKeys = {};
 
-  // נעילת ציר לגלילת לוח מגע: כשמתחילים גלילה אנכית עם שתי אצבעות,
-  // הציר נשאר אנכי עד שמרימים את האצבעות (מזוהה לפי הפסקה בזרם
-  // האירועים). זה מונע "סחיפה" אופקית של הצופה תוך כדי גלילה רגילה -
-  // אותה התנהגות שיש בכל קורא PDF.
+  // נעילת ציר לגלילת לוח מגע (issues #821, #969): מחווה שקרובה מאוד
+  // לציר ננעלת אליו עד שמרימים את האצבעות, כדי שהצופה לא ייסחף לצדדים
+  // בזמן קריאה; מחווה אלכסונית מוכרעת כחופשית ועוברת ללא קיצוץ.
+  // מופע אחד למסלול אירועי הגלילה (סוף מחווה = הפסקה בזרם האירועים),
+  // ומופע נפרד למסלול מחוות ה-pan של לוח מגע מדויק (סוף מחווה מפורש).
   final TrackpadAxisLock _trackpadAxisLock = TrackpadAxisLock();
+  final TrackpadAxisLock _trackpadPanAxisLock = TrackpadAxisLock();
+
+  // מקדם המהירות שמוזן ל-pdfrx עבור גלילת גלגלת. מחוות pan של לוח מגע
+  // מדויק מוזרמות דרך אותו מסלול (ראו _handleTrackpadPanDelta), ושם
+  // מחלקים בו כדי שהתנועה תישאר 1:1 עם האצבעות.
+  static const double _kScrollByMouseWheel = 0.2;
 
   // Pre-rendered spread cache: lets the page-turn animation start instantly
   // because the target spread snapshot is already in memory at click time.
@@ -539,6 +582,32 @@ class _PdfBookScreenState extends State<PdfBookScreen>
       return;
     }
     _bloc.add(pdf_events.ToggleLeftPane(show));
+  }
+
+  /// מחוות pan של לוח מגע מדויק (מ-TrackpadPanRecognizer): מעבירים את
+  /// ה-delta דרך נעילת הציר, ומזרימים כאירוע גלילה סינתטי לאותו מסלול
+  /// שאירועי הגלילה הרגילים עוברים בו (כולל זום ב-Ctrl והפיזיקה של
+  /// pdfrx). כיוון הגלילה הפוך לכיוון תנועת האצבעות, והחלוקה במקדם
+  /// הגלגלת משאירה את התנועה 1:1.
+  void _handleTrackpadPanDelta(Offset panDelta, Offset globalPosition) {
+    final Offset scrollDelta;
+    if (HardwareKeyboard.instance.isControlPressed) {
+      _trackpadPanAxisLock.reset();
+      scrollDelta = -panDelta;
+    } else {
+      scrollDelta = _trackpadPanAxisLock.applyDelta(-panDelta);
+      if (scrollDelta == Offset.zero) {
+        return;
+      }
+    }
+    widget.tab.pdfViewerController.handlePointerSignalEvent(
+      PointerScrollEvent(
+        kind: PointerDeviceKind.trackpad,
+        position: globalPosition,
+        scrollDelta: scrollDelta / _kScrollByMouseWheel,
+      ),
+    );
+    _scheduleReaderFocusAndHidePaneIfNeeded();
   }
 
   void _scheduleReaderFocusAndHidePaneIfNeeded() {
@@ -652,6 +721,25 @@ class _PdfBookScreenState extends State<PdfBookScreen>
 
     _loadInitialLayoutMode();
 
+    // רענון ספרייה עשוי להוסיף מהדורות מקבילות — מאתרים מחדש כדי שהכפתור
+    // יופיע בלי לפתוח את הטאב מחדש. עץ בלי LibraryBloc (בדיקות) מוותר.
+    try {
+      final libraryBloc = context.read<LibraryBloc>();
+      var previousLibraryState = libraryBloc.state;
+      _libraryReloadSub = libraryBloc.stream.listen((libState) {
+        final completed = LibraryState.reloadCompleted(
+          previousLibraryState,
+          libState,
+        );
+        previousLibraryState = libState;
+        if (!completed || !mounted) return;
+        _resolvedParallelEditions = false;
+        unawaited(_resolveParallelEditions());
+      });
+    } on ProviderNotFoundException {
+      // בדיקות widget בונות את המסך בלי LibraryBloc.
+    }
+
     // הגדרת ערכים התחלתיים מ-Settings
     _settingsSub = settingsBloc.stream.listen((state) {
       _bloc.add(pdf_events.UpdateSidebarWidth(state.sidebarWidth));
@@ -724,6 +812,7 @@ class _PdfBookScreenState extends State<PdfBookScreen>
 
     // הגדרת listeners עם שמות לצורך הסרה נכונה ב-dispose
     _leftPaneTabControllerListener = () {
+      _searchHost.activeTab = _leftPaneTabController!.index;
       if (_currentLeftPaneTabIndex != _leftPaneTabController!.index) {
         setState(() {
           _currentLeftPaneTabIndex = _leftPaneTabController!.index;
@@ -1129,13 +1218,13 @@ class _PdfBookScreenState extends State<PdfBookScreen>
       ),
       AppContextMenuEntry(
         label: 'חפש מקבילות',
-        icon: FluentIcons.book_search_24_regular,
+        icon: OtzariaIcons.book_search_24_regular,
         enabled: _hasPdfTextSelection(),
         onTap: _searchParallelsFromSelection,
       ),
       AppContextMenuEntry(
         label: 'מפרשים',
-        icon: FluentIcons.book_24_regular,
+        icon: OtzariaIcons.book_24_regular,
         // התת-תפריט פעיל אם יש בדף מפרשים זמינים, או אם ניתן לפתוח את
         // חלונית בחירת המפרשים (כדי לאפשר בחירה התחלתית גם בדף ללא מפרשים).
         enabled: relevantCommentators.isNotEmpty || shouldShowSelectEntry,
@@ -1353,7 +1442,12 @@ class _PdfBookScreenState extends State<PdfBookScreen>
           : null,
       enableKeyboardNavigation: false,
       scrollByArrowKey: 25.0,
-      scrollByMouseWheel: 0.2,
+      scrollByMouseWheel: _kScrollByMouseWheel,
+      textSelectionParams: PdfTextSelectionParams(enabled: !_isHandMode),
+      // גרירה ישירה (מגע, כלי היד) חופשית לכל הכיוונים; נעילת הציר
+      // לגלילת לוח מגע נאכפת ב-TrackpadAxisLock וב-TrackpadPanRecognizer
+      // (issues #821, #969) ולא דרך PanAxis, שמקצץ לציר אחד גם אלכסונים.
+      panAxis: PanAxis.free,
       interactionDelegateProvider:
           const PdfViewerScrollInteractionDelegateProviderPhysics(),
       onDocumentLoadFinished: (documentRef, succeeded) {
@@ -1441,7 +1535,27 @@ class _PdfBookScreenState extends State<PdfBookScreen>
                 );
                 _scheduleReaderFocusAndHidePaneIfNeeded();
               },
-              child: const SizedBox.expand(),
+              // בדסקטופ, גלילה בשתי אצבעות על לוח מגע מדויק מגיעה כמחוות
+              // PointerPanZoom שעוקפות את מסלול אירועי הגלילה - נתבעות
+              // כאן כדי שנעילת הציר החכמה תחול גם עליהן (issue #969).
+              child: Platform.isAndroid || Platform.isIOS
+                  ? const SizedBox.expand()
+                  : RawGestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      gestures: {
+                        TrackpadPanRecognizer:
+                            GestureRecognizerFactoryWithHandlers<
+                              TrackpadPanRecognizer
+                            >(
+                              () => TrackpadPanRecognizer(
+                                onPanDelta: _handleTrackpadPanDelta,
+                                onPanEnd: _trackpadPanAxisLock.reset,
+                              ),
+                              (recognizer) {},
+                            ),
+                      },
+                      child: const SizedBox.expand(),
+                    ),
             ),
           ),
         ),
@@ -1511,11 +1625,9 @@ class _PdfBookScreenState extends State<PdfBookScreen>
           ),
         );
 
-        // פתיחה ל"עמוד יעד" (דף יומי/חיפוש/קישור/היסטוריה/סימניה) —
-        // progressive loading עלול לעדכן ממדי עמודים ברקע ולדחוף את
-        // עמוד היעד מהמסך. כל פתיחה לעמוד שאינו הראשון צריכה overlay
-        // עד שה-layout מתייצב, גם אם הקורא לא הגדיר requiresStableLayout
-        // במפורש (היסטוריה/סימניה לא מסמנים את הדגל הזה).
+        // פתיחה ל"עמוד יעד" — progressive loading עלול לדחוף את עמוד היעד
+        // כשממדי עמודים מתעדכנים ברקע; ה-tracking מתקן בחזרה. overlay מוצג
+        // רק כשהקורא ביקש requiresStableLayout (ראה isLoading ב-bloc).
         if (widget.tab.requiresStableLayout || initialTargetPage > 1) {
           _beginStableLayoutTracking(initialTargetPage);
         }
@@ -1769,13 +1881,16 @@ class _PdfBookScreenState extends State<PdfBookScreen>
                   onTap: () {
                     _pdfViewFocusNode.requestFocus();
                   },
-                  child: PdfViewer(
-                    _pdfDocumentRef,
-                    controller: widget.tab.pdfViewerController,
-                    initialPageNumber: widget.tab.pageNumber < 1
-                        ? 1
-                        : widget.tab.pageNumber,
-                    params: _buildPdfViewerParams(layoutMode),
+                  child: MouseRegion(
+                    cursor: _isHandMode ? AppCursors.grab : MouseCursor.defer,
+                    child: PdfViewer(
+                      _pdfDocumentRef,
+                      controller: widget.tab.pdfViewerController,
+                      initialPageNumber: widget.tab.pageNumber < 1
+                          ? 1
+                          : widget.tab.pageNumber,
+                      params: _buildPdfViewerParams(layoutMode),
+                    ),
                   ),
                 ),
         );
@@ -1852,24 +1967,33 @@ class _PdfBookScreenState extends State<PdfBookScreen>
     }
   }
 
-  Rect? _currentSpreadViewportRect(
+  Rect? _currentSpreadViewportRect(PdfViewerController controller) {
+    final spreadRect = _currentSpreadRect(controller);
+    if (spreadRect == null) return null;
+    final viewportRect = pdfSpreadTurnViewportRect(
+      controller.value,
+      spreadRect,
+    );
+    if (viewportRect.width <= 0 || viewportRect.height <= 0) return null;
+    return viewportRect;
+  }
+
+  Rect? _visibleSpreadViewportRect(
     PdfViewerController controller,
     Size viewportSize,
   ) {
     final spreadRect = _currentSpreadRect(controller);
     if (spreadRect == null) return null;
-    final viewportRect = MatrixUtils.transformRect(
+    return pdfSpreadVisibleViewportRect(
       controller.value,
       spreadRect,
+      viewportSize,
     );
-    final clippedRect = viewportRect.intersect(Offset.zero & viewportSize);
-    if (clippedRect.width <= 0 || clippedRect.height <= 0) return null;
-    return clippedRect;
   }
 
   Widget _buildBookViewViewportMask(Size viewportSize) {
     if (!_isBookViewModeActive()) return const SizedBox.shrink();
-    final spreadViewportRect = _currentSpreadViewportRect(
+    final spreadViewportRect = _visibleSpreadViewportRect(
       widget.tab.pdfViewerController,
       viewportSize,
     );
@@ -1911,10 +2035,15 @@ class _PdfBookScreenState extends State<PdfBookScreen>
     final viewportBounds = Offset.zero & viewportSize;
     final pages = <_VisibleBookPage>[];
 
+    final pageLayouts = controller.layout.pageLayouts;
+
     for (final pageNumber in pageNumbers) {
+      // מיקום שמור עלול להצביע מחוץ למסמך הנטען (עמוד ממסמך אחר) — אותה
+      // שמירת טווח שקיימת ב-[_spreadRectForPageLayout].
+      if (pageNumber - 1 >= pageLayouts.length) continue;
       final pageRect = MatrixUtils.transformRect(
         effectiveMatrix,
-        controller.layout.pageLayouts[pageNumber - 1],
+        pageLayouts[pageNumber - 1],
       );
       if (!pageRect.overlaps(viewportBounds)) continue;
 
@@ -1985,7 +2114,7 @@ class _PdfBookScreenState extends State<PdfBookScreen>
     final buttonSize = min(72.0, max(48.0, viewportSize.shortestSide * 0.10));
     final horizontalPadding = min(28.0, viewportSize.width * 0.018);
     final colorScheme = Theme.of(context).colorScheme;
-    final spreadRect = _currentSpreadViewportRect(
+    final spreadRect = _visibleSpreadViewportRect(
       widget.tab.pdfViewerController,
       widget.tab.pdfViewerController.viewSize,
     );
@@ -2508,10 +2637,7 @@ class _PdfBookScreenState extends State<PdfBookScreen>
         : _previousSpreadTargetPage();
     if (targetPage == null) return;
 
-    final spreadRect = _currentSpreadViewportRect(
-      controller,
-      controller.viewSize,
-    );
+    final spreadRect = _currentSpreadViewportRect(controller);
     if (spreadRect == null) return;
 
     _isPageTurnInProgress = true;
@@ -3067,7 +3193,6 @@ class _PdfBookScreenState extends State<PdfBookScreen>
     try {
       final currentSpreadViewportRect = _currentSpreadViewportRect(
         widget.tab.pdfViewerController,
-        widget.tab.pdfViewerController.viewSize,
       );
 
       if (currentSpreadViewportRect == null) {
@@ -3338,10 +3463,15 @@ class _PdfBookScreenState extends State<PdfBookScreen>
   static const Duration _kStableLayoutDebounce = Duration(milliseconds: 800);
   static const int _kStableLayoutMaxRetries = 3;
 
+  // תקרת המתנה ל-onDocumentLoadFinished: במסמכים גדולים הוא עלול להתעכב
+  // דקה — קפיצת עמוד נדירה עדיפה על overlay תקוע (issue #824).
+  static const Duration _kStableLayoutMaxWait = Duration(seconds: 2);
+
   void _beginStableLayoutTracking(int targetPage) {
     if (!mounted) return;
     _stableLayoutTargetPage = targetPage;
     _stableLayoutRetryCount = 0;
+    _stableLayoutStartedAt = DateTime.now();
     // לא מאפסים _documentFullyLoaded כאן — race: onDocumentLoadFinished
     // יכול לירות לפני onViewerReady, ואיפוס היה מאבד את הסימון. הוא
     // מנוהל ריכוזית ב-_createDocumentRef.
@@ -3365,11 +3495,13 @@ class _PdfBookScreenState extends State<PdfBookScreen>
       _restartStableLayoutDebounce();
       return;
     }
-    // אינדיקטור חזק נדרש: בלי ש-onDocumentLoadFinished ירה (= כל
-    // המטא-דאטה נטענה), 800ms של debounce ריק עדיין משאיר אפשרות
-    // שעמודי רקע ימשיכו להידחק ולדחוף את עמוד היעד. בלי הבדיקה הזו
-    // נראו קפיצות גלויות אחרי שה-overlay הוסר ב-bookView.
-    if (!_documentFullyLoaded) {
+    // בלי onDocumentLoadFinished עמודי רקע עוד עלולים לדחוף את עמוד היעד,
+    // אבל ממתינים לו רק עד _kStableLayoutMaxWait — לא לנצח (issue #824).
+    final startedAt = _stableLayoutStartedAt;
+    final maxWaitReached =
+        startedAt != null &&
+        DateTime.now().difference(startedAt) >= _kStableLayoutMaxWait;
+    if (!_documentFullyLoaded && !maxWaitReached) {
       _restartStableLayoutDebounce();
       return;
     }
@@ -3411,6 +3543,7 @@ class _PdfBookScreenState extends State<PdfBookScreen>
     _stableLayoutTimer?.cancel();
     _stableLayoutTimer = null;
     _stableLayoutTargetPage = null;
+    _stableLayoutStartedAt = null;
     if (!_waitingForStableLayout) return;
     if (mounted) {
       setState(() {
@@ -3426,6 +3559,7 @@ class _PdfBookScreenState extends State<PdfBookScreen>
     _stableLayoutTimer?.cancel();
     _stableLayoutTimer = null;
     _stableLayoutTargetPage = null;
+    _stableLayoutStartedAt = null;
     _stableLayoutRetryCount = 0;
     _waitingForStableLayout = false;
     // לא מאפסים _documentFullyLoaded כאן — ראה הסבר ב-_beginStableLayoutTracking.
@@ -3563,11 +3697,13 @@ class _PdfBookScreenState extends State<PdfBookScreen>
     );
     widget.tab.toggleTextViewNotifier.removeListener(_toggleTextViewListener);
     _leftPaneTabController?.dispose();
+    _searchHost.dispose();
     _openFilterRequest.dispose();
     _searchFieldFocusNode.dispose();
     _navigationFieldFocusNode.dispose();
     _pdfViewFocusNode.dispose();
     _settingsSub.cancel();
+    _libraryReloadSub?.cancel();
     _bloc.close();
     _openPdfFilterNotifier.dispose();
 
@@ -3848,18 +3984,38 @@ class _PdfBookScreenState extends State<PdfBookScreen>
             AppTopBar(
               leadingItems: [
                 AppTopBarItem(
-                  widget: BarButton.icon(
+                  widget: BlocBuilder<PdfBookBloc, PdfBookState>(
+                    buildWhen: (prev, curr) {
+                      if (prev is PdfBookLoaded && curr is PdfBookLoaded) {
+                        return prev.showLeftPane != curr.showLeftPane ||
+                            prev.sidebarWidth != curr.sidebarWidth;
+                      }
+                      return true;
+                    },
+                    builder: (context, state) => ValueListenableBuilder<bool>(
+                      valueListenable: widget.tab.pinLeftPane,
+                      builder: (context, isPinned, _) => NavPanelSearchBar(
+                        host: _searchHost,
+                        isOpen: state is PdfBookLoaded && state.showLeftPane,
+                        paneWidth: state is PdfBookLoaded
+                            ? state.sidebarWidth
+                            : 300.0,
+                        isPinned: isPinned,
+                        onTogglePin: MediaQuery.of(context).size.width >= 600
+                            ? () => widget.tab.pinLeftPane.value = !isPinned
+                            : null,
+                      ),
+                    ),
+                  ),
+                ),
+                AppTopBarItem(
+                  widget: NavPanelToggleButton(
                     key: widget.enableTourTargets
                         ? pdfBookNavigationTourTargetKey
                         : null,
-                    tooltip: 'חיפוש וניווט',
-                    icon: widget.tab.showLeftPane.value
-                        ? OtzariaIcons.text_continuous_24_filled
-                        : OtzariaIcons.text_continuous_24_regular,
-                    compact: context.read<SettingsBloc>().state.compactMenuMode,
-                    onPressed: () {
-                      _setLeftPaneVisibility(!widget.tab.showLeftPane.value);
-                    },
+                    isOpen: widget.tab.showLeftPane.value,
+                    onToggle: () =>
+                        _setLeftPaneVisibility(!widget.tab.showLeftPane.value),
                   ),
                 ),
               ],
@@ -3903,18 +4059,22 @@ class _PdfBookScreenState extends State<PdfBookScreen>
                   final showRightPane = state is PdfBookLoaded
                       ? state.showRightPane
                       : false;
-                  return DualAdaptiveReaderPane(
-                    mainContent: _buildReaderMainContent(),
-                    showLeftPane: showLeftPane,
-                    leftPaneContent: _buildLeftPaneContent(showLeftPane),
-                    leftPaneWidth: leftPaneWidth,
-                    leftMinPaneWidth: 200,
-                    leftMaxPaneWidth: 600,
-                    onLeftPaneWidthChanged: (nextWidth) {
+                  // כל חלונית מנוהלת בנפרד, כמו בספרי טקסט: חלונית הניווט
+                  // (NavSidePanel) עוטפת את חלונית המפרשים, שעוטפת את הקורא.
+                  return NavSidePanel(
+                    isOpen: showLeftPane,
+                    alignment: AlignmentDirectional.centerEnd,
+                    paneWidth: leftPaneWidth,
+                    minMainContentWidth: 200,
+                    onClose: () => _setLeftPaneVisibility(false),
+                    isResizable: true,
+                    minPaneWidth: 200,
+                    maxPaneWidth: 600,
+                    autoHandleResponsiveVisibility: false,
+                    onPaneWidthChanged: (nextWidth) {
                       _bloc.add(pdf_events.UpdateSidebarWidth(nextWidth));
                     },
-                    onCloseLeftPane: () => _setLeftPaneVisibility(false),
-                    onLeftPaneResizeEnd: () {
+                    onPaneResizeEnd: () {
                       final current = _bloc.state;
                       if (current is PdfBookLoaded) {
                         context.read<SettingsBloc>().add(
@@ -3922,26 +4082,33 @@ class _PdfBookScreenState extends State<PdfBookScreen>
                         );
                       }
                     },
-                    showRightPane: showRightPane,
-                    rightPaneContent: _buildRightPaneContent(),
-                    rightPaneWidth: rightPaneWidth,
-                    rightMinPaneWidth: 250,
-                    rightMaxPaneWidth: 600,
-                    onRightPaneWidthChanged: (nextWidth) {
-                      _bloc.add(pdf_events.UpdateRightPaneWidth(nextWidth));
-                    },
-                    onCloseRightPane: () {
-                      _bloc.add(const pdf_events.ToggleRightPane(show: false));
-                    },
-                    onRightPaneResizeEnd: () {
-                      final current = _bloc.state;
-                      if (current is PdfBookLoaded) {
-                        context.read<SettingsBloc>().add(
-                          UpdateCommentaryPaneWidth(current.rightPaneWidth),
-                        );
-                      }
-                    },
-                    minMainContentWidth: 200,
+                    paneContent: _buildLeftPaneContent(showLeftPane),
+                    mainContent: AdaptiveSidePane(
+                      isOpen: showRightPane,
+                      alignment: AlignmentDirectional.centerStart,
+                      paneWidth: rightPaneWidth,
+                      minMainContentWidth: 200,
+                      onClose: () => _bloc.add(
+                        const pdf_events.ToggleRightPane(show: false),
+                      ),
+                      isResizable: true,
+                      minPaneWidth: 250,
+                      maxPaneWidth: 600,
+                      autoHandleResponsiveVisibility: false,
+                      onPaneWidthChanged: (nextWidth) {
+                        _bloc.add(pdf_events.UpdateRightPaneWidth(nextWidth));
+                      },
+                      onPaneResizeEnd: () {
+                        final current = _bloc.state;
+                        if (current is PdfBookLoaded) {
+                          context.read<SettingsBloc>().add(
+                            UpdateCommentaryPaneWidth(current.rightPaneWidth),
+                          );
+                        }
+                      },
+                      paneContent: _buildRightPaneContent(),
+                      mainContent: _buildReaderMainContent(),
+                    ),
                   );
                 },
               ),
@@ -3953,17 +4120,6 @@ class _PdfBookScreenState extends State<PdfBookScreen>
   }
 
   Widget _buildReaderMainContent() {
-    // בתצוגת "זה לצד זה" מתווספים שוליי הדופן החיצוני לתוכן בלבד; הידית
-    // (Positioned(left:0)) נשארת צמודה לדופן החלון.
-    final splitInset = SplitPaneContentInset.of(
-      context,
-    ).resolve(Directionality.of(context));
-    final readerContentPadding = EdgeInsets.only(
-      left: splitInset.left,
-      right: _verticalScrollbarGutter + _scrollbarGutterGap + splitInset.right,
-      bottom: _horizontalScrollbarGutter + _scrollbarGutterGap,
-    );
-
     return BlocListener<PdfBookBloc, PdfBookState>(
       listenWhen: (prev, curr) =>
           curr is PdfBookError &&
@@ -3986,66 +4142,63 @@ class _PdfBookScreenState extends State<PdfBookScreen>
             child: Stack(
               fit: StackFit.expand,
               children: [
-                Padding(
-                  padding: readerContentPadding,
-                  child: RepaintBoundary(
-                    key: _pdfViewportBoundaryKey,
-                    child: ColorFiltered(
-                      colorFilter: ColorFilter.mode(
-                        Colors.white,
-                        Provider.of<SettingsBloc>(
-                              context,
-                              listen: true,
-                            ).state.isDarkMode
-                            ? BlendMode.difference
-                            : BlendMode.dst,
-                      ),
-                      child: Stack(
-                        children: [
-                          _buildPdfViewerFromFile(_resolvedPdfPath),
-                          BlocBuilder<PdfBookBloc, PdfBookState>(
-                            buildWhen: (prev, curr) {
-                              if (prev is PdfBookLoaded &&
-                                  curr is PdfBookLoaded) {
-                                return prev.isLoading != curr.isLoading ||
-                                    prev.loadSucceeded != curr.loadSucceeded;
-                              }
-                              return true;
-                            },
-                            builder: (context, state) {
-                              // בזמן auto-retry נשאר הספינר על המסך
-                              if (state is PdfBookError && !state.autoRetry) {
-                                return const SizedBox.shrink();
-                              }
-                              if (state is PdfBookError ||
-                                  state is! PdfBookLoaded ||
-                                  state.isLoading) {
-                                // RepaintBoundary סביב הספינר בלבד: בלי הבידוד
-                                // כל טיק שלו מרסטר מחדש את כל שכבת ה-viewport
-                                // (כולל ה-ColorFiltered) — יקר בטעינות ארוכות.
-                                return const Positioned.fill(
-                                  child: ColoredBox(
-                                    color: AppColors.pageWhite,
-                                    child: Center(
-                                      child: RepaintBoundary(
-                                        child: CircularProgressIndicator(),
-                                      ),
+                RepaintBoundary(
+                  key: _pdfViewportBoundaryKey,
+                  child: ColorFiltered(
+                    colorFilter: ColorFilter.mode(
+                      Colors.white,
+                      Provider.of<SettingsBloc>(
+                            context,
+                            listen: true,
+                          ).state.isDarkMode
+                          ? BlendMode.difference
+                          : BlendMode.dst,
+                    ),
+                    child: Stack(
+                      children: [
+                        _buildPdfViewerFromFile(_resolvedPdfPath),
+                        BlocBuilder<PdfBookBloc, PdfBookState>(
+                          buildWhen: (prev, curr) {
+                            if (prev is PdfBookLoaded &&
+                                curr is PdfBookLoaded) {
+                              return prev.isLoading != curr.isLoading ||
+                                  prev.loadSucceeded != curr.loadSucceeded;
+                            }
+                            return true;
+                          },
+                          builder: (context, state) {
+                            // בזמן auto-retry נשאר הספינר על המסך
+                            if (state is PdfBookError && !state.autoRetry) {
+                              return const SizedBox.shrink();
+                            }
+                            if (state is PdfBookError ||
+                                state is! PdfBookLoaded ||
+                                state.isLoading) {
+                              // RepaintBoundary סביב הספינר בלבד: בלי הבידוד
+                              // כל טיק שלו מרסטר מחדש את כל שכבת ה-viewport
+                              // (כולל ה-ColorFiltered) — יקר בטעינות ארוכות.
+                              return const Positioned.fill(
+                                child: ColoredBox(
+                                  color: AppColors.pageWhite,
+                                  child: Center(
+                                    child: RepaintBoundary(
+                                      child: CircularProgressIndicator(),
                                     ),
                                   ),
-                                );
-                              }
-                              if (!state.loadSucceeded) {
-                                return const Positioned.fill(
-                                  child: Center(
-                                    child: Text('Failed to load PDF'),
-                                  ),
-                                );
-                              }
-                              return const SizedBox.shrink();
-                            },
-                          ),
-                        ],
-                      ),
+                                ),
+                              );
+                            }
+                            if (!state.loadSucceeded) {
+                              return const Positioned.fill(
+                                child: Center(
+                                  child: Text('Failed to load PDF'),
+                                ),
+                              );
+                            }
+                            return const SizedBox.shrink();
+                          },
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -4062,59 +4215,50 @@ class _PdfBookScreenState extends State<PdfBookScreen>
                       return const SizedBox.shrink();
                     }
                     return Positioned.fill(
-                      child: Padding(
-                        padding: readerContentPadding,
-                        child: ColoredBox(
-                          color: Theme.of(context).colorScheme.surface,
-                          child: Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  state.message,
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    color: Theme.of(
-                                      context,
-                                    ).colorScheme.onSurface,
-                                  ),
+                      child: ColoredBox(
+                        color: Theme.of(context).colorScheme.surface,
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                state.message,
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.onSurface,
                                 ),
-                                const SizedBox(height: 16),
-                                ActionButton.recommended(
-                                  text: 'נסה שוב',
-                                  icon: FluentIcons.arrow_clockwise_24_regular,
-                                  onPressed: () {
-                                    setState(() {
-                                      _pdfDocumentRef = _createDocumentRef();
-                                    });
-                                    _bloc.add(const pdf_events.RetryLoad());
-                                  },
-                                ),
-                              ],
-                            ),
+                              ),
+                              const SizedBox(height: 16),
+                              ActionButton.recommended(
+                                text: 'נסה שוב',
+                                icon: FluentIcons.arrow_clockwise_24_regular,
+                                onPressed: () {
+                                  setState(() {
+                                    _pdfDocumentRef = _createDocumentRef();
+                                  });
+                                  _bloc.add(const pdf_events.RetryLoad());
+                                },
+                              ),
+                            ],
                           ),
                         ),
                       ),
                     );
                   },
                 ),
-                Padding(
-                  padding: readerContentPadding,
-                  child: _buildPageTurnOverlay(context),
-                ),
+                _buildPageTurnOverlay(context),
                 // הלחצנים מעל שכבת האנימציה ומחוץ ל-boundary המצולם — כדי
                 // שיישארו גלויים ולחיצים גם בזמן דפדוף.
-                Padding(
-                  padding: readerContentPadding,
-                  child: ListenableBuilder(
-                    listenable: widget.tab.pdfViewerController,
-                    builder: (context, _) => LayoutBuilder(
-                      builder: (context, constraints) =>
-                          _buildBookViewTurnButtons(
-                            context,
-                            constraints.biggest,
-                          ),
-                    ),
+                ListenableBuilder(
+                  listenable: widget.tab.pdfViewerController,
+                  builder: (context, _) => LayoutBuilder(
+                    builder: (context, constraints) =>
+                        _buildBookViewTurnButtons(
+                          context,
+                          constraints.biggest,
+                        ),
                   ),
                 ),
                 ValueListenableBuilder<List<PdfOutlineNode>?>(
@@ -4133,8 +4277,8 @@ class _PdfBookScreenState extends State<PdfBookScreen>
                   ),
                 ),
                 Positioned(
-                  left: splitInset.left,
-                  right: readerContentPadding.right,
+                  left: 0,
+                  right: _verticalScrollbarGutter + _scrollbarGutterGap,
                   bottom: 0,
                   child: RepaintBoundary(
                     child: PdfHorizontalScrollbar(
@@ -4265,11 +4409,11 @@ class _PdfBookScreenState extends State<PdfBookScreen>
   }
 
   Widget _buildLeftPaneContent(bool showLeftPane) {
-    return Column(
-      children: [
-        ValueListenableBuilder(
-          valueListenable: widget.tab.pinLeftPane,
-          builder: (context, pinLeftPanel, child) => SidebarTabHeader(
+    return NavPanelSearchScope(
+      host: _searchHost,
+      child: Column(
+        children: [
+          NavPanelTabHeader(
             controller: _leftPaneTabController!,
             tabs: const [
               (
@@ -4288,72 +4432,82 @@ class _PdfBookScreenState extends State<PdfBookScreen>
                 label: 'דפים',
               ),
             ],
-            isPinned: pinLeftPanel,
-            onTogglePin: MediaQuery.of(context).size.width >= 600
-                ? () {
-                    widget.tab.pinLeftPane.value =
-                        !widget.tab.pinLeftPane.value;
-                  }
-                : null,
           ),
-        ),
-        Expanded(
-          child: TabBarView(
-            controller: _leftPaneTabController,
-            children: [
-              ValueListenableBuilder(
-                valueListenable: widget.tab.outline,
-                builder: (context, outline, child) => OutlineView(
-                  outline: outline,
-                  controller: widget.tab.pdfViewerController,
-                  focusNode: _navigationFieldFocusNode,
-                  isPaneOpen: showLeftPane,
-                  onNavigateToPage: _goToPageWithSpreadLock,
+          Expanded(
+            child: TabBarView(
+              controller: _leftPaneTabController,
+              children: [
+                NavPanelSearchSlot(
+                  index: 0,
+                  child: ValueListenableBuilder(
+                    valueListenable: widget.tab.outline,
+                    builder: (context, outline, child) => OutlineView(
+                      outline: outline,
+                      title: widget.tab.book.title,
+                      controller: widget.tab.pdfViewerController,
+                      focusNode: _navigationFieldFocusNode,
+                      isPaneOpen: showLeftPane,
+                      onNavigateToPage: _goToPageWithSpreadLock,
+                    ),
+                  ),
                 ),
-              ),
-              ValueListenableBuilder(
-                valueListenable: widget.tab.documentRef,
-                builder: (context, documentRef, child) {
-                  if (widget.tab.searchController.text.isNotEmpty) {
-                    _lastProcessedSearchSessionId = null;
-                  }
-                  return child!;
-                },
-                child: textSearcher != null
-                    ? PdfBookSearchView(
-                        textSearcher: textSearcher!,
-                        searchController: widget.tab.searchController,
-                        focusNode: _searchFieldFocusNode,
-                        outline: widget.tab.outline.value,
-                        bookTitle: widget.tab.book.title,
-                        bookTopics: widget.tab.book.topics,
-                        bookCategoryPath: widget.tab.book.categoryPath,
-                        pdfFilePath: _resolvedPdfPath,
-                        initialSearchText: widget.tab.searchText,
-                        initialSearchOptions: widget.tab.searchOptions,
-                        initialAlternativeWords: widget.tab.alternativeWords,
-                        initialSpacingValues: widget.tab.spacingValues,
-                        initialSearchMode: widget.tab.searchMode,
-                        initialSearchDistance: widget.tab.searchDistance,
-                        initialMatchPolicy: widget.tab.matchPolicy,
-                        incomingSearchConfiguration:
-                            widget.tab.incomingSearchConfiguration,
-                        onSearchResultNavigated: _ensureSearchTabIsActive,
-                      )
-                    : const Center(child: CircularProgressIndicator()),
-              ),
-              ValueListenableBuilder(
-                valueListenable: widget.tab.documentRef,
-                builder: (context, documentRef, child) => child!,
-                child: ThumbnailsView(
-                  documentRef: widget.tab.documentRef.value,
-                  controller: widget.tab.pdfViewerController,
+                NavPanelSearchSlot(
+                  index: 1,
+                  child: ValueListenableBuilder(
+                    valueListenable: widget.tab.documentRef,
+                    builder: (context, documentRef, child) {
+                      if (widget.tab.searchController.text.isNotEmpty) {
+                        _lastProcessedSearchSessionId = null;
+                      }
+                      return child!;
+                    },
+                    child: textSearcher != null
+                        ? PdfBookSearchView(
+                            textSearcher: textSearcher!,
+                            searchController: widget.tab.searchController,
+                            focusNode: _searchFieldFocusNode,
+                            outline: widget.tab.outline.value,
+                            bookTitle: widget.tab.book.title,
+                            bookTopics: widget.tab.book.topics,
+                            bookCategoryPath: widget.tab.book.categoryPath,
+                            bookId: widget.tab.book.id,
+                            isUserBook: widget.tab.book.isUserBook,
+                            externalLibraryId:
+                                widget.tab.book.externalLibraryId,
+                            pdfFilePath: _resolvedPdfPath,
+                            initialSearchText: widget.tab.searchText,
+                            initialSearchOptions: widget.tab.searchOptions,
+                            initialAlternativeWords:
+                                widget.tab.alternativeWords,
+                            initialSpacingValues: widget.tab.spacingValues,
+                            initialSearchMode: widget.tab.searchMode,
+                            initialSearchDistance: widget.tab.searchDistance,
+                            initialMatchPolicy: widget.tab.matchPolicy,
+                            incomingSearchConfiguration:
+                                widget.tab.incomingSearchConfiguration,
+                            onSearchResultNavigated: _ensureSearchTabIsActive,
+                          )
+                        : const Center(
+                            child: CircularProgressIndicator(),
+                          ),
+                  ),
                 ),
-              ),
-            ],
+                NavPanelSearchSlot(
+                  index: 2,
+                  child: ValueListenableBuilder(
+                    valueListenable: widget.tab.documentRef,
+                    builder: (context, documentRef, child) => child!,
+                    child: ThumbnailsView(
+                      documentRef: widget.tab.documentRef.value,
+                      controller: widget.tab.pdfViewerController,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -4759,6 +4913,18 @@ class _PdfBookScreenState extends State<PdfBookScreen>
         onPressed: _ensureSearchTabIsActive,
         compact: isCompact,
       ),
+      if (!Platform.isAndroid && !Platform.isIOS)
+        ActionButtonData.simple(
+          icon: _isHandMode
+              ? FluentIcons.hand_left_24_filled
+              : FluentIcons.hand_left_24_regular,
+          tooltip: _isHandMode
+              ? 'מצב יד פעיל — לחץ לחזרה לסימון טקסט'
+              : 'מצב יד — גלילה בגרירת העכבר',
+          selected: _isHandMode,
+          onPressed: () => setState(() => _isHandMode = !_isHandMode),
+          compact: isCompact,
+        ),
       ActionButtonData.simple(
         icon: FluentIcons.zoom_in_24_regular,
         tooltip: 'הגדל את התצוגה',
@@ -4883,7 +5049,7 @@ class _PdfBookScreenState extends State<PdfBookScreen>
         (
           80,
           ActionButtonData.simple(
-            icon: FluentIcons.book_information_24_regular,
+            icon: OtzariaIcons.book_information_24_regular,
             tooltip: 'אודות הספר',
             onPressed: () => showBookDetailsDialog(context, widget.tab.book),
             compact: isCompact,
@@ -4913,7 +5079,7 @@ class _PdfBookScreenState extends State<PdfBookScreen>
               ),
               ActionButtonData(
                 widget: const SizedBox.shrink(),
-                icon: FluentIcons.book_information_24_regular,
+                icon: OtzariaIcons.book_information_24_regular,
                 tooltip: 'אודות הספר',
                 onPressed: () =>
                     showBookDetailsDialog(context, widget.tab.book),
@@ -5038,7 +5204,7 @@ class _PdfBookScreenState extends State<PdfBookScreen>
             widget: const SizedBox.shrink(),
             icon: edition.isCompanion
                 ? OtzariaIcons.document_column_24_regular
-                : FluentIcons.book_24_regular,
+                : OtzariaIcons.book_24_regular,
             tooltip: edition.isCompanion
                 ? '${edition.book.title} — מהדורת טקסט (אוצריא)'
                 : edition.book.title,
@@ -5267,14 +5433,12 @@ class _PdfBookScreenState extends State<PdfBookScreen>
     final isBookViewMode = state.layoutMode.isBookView;
     final iconData = isBookViewMode
         ? OtzariaIcons.book_open_small_24_regular
-        : FluentIcons.book_24_regular;
+        : OtzariaIcons.book_24_regular;
 
     return AppPopupMenuButton<PdfLayoutMode>(
       tooltip: 'בחר מצב תצוגה',
       iconData: iconData,
-      icon: isBookViewMode
-          ? Icon(iconData)
-          : Transform.scale(scaleX: -1.0, child: Icon(iconData)),
+      icon: Icon(iconData),
       position: PopupMenuPosition.under,
       onSelected: (selectedMode) {
         // בחירת "תצוגת ספר" כשכבר בתצוגת ספר משמרת את כיוון הזוגות
@@ -5307,15 +5471,7 @@ class _PdfBookScreenState extends State<PdfBookScreen>
             value: value,
             child: Row(
               children: [
-                value == PdfLayoutMode.bookView
-                    ? Icon(icon, color: isSelected ? primaryColor : null)
-                    : Transform.scale(
-                        scaleX: -1.0,
-                        child: Icon(
-                          icon,
-                          color: isSelected ? primaryColor : null,
-                        ),
-                      ),
+                Icon(icon, color: isSelected ? primaryColor : null),
                 const SizedBox(width: 12),
                 Text(text, style: style),
                 if (isSelected) ...[
@@ -5335,7 +5491,7 @@ class _PdfBookScreenState extends State<PdfBookScreen>
           buildItem(
             value: PdfLayoutMode.regularView,
             text: 'תצוגה רגילה',
-            icon: FluentIcons.book_24_regular,
+            icon: OtzariaIcons.book_24_regular,
             isSelected: !isBookViewMode,
           ),
           buildItem(
@@ -5806,6 +5962,15 @@ class _BookPageTurnPainter extends CustomPainter {
     final backImage = targetSnapshot ?? snapshot;
     Rect? backBounds;
 
+    // תחום הצילום בקואורדינטות המקומיות של הכפולה — כשהכפולה גולשת
+    // מהתצוגה, רצועות נחתכות אליו יעד-ומקור יחד כדי שלא להימתח.
+    final snapshotCoverage = Rect.fromLTWH(
+      -snapshotViewportRect.left,
+      -snapshotViewportRect.top,
+      viewportLogicalSize.width,
+      viewportLogicalSize.height,
+    );
+
     // מהשדרה אל הקצה החופשי — כך הרצועות שכבר התקפלו נצבעות מעל אלה שמתחתן.
     for (final strip in geometry.strips) {
       if (strip.width <= 0.01) {
@@ -5818,28 +5983,34 @@ class _BookPageTurnPainter extends CustomPainter {
         strip.height,
       );
       final sourceImage = strip.showsFront ? snapshot : backImage;
-      final sourceRect = _turningPageSourceStripRect(
-        image: sourceImage,
-        viewportRect: viewportRect,
-        turnLeftPage: turnLeftPage,
-        sampleOppositeHalf: !strip.showsFront && hasTarget,
-        u0: strip.u0,
-        u1: strip.u1,
+      final clamped = clampStripToSnapshotCoverage(
+        dest: destinationRect,
+        source: _turningPageSourceStripRect(
+          image: sourceImage,
+          viewportRect: viewportRect,
+          turnLeftPage: turnLeftPage,
+          sampleOppositeHalf: !strip.showsFront && hasTarget,
+          u0: strip.u0,
+          u1: strip.u1,
+        ),
+        coverage: snapshotCoverage,
       );
+      if (clamped == null) {
+        continue;
+      }
 
       final paint = Paint();
       if (!strip.showsFront) {
-        canvas.drawRect(destinationRect, Paint()..color = pageBackColor);
+        canvas.drawRect(clamped.dest, Paint()..color = pageBackColor);
         if (!hasTarget) {
           paint.colorFilter = ColorFilter.mode(
             pageBackColor.withValues(alpha: 0.30),
             BlendMode.srcATop,
           );
         }
-        backBounds =
-            backBounds?.expandToInclude(destinationRect) ?? destinationRect;
+        backBounds = backBounds?.expandToInclude(clamped.dest) ?? clamped.dest;
       }
-      canvas.drawImageRect(sourceImage, sourceRect, destinationRect, paint);
+      canvas.drawImageRect(sourceImage, clamped.source, clamped.dest, paint);
 
       // הצללה לפי ההטיה: כהה יותר ככל שהרצועה קרובה לקו הקיפול.
       final shadeAlpha = strip.showsFront
@@ -5847,7 +6018,7 @@ class _BookPageTurnPainter extends CustomPainter {
           : strip.tilt * (0.05 + 0.22 * (1 - strip.distance));
       if (shadeAlpha > 0.01) {
         canvas.drawRect(
-          destinationRect,
+          clamped.dest,
           Paint()..color = shadowColor.withValues(alpha: shadeAlpha),
         );
       }
@@ -5988,12 +6159,6 @@ class _BookPageTurnPainter extends CustomPainter {
   }
 
   Rect _sourceRectForLocalRect(ui.Image image, Rect localRect) {
-    final fullImageRect = Rect.fromLTWH(
-      0,
-      0,
-      image.width.toDouble(),
-      image.height.toDouble(),
-    );
     final pixelRatioX = image.width / viewportLogicalSize.width;
     final pixelRatioY = image.height / viewportLogicalSize.height;
 
@@ -6002,7 +6167,7 @@ class _BookPageTurnPainter extends CustomPainter {
       (snapshotViewportRect.top + localRect.top) * pixelRatioY,
       localRect.width * pixelRatioX,
       localRect.height * pixelRatioY,
-    ).intersect(fullImageRect);
+    );
   }
 
   @override

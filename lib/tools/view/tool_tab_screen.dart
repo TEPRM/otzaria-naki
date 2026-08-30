@@ -1,8 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/core/focus_repository.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_bloc.dart';
+import 'package:otzaria/plugins/bloc/plugin_system_state.dart';
+import 'package:otzaria/plugins/bloc/plugin_updates_cubit.dart';
+import 'package:otzaria/plugins/services/plugin_runtime_dispatcher.dart';
+import 'package:otzaria/plugins/view/widgets/plugin_update_chip.dart';
 import 'package:otzaria/settings/engine/settings_bloc.dart';
 import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
 import 'package:otzaria/tabs/bloc/tabs_event.dart';
@@ -28,6 +34,27 @@ bool shouldRequestToolContentFocus({
   return contentIsAttached && !contentHasFocus;
 }
 
+/// מייצב את תוצאת [lookupTool] מול מצבי ביניים של רישום התוספים.
+///
+/// `PluginSystemBloc` אינו נמצא ב-`PluginSystemLoaded` לאורך כל חייו: טעינה
+/// מחדש של הרישום (אחרי התקנה, הצמדה, סידור מחדש) ודיאלוג ההרשאות של התקנה
+/// מעבירים אותו במצבים אחרים, ובהם `lookupTool` מחזיר `loading` — כלומר
+/// "עדיין לא ידוע", לא "אינו זמין". החלפת הכלי בספינר באותם רגעים מוציאה את
+/// `PluginTabPage` מהעץ, הורסת את ה-WebView של התוסף וגורמת לו להיטען מאפס.
+/// לכן כל עוד ידוע כלי קודם — ממשיכים להציג אותו.
+@visibleForTesting
+ToolLookupResult resolveToolLookup(
+  ToolLookupResult lookup,
+  ToolCatalogEntry? lastEntry,
+) {
+  if (lastEntry != null &&
+      lookup is ToolUnavailable &&
+      lookup.reason == ToolUnavailableReason.loading) {
+    return ToolAvailable(lastEntry);
+  }
+  return lookup;
+}
+
 /// מסך של כלי מובנה או תוסף בתוך מסך העיון.
 class ToolTabScreen extends StatefulWidget {
   final ToolTab tab;
@@ -50,6 +77,9 @@ class ToolTabScreenState extends State<ToolTabScreen>
 
   /// התוכן נבנה רק כשהטאב מוצג, כדי לא ליצור WebView מראש.
   bool _activated = false;
+
+  /// הכלי שהוצג לאחרונה — ראה [resolveToolLookup].
+  ToolCatalogEntry? _lastEntry;
 
   @override
   bool get wantKeepAlive => _activated;
@@ -74,6 +104,16 @@ class ToolTabScreenState extends State<ToolTabScreen>
     if (!mounted) return;
     if (widget.tab.toolId == 'builtin.calendar') {
       _requestCalendarFocus();
+      return;
+    }
+    if (widget.tab.isPlugin) {
+      // פוקוס ה-WebView חי מחוץ לעץ של Flutter, ולכן נדרשת העברה נייטיבית.
+      unawaited(
+        PluginRuntimeDispatcher.instance.requestKeyboardFocus(
+          widget.tab.toolId,
+          instanceId: widget.tab.instanceId,
+        ),
+      );
       return;
     }
     if (shouldRequestToolContentFocus(
@@ -140,20 +180,27 @@ class ToolTabScreenState extends State<ToolTabScreen>
 
     final settingsState = context.watch<SettingsBloc>().state;
     final pluginState = context.watch<PluginSystemBloc>().state;
-    final lookup = lookupTool(
-      widget.tab.toolId,
-      hiddenBuiltInToolIds: settingsState.hiddenBuiltInToolIds,
-      isOfflineMode: settingsState.isOfflineMode,
-      pluginState: pluginState,
+    final lookup = resolveToolLookup(
+      lookupTool(
+        widget.tab.toolId,
+        hiddenBuiltInToolIds: settingsState.hiddenBuiltInToolIds,
+        isOfflineMode: settingsState.isOfflineMode,
+        pluginState: pluginState,
+      ),
+      _lastEntry,
     );
 
     final Widget content = switch (lookup) {
-      ToolAvailable(:final entry) => _buildToolContent(entry),
+      ToolAvailable(:final entry) => _buildToolContent(_lastEntry = entry),
+      // ספינר רק בטעינה הראשונה — אחריה resolveToolLookup מחזיר את הכלי הקודם.
       ToolUnavailable(reason: ToolUnavailableReason.loading) => const Center(
         child: CircularProgressIndicator(),
       ),
       final ToolUnavailable unavailable => _buildUnavailable(unavailable),
     };
+
+    final plugin = lookup is ToolAvailable ? lookup.entry.plugin : null;
+    if (plugin != null) _requestUpdateCheck(pluginState);
 
     return Stack(
       children: [
@@ -169,13 +216,32 @@ class ToolTabScreenState extends State<ToolTabScreen>
         // WebView עלול לבלוע Escape במסך מלא.
         if (settingsState.isFullscreen)
           const Positioned(top: 8, right: 8, child: ExitFullscreenButton()),
+        if (plugin != null)
+          PositionedDirectional(
+            bottom: 16,
+            start: 16,
+            child: PluginUpdateChip(plugin: plugin),
+          ),
       ],
     );
   }
 
+  /// בדיקת עדכונים עצלה בפתיחת טאב תוסף — הקוביט מתלכד וממטמן, כך שפתיחת
+  /// כמה טאבים גוררת לכל היותר קריאת רשת אחת לחלון זמן.
+  void _requestUpdateCheck(PluginSystemState pluginState) {
+    if (pluginState is! PluginSystemLoaded) return;
+    final cubit = context.read<PluginUpdatesCubit>();
+    final plugins = pluginState.plugins;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) cubit.ensureChecked(plugins);
+    });
+  }
+
   Widget _buildToolContent(ToolCatalogEntry entry) {
     final plugin = entry.plugin;
-    if (plugin != null) return buildPluginToolPage(plugin);
+    if (plugin != null) {
+      return buildPluginToolPage(plugin, instanceId: widget.tab.instanceId);
+    }
     return buildBuiltInToolPage(
           entry.toolId,
           calendarKey: _calendarKey,
@@ -187,6 +253,8 @@ class ToolTabScreenState extends State<ToolTabScreen>
   }
 
   Widget _buildUnavailable(ToolUnavailable unavailable) {
+    // הכלי אינו זמין (הוסר/הושבת/הוסתר) — אין למה לחזור בטעינה הבאה.
+    _lastEntry = null;
     final name = unavailable.name ?? widget.tab.title;
     final (message, subtitle) = switch (unavailable.reason) {
       ToolUnavailableReason.builtInHidden => (

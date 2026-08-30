@@ -27,10 +27,15 @@ class InstallRemotePluginRequested extends PluginSystemEvent {
   /// הקשר דיווח תוצאה חזרה לאתר החנות (טוקן + callback). null = ללא דיווח.
   final PluginInstallReportContext? reportContext;
 
+  /// ההתקנה יזומה ע"י תוסף (`plugin.requestInstall`) ולא ע"י המשתמש. במצב
+  /// כזה ההורדה מוגבלת למארחי החנות בכל hop, כולל אחרי redirect.
+  final bool storeOnly;
+
   const InstallRemotePluginRequested(
     this.downloadUrl, {
     this.forceOverwrite = false,
     this.reportContext,
+    this.storeOnly = false,
   });
 
   @override
@@ -39,6 +44,7 @@ class InstallRemotePluginRequested extends PluginSystemEvent {
     forceOverwrite,
     reportContext?.token,
     reportContext?.callbackUrl,
+      storeOnly,
   ];
 }
 
@@ -51,13 +57,20 @@ class ConfirmPluginInstall extends PluginSystemEvent {
   final bool allowOrderBeforeBuiltInsGranted;
   final PluginInstallReportContext? reportContext;
 
+  /// גרסה מותקנת קודמת — null אם זו התקנה ראשונה. נושא את ההבחנה מדיאלוג
+  /// האישור אל הודעת הסיום ואל הדיווח לאתר.
+  final String? previousVersion;
+
   const ConfirmPluginInstall(
     this.tempDirPath,
     this.manifest,
     this.grantedPermissions,
     this.allowOrderBeforeBuiltInsGranted, {
     this.reportContext,
+    this.previousVersion,
   });
+
+  bool get isUpdate => previousVersion != null;
 
   @override
   List<Object?> get props => [
@@ -67,6 +80,7 @@ class ConfirmPluginInstall extends PluginSystemEvent {
     allowOrderBeforeBuiltInsGranted,
     reportContext?.token,
     reportContext?.callbackUrl,
+    previousVersion,
   ];
 }
 
@@ -218,13 +232,19 @@ class ConfirmDevPluginInstall extends PluginSystemEvent {
   final Map<String, bool> grantedPermissions;
   final bool allowOrderBeforeBuiltInsGranted;
 
+  /// גרסה מותקנת קודמת — null אם זו התקנה ראשונה.
+  final String? previousVersion;
+
   const ConfirmDevPluginInstall({
     required this.manifest,
     required this.sourcePath,
     required this.sourceType,
     required this.grantedPermissions,
     required this.allowOrderBeforeBuiltInsGranted,
+    this.previousVersion,
   });
+
+  bool get isUpdate => previousVersion != null;
 
   @override
   List<Object?> get props => [
@@ -233,6 +253,7 @@ class ConfirmDevPluginInstall extends PluginSystemEvent {
     sourceType,
     grantedPermissions,
     allowOrderBeforeBuiltInsGranted,
+    previousVersion,
   ];
 }
 

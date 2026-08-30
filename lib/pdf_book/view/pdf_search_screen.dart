@@ -1,10 +1,11 @@
 import 'dart:async';
-import 'package:otzaria/theme/app_tokens.dart';
 
 import 'package:flutter/material.dart';
+import 'package:otzaria/widgets/lists/nav_tree_tile.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/core/messages/pdf_messages.dart';
 import 'package:otzaria/core/ui_snack.dart';
+import 'package:otzaria/data/data_providers/tantivy_data_provider.dart';
 import 'package:otzaria/models/books.dart';
 import 'package:otzaria/pdf_book/bloc/pdf_book_bloc.dart';
 import 'package:otzaria/pdf_book/bloc/pdf_book_event.dart';
@@ -37,6 +38,9 @@ class PdfBookSearchView extends StatefulWidget {
     this.bookTitle,
     this.bookTopics,
     this.bookCategoryPath,
+    this.bookId,
+    this.isUserBook = false,
+    this.externalLibraryId,
     this.pdfFilePath,
     this.initialSearchText = '',
     this.initialSearchOptions = const {},
@@ -58,6 +62,12 @@ class PdfBookSearchView extends StatefulWidget {
   final String? bookTitle;
   final String? bookTopics;
   final String? bookCategoryPath;
+
+  /// מזהי הספר לבניית נתיב ה-facet — חייבים להיכלל בדיוק כמו באינדוקס
+  /// (id:/uid:/ext:), אחרת מסלול המנוע מחפש תחת facet שאינו קיים.
+  final int? bookId;
+  final bool isUserBook;
+  final String? externalLibraryId;
 
   /// Absolute path to the currently opened PDF file.
   ///
@@ -116,6 +126,20 @@ class PdfBookSearchView extends StatefulWidget {
     return visualIdx;
   }
 
+  /// הודעה כשמסלול המנוע החזיר 0 תוצאות והספר כלל אינו באינדקס —
+  /// בלעדיה "אין תוצאות" הגנרי מסתיר מהמשתמש את הסיבה האמיתית.
+  @visibleForTesting
+  static String? missingFromIndexNotice({
+    required String? pdfFilePath,
+    required bool indexInitialized,
+    required Set<String> indexedFilePaths,
+  }) {
+    if (pdfFilePath == null || pdfFilePath.isEmpty) return null;
+    if (!indexInitialized) return null;
+    if (indexedFilePaths.contains(pdfFilePath)) return null;
+    return PdfMessages.bookNotInSearchIndex;
+  }
+
   /// תקרת מונחים ייחודיים לתבנית ההדגשה, כדי שהרגקס לא יתנפח.
   static const int _maxHighlightTerms = 50;
 
@@ -148,7 +172,7 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
   bool _isSearching = false;
   List<SearchResult> _searchResults = [];
 
-  /// הודעת שגיאה אחרונה בחיפוש (כשל מנוע/FFI). ראו doc ב-[SearchPaneBase].
+  /// מוצגת במקום "אין תוצאות" הגנרי: כשל מנוע/FFI או ספר שאינו באינדקס.
   String? _searchErrorMessage;
   String? _bookPath;
   final Map<int, String> _pageTitles = <int, String>{};
@@ -274,6 +298,8 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
       initialTopics: widget.bookTopics ?? '',
       type: PdfBook,
       categoryPath: widget.bookCategoryPath,
+      externalLibraryId: widget.externalLibraryId,
+      bookId: widget.bookId,
       fileType: 'pdf',
       filePath: widget.pdfFilePath,
     );
@@ -283,6 +309,9 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
     _bookPath = BookFacet.buildFacetPath(
       title: title,
       topics: topics,
+      bookId: widget.bookId,
+      isUserBook: widget.isUserBook,
+      externalLibraryId: widget.externalLibraryId,
       categoryPath: widget.bookCategoryPath,
       fileType: 'pdf',
       filePath: widget.pdfFilePath,
@@ -525,6 +554,13 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
       setState(() {
         _searchResults = results;
         _isSearching = false;
+        if (results.isEmpty) {
+          _searchErrorMessage = PdfBookSearchView.missingFromIndexNotice(
+            pdfFilePath: widget.pdfFilePath,
+            indexInitialized: TantivyDataProvider.instance.isInitialized.value,
+            indexedFilePaths: TantivyDataProvider.instance.indexedFilePaths,
+          );
+        }
       });
       _updateAdvancedHighlight(results);
       _scheduleScrollToCurrentPage();
@@ -580,90 +616,78 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
       resultCountString: _searchResults.isNotEmpty
           ? 'נמצאו ${_searchResults.length} תוצאות'
           : null,
-      resultsWidget: ScrollablePositionedList.builder(
-        itemScrollController: _resultsScrollController,
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        itemCount: items.length,
-        itemBuilder: (context, index) {
-          final item = items[index];
+      resultsWidget: NavTreeFocusGroup(
+        child: ScrollablePositionedList.builder(
+          itemScrollController: _resultsScrollController,
+          padding: kNavTreeListPadding,
+          itemCount: items.length,
+          itemBuilder: (context, index) {
+            final item = items[index];
+            // הקבוצה נפתחת אחרי כותרת עמוד ונסגרת לפני הכותרת הבאה.
+            final isGroupStart = index == 0 || items[index - 1] is int;
+            final isGroupEnd =
+                index == items.length - 1 || items[index + 1] is int;
 
-          if (item is int) {
-            return BlocBuilder<SettingsBloc, SettingsState>(
-              builder: (context, settingsState) {
-                var text = _pageTitles[item]?.isNotEmpty == true
-                    ? _pageTitles[item]!
-                    : 'עמוד $item';
+            if (item is int) {
+              return BlocBuilder<SettingsBloc, SettingsState>(
+                builder: (context, settingsState) {
+                  var text = _pageTitles[item]?.isNotEmpty == true
+                      ? _pageTitles[item]!
+                      : 'עמוד $item';
 
-                if (settingsState.replaceHolyNames) {
-                  text = utils.replaceHolyNames(text);
-                }
+                  if (settingsState.replaceHolyNames) {
+                    text = utils.replaceHolyNames(text);
+                  }
 
-                return Padding(
-                  padding: const EdgeInsets.only(
-                    top: 8.0,
-                    bottom: 8.0,
-                    right: 20.0,
-                    left: 20.0,
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.picture_as_pdf,
-                        size: 18,
-                        color: Theme.of(context).colorScheme.primary,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          text,
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                            color: Theme.of(context).colorScheme.primary,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            );
-          }
-
-          final result = item as SearchResult;
-          return SearchResultTile(
-            key: ValueKey('${result.segment}_${result.text.hashCode}'),
-            result: result,
-            onTap: () async {
-              final pageNumber = _getPdfPageNumber(result);
-              final controller = widget.textSearcher.controller;
-              if (controller != null &&
-                  controller.isReady &&
-                  controller.layout.pageLayouts.isNotEmpty) {
-                final layout = controller.layout;
-                final safePage = pageNumber.clamp(1, layout.pageLayouts.length);
-                final page = layout.pageLayouts[safePage - 1];
-                final halfViewHeight =
-                    controller.viewSize.height / 2 / controller.value.zoom;
-                await controller.goTo(
-                  controller.calcMatrixFor(
-                    page.topCenter.translate(0, halfViewHeight),
-                  ),
-                );
-              }
-
-              _schedulePdfHighlight(
-                _isSimpleSearch
-                    ? buildLiteralPattern(widget.searchController.text)?.regExp
-                    : _lastAdvancedHighlightPattern,
+                  return NavTreeHeader(title: text);
+                },
               );
-              widget.onSearchResultNavigated?.call();
-            },
-            height: 50,
-            query: widget.searchController.text,
-            isSimpleSearch: _isSimpleSearch,
-          );
-        },
+            }
+
+            final result = item as SearchResult;
+            return NavTreeGroupCard(
+              isGroupStart: isGroupStart,
+              isGroupEnd: isGroupEnd,
+              child: SearchResultTile(
+                key: ValueKey('${result.segment}_${result.text.hashCode}'),
+                result: result,
+                onTap: () async {
+                  final pageNumber = _getPdfPageNumber(result);
+                  final controller = widget.textSearcher.controller;
+                  if (controller != null &&
+                      controller.isReady &&
+                      controller.layout.pageLayouts.isNotEmpty) {
+                    final layout = controller.layout;
+                    final safePage = pageNumber.clamp(
+                      1,
+                      layout.pageLayouts.length,
+                    );
+                    final page = layout.pageLayouts[safePage - 1];
+                    final halfViewHeight =
+                        controller.viewSize.height / 2 / controller.value.zoom;
+                    await controller.goTo(
+                      controller.calcMatrixFor(
+                        page.topCenter.translate(0, halfViewHeight),
+                      ),
+                    );
+                  }
+
+                  _schedulePdfHighlight(
+                    _isSimpleSearch
+                        ? buildLiteralPattern(
+                            widget.searchController.text,
+                          )?.regExp
+                        : _lastAdvancedHighlightPattern,
+                  );
+                  widget.onSearchResultNavigated?.call();
+                },
+                height: 50,
+                query: widget.searchController.text,
+                isSimpleSearch: _isSimpleSearch,
+              ),
+            );
+          },
+        ),
       ),
       isNoResults:
           widget.searchController.text.isNotEmpty &&
@@ -770,31 +794,7 @@ class SearchResultTile extends StatelessWidget {
           context,
         );
 
-        return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-          child: Container(
-            decoration: BoxDecoration(
-              border: Border.all(
-                color: Theme.of(
-                  context,
-                ).colorScheme.outline.withValues(alpha: 0.3),
-                width: 1,
-              ),
-              borderRadius: AppTokens.borderRadiusAll,
-            ),
-            child: InkWell(
-              onTap: onTap,
-              borderRadius: AppTokens.borderRadiusAll,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 10,
-                ),
-                child: text,
-              ),
-            ),
-          ),
-        );
+        return NavTreeContentRow(onTap: onTap, child: text);
       },
     );
   }

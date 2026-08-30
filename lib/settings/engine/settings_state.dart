@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:equatable/equatable.dart';
+import 'package:otzaria/settings/engine/settings_repository.dart';
 import 'package:otzaria/settings/l10n/settings_language.dart';
 import 'package:otzaria/theme/app_seed_colors.dart';
 
@@ -53,6 +54,7 @@ class SettingsState extends Equatable {
   final bool isFullscreen;
   final String libraryViewMode;
   final bool libraryShowPreview;
+  final bool searchShowPreview;
   final Map<String, String> shortcuts;
   final bool enablePerBookSettings;
   final bool pdfBookViewByDefault;
@@ -66,6 +68,11 @@ class SettingsState extends Equatable {
   /// כדי שה-UI יתרענן ריאקטיבית גם כשהמצב המוגן עצמו לא מופעל.
   final bool protectedModePasswordSet;
   final bool compactMenuMode;
+
+  /// מיקום כרטיסיות העיון: `top` ברצועת הכותרת, `side` בעמודה אנכית.
+  final String readingTabsPlacement;
+  final double readingTabsColumnWidth;
+  final bool readingTabsColumnCollapsed;
 
   /// מיזוג תיקיות מותאמות אישית לתוך עץ הספרייה הראשי לפי שם.
   final bool mergeUserBooksIntoLibrary;
@@ -119,6 +126,7 @@ class SettingsState extends Equatable {
     required this.isFullscreen,
     required this.libraryViewMode,
     required this.libraryShowPreview,
+    required this.searchShowPreview,
     required this.shortcuts,
     required this.enablePerBookSettings,
     required this.pdfBookViewByDefault,
@@ -129,6 +137,10 @@ class SettingsState extends Equatable {
     required this.protectedModeEnabled,
     this.protectedModePasswordSet = false,
     this.compactMenuMode = false,
+    this.readingTabsPlacement = SettingsRepository.readingTabsPlacementTop,
+    this.readingTabsColumnWidth =
+        SettingsRepository.defaultReadingTabsColumnWidth,
+    this.readingTabsColumnCollapsed = false,
     this.mergeUserBooksIntoLibrary = false,
     this.hiddenBuiltInToolIds = const <String>{},
     this.builtInToolsPinnedToNavRail = const <String>{},
@@ -172,6 +184,7 @@ class SettingsState extends Equatable {
       isFullscreen: false,
       libraryViewMode: 'grid',
       libraryShowPreview: true,
+      searchShowPreview: true,
       shortcuts: {},
       enablePerBookSettings: false,
       pdfBookViewByDefault: false,
@@ -220,6 +233,7 @@ class SettingsState extends Equatable {
     bool? isFullscreen,
     String? libraryViewMode,
     bool? libraryShowPreview,
+    bool? searchShowPreview,
     Map<String, String>? shortcuts,
     bool? enablePerBookSettings,
     bool? pdfBookViewByDefault,
@@ -230,6 +244,9 @@ class SettingsState extends Equatable {
     bool? protectedModeEnabled,
     bool? protectedModePasswordSet,
     bool? compactMenuMode,
+    String? readingTabsPlacement,
+    double? readingTabsColumnWidth,
+    bool? readingTabsColumnCollapsed,
     bool? mergeUserBooksIntoLibrary,
     Set<String>? hiddenBuiltInToolIds,
     Set<String>? builtInToolsPinnedToNavRail,
@@ -277,6 +294,7 @@ class SettingsState extends Equatable {
       isFullscreen: isFullscreen ?? this.isFullscreen,
       libraryViewMode: libraryViewMode ?? this.libraryViewMode,
       libraryShowPreview: libraryShowPreview ?? this.libraryShowPreview,
+      searchShowPreview: searchShowPreview ?? this.searchShowPreview,
       shortcuts: shortcuts ?? this.shortcuts,
       enablePerBookSettings:
           enablePerBookSettings ?? this.enablePerBookSettings,
@@ -292,6 +310,11 @@ class SettingsState extends Equatable {
       protectedModePasswordSet:
           protectedModePasswordSet ?? this.protectedModePasswordSet,
       compactMenuMode: compactMenuMode ?? this.compactMenuMode,
+      readingTabsPlacement: readingTabsPlacement ?? this.readingTabsPlacement,
+      readingTabsColumnWidth:
+          readingTabsColumnWidth ?? this.readingTabsColumnWidth,
+      readingTabsColumnCollapsed:
+          readingTabsColumnCollapsed ?? this.readingTabsColumnCollapsed,
       mergeUserBooksIntoLibrary:
           mergeUserBooksIntoLibrary ?? this.mergeUserBooksIntoLibrary,
       hiddenBuiltInToolIds: hiddenBuiltInToolIds ?? this.hiddenBuiltInToolIds,
@@ -303,6 +326,10 @@ class SettingsState extends Equatable {
           softwareAndBookUpdatesEnabled ?? this.softwareAndBookUpdatesEnabled,
     );
   }
+
+  /// האם כרטיסיות העיון מוצגות כעמודה אנכית בצד ולא ברצועת הכותרת.
+  bool get readingTabsOnSide =>
+      readingTabsPlacement == SettingsRepository.readingTabsPlacementSide;
 
   bool get softwareAndBookUpdatesEnabled =>
       _softwareAndBookUpdatesEnabled ?? true;
@@ -346,6 +373,7 @@ class SettingsState extends Equatable {
     isFullscreen,
     libraryViewMode,
     libraryShowPreview,
+    searchShowPreview,
     shortcuts,
     enablePerBookSettings,
     pdfBookViewByDefault,
@@ -356,6 +384,9 @@ class SettingsState extends Equatable {
     protectedModeEnabled,
     protectedModePasswordSet,
     compactMenuMode,
+    readingTabsPlacement,
+    readingTabsColumnWidth,
+    readingTabsColumnCollapsed,
     mergeUserBooksIntoLibrary,
     hiddenBuiltInToolIds,
     builtInToolsPinnedToNavRail,

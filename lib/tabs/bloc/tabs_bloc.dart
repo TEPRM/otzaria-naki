@@ -20,6 +20,9 @@ import 'package:otzaria/text_book/bloc/text_book_event.dart';
 import 'package:otzaria/text_book/bloc/text_book_state.dart';
 import 'package:otzaria/utils/text/ref_helper.dart';
 
+/// כמה כרטיסיות שנסגרו נשמרות לשחזור. מוגבל כי כל רשומה מחזיקה מופע טאב חי.
+const int _kMaxRecentlyClosedTabs = 10;
+
 class _ClosedTabEntry {
   final OpenedTab tab;
   final int originalIndex;
@@ -33,6 +36,12 @@ class _ClosedTabEntry {
 class TabsBloc extends Bloc<TabsEvent, TabsState> {
   final TabsRepository _repository;
   final List<_ClosedTabEntry> _recentlyClosedTabs = <_ClosedTabEntry>[];
+
+  /// הכרטיסיות שנסגרו לאחרונה, מהאחרונה שנסגרה ואילך. הרשימה אינה חלק
+  /// מה-state, ולכן קוראים אותה בתוך `BlocBuilder` על שינוי הכרטיסיות.
+  List<OpenedTab> get recentlyClosedTabs => List<OpenedTab>.unmodifiable(
+    _recentlyClosedTabs.reversed.map((entry) => entry.tab),
+  );
 
   List<OpenedTab>? _pendingSaveTabs;
   int _pendingSaveIndex = 0;
@@ -136,6 +145,7 @@ class TabsBloc extends Bloc<TabsEvent, TabsState> {
       _onRestoreLastClosedTab,
       transformer: sequential(),
     );
+    on<RestoreClosedTab>(_onRestoreClosedTab, transformer: sequential());
     on<SaveTabs>(_onSaveTabs, transformer: sequential());
     on<TogglePinTab>(_onTogglePinTab, transformer: sequential());
     on<CreateCombinedTab>(
@@ -153,6 +163,7 @@ class TabsBloc extends Bloc<TabsEvent, TabsState> {
     on<UpdateSplitRatio>(_onUpdateSplitRatio, transformer: sequential());
     on<SwapSideBySideTabs>(_onSwapSideBySideTabs, transformer: sequential());
     on<ClosePane>(_onClosePane, transformer: sequential());
+    on<DetachPane>(_onDetachPane, transformer: sequential());
     on<SetActivePane>(_onSetActivePane);
 
     _preCloseCallback = _flushPendingSaves;
@@ -770,6 +781,11 @@ class TabsBloc extends Bloc<TabsEvent, TabsState> {
     return explicitTitle?.trim().isEmpty ?? true ? null : explicitTitle!.trim();
   }
 
+  /// תקרת-זמן לשליפת ה-TOC של רזולוציית הכותרת: הרזולוציה היא best-effort
+  /// (null ⇒ טאב חדש), ושליפה תקועה חוסמת לצמיתות כל פתיחת ספר (issue #853).
+  @visibleForTesting
+  static Duration locationTitleResolveTimeout = const Duration(seconds: 5);
+
   Future<String?> _resolveTextTabLocationTitle(TextBookTab tab) async {
     final currentTitle = tab.currentTitle.value.trim();
     if (currentTitle.isNotEmpty) {
@@ -777,7 +793,10 @@ class TabsBloc extends Bloc<TabsEvent, TabsState> {
     }
 
     try {
-      final ref = await refFromIndex(tab.index, tab.book.tableOfContents);
+      final ref = await refFromIndex(
+        tab.index,
+        tab.book.tableOfContents,
+      ).timeout(locationTitleResolveTimeout);
       return ref.trim().isEmpty ? null : ref;
     } catch (_) {
       return null;
@@ -858,6 +877,9 @@ class TabsBloc extends Bloc<TabsEvent, TabsState> {
         originalIndex: originalIndex,
       ),
     );
+    while (_recentlyClosedTabs.length > _kMaxRecentlyClosedTabs) {
+      _recentlyClosedTabs.removeAt(0).tab.dispose();
+    }
   }
 
   /// מנרמל את הבחירה המרובה מול רשימת טאבים חדשה: כרטיסיות שנסגרו/הוחלפו
@@ -1028,9 +1050,25 @@ class TabsBloc extends Bloc<TabsEvent, TabsState> {
     Emitter<TabsState> emit,
   ) async {
     if (_recentlyClosedTabs.isEmpty) return;
+    await _restoreClosedEntry(_recentlyClosedTabs.removeLast(), emit);
+  }
 
-    final closedEntry = _recentlyClosedTabs.removeLast();
-    // תוסף פתוח ממוקד במקום ליצור מופע WebView נוסף.
+  Future<void> _onRestoreClosedTab(
+    RestoreClosedTab event,
+    Emitter<TabsState> emit,
+  ) async {
+    final index = _recentlyClosedTabs.indexWhere(
+      (entry) => identical(entry.tab, event.tab),
+    );
+    if (index == -1) return;
+    await _restoreClosedEntry(_recentlyClosedTabs.removeAt(index), emit);
+  }
+
+  Future<void> _restoreClosedEntry(
+    _ClosedTabEntry closedEntry,
+    Emitter<TabsState> emit,
+  ) async {
+    // כלי פתוח ממוקד במקום ליצור מופע נוסף.
     final existingIndex = _indexOfMatchingDedupeKey(closedEntry.tab);
     if (existingIndex != null) {
       closedEntry.tab.dispose();
@@ -1406,5 +1444,37 @@ class TabsBloc extends Bloc<TabsEvent, TabsState> {
 
     // אין לשחרר את הטאב המפוצל כי האחות ממשיכה להיות מוצגת.
     _disposeTabLater(event.pane);
+  }
+
+  Future<void> _onDetachPane(DetachPane event, Emitter<TabsState> emit) async {
+    final index = state.tabs.indexWhere(
+      (tab) => tab is CombinedTab && tab.sibling(event.pane) != null,
+    );
+    if (index == -1) return;
+
+    final combined = state.tabs[index] as CombinedTab;
+    final survivor = combined.sibling(event.pane)!;
+    // ההצמדה עוברת לשתי החלוניות, כמו בפירוק מלא של הטאב המפוצל.
+    if (combined.isPinned) {
+      survivor.isPinned = true;
+      event.pane.isPinned = true;
+    }
+
+    final newTabs = List<OpenedTab>.from(state.tabs);
+    newTabs[index] = survivor;
+    final insertIndex = event.insertIndex.clamp(0, newTabs.length);
+    newTabs.insert(insertIndex, event.pane);
+
+    emit(
+      state.copyWith(
+        tabs: newTabs,
+        // החלונית שנגררה החוצה נשארת מול העיניים, כמו גרירת כרטיסיה בדפדפן.
+        currentTabIndex: insertIndex,
+        forceUpdate: true,
+        selectedTabs: _normalizedSelection(newTabs),
+      ),
+    );
+    _scheduleSave(newTabs, insertIndex);
+    // אין לשחרר דבר: שתי החלוניות ממשיכות להיות מוצגות ככרטיסיות.
   }
 }

@@ -83,21 +83,39 @@ Future<void> main() async {
       expect(out, contains('²'));
     });
 
-    test('sup עברי חשוף (בלי class) נשאר sup — superscript תוכני אמיתי', () {
+    // sup חשוף היה נשאר `<sup>` ונרנדר ב-WidgetSpan של fwfh — מה שהפך את סדר
+    // הסימונים בפסקת RTL. כיום הוא נפלט כ-span טקסט טהור במחלקת raised-sup,
+    // עם אותן מטריקות (5/6, בלי נטייה), וההרמה נעשית בציור.
+    test('sup עברי חשוף (בלי class) נפלט כ-raised-sup — superscript תוכני', () {
       const line = 'טקסט עם <sup>מעריך</sup> רגיל';
 
       final out = TextRendererService.processText(line, settings);
 
-      expect(out, contains('<sup>'));
+      expect(out, isNot(contains('<sup')));
+      expect(out, contains('class="raised-sup"'));
       expect(out, isNot(contains('footnote-marker-number')));
     });
 
-    test('sup מורכב (שאינו סימון הערה) נשאר sup', () {
+    test('sup מורכב נשאר sup ושומר את ה-markup הפנימי', () {
       const line = 'טקסט<sup><a href="x">קישור מורכב!</a></sup> המשך';
 
       final out = TextRendererService.processText(line, settings);
 
       expect(out, contains('<sup>'));
+      expect(out, isNot(contains('class="raised-sup"')));
+      expect(out, contains('<a href="x">'));
+    });
+
+    test('sup מעוצב שומר attributes', () {
+      const line =
+          'טקסט<sup class="custom" style="color:red" title="note">א</sup>';
+
+      final out = TextRendererService.processText(line, settings);
+
+      expect(out, contains('<sup class="custom"'));
+      expect(out, contains('style="color:red"'));
+      expect(out, contains('title="note"'));
+      expect(out, isNot(contains('class="raised-sup"')));
     });
 
     test('sup ריק מוסר לחלוטין', () {
@@ -107,6 +125,56 @@ Future<void> main() async {
 
       expect(out, isNot(contains('<sup')));
       expect(out, isNot(contains('footnote-marker-number')));
+    });
+  });
+
+  group('TextRendererService - טקסט תחתי (issue #842)', () {
+    const settings = RenderSettings();
+
+    test('sub מספרי מומר לספרות-תחתיות יוניקוד (טקסט טהור, נכלל בבחירה)', () {
+      const line = 'מים H<sub>2</sub>O וגם A<sub>14</sub> סוף';
+
+      final out = TextRendererService.processText(line, settings);
+
+      expect(out, isNot(contains('<sub')));
+      expect(out, contains('₂'));
+      expect(out, contains('₁₄'));
+    });
+
+    test('sub עברי נפלט כ-span מוקטן — לא WidgetSpan ששובר שורה ובחירה', () {
+      const line = 'מילה<sub>הערה</sub> המשך';
+
+      final out = TextRendererService.processText(line, settings);
+
+      expect(out, isNot(contains('<sub')));
+      expect(out, contains('<span class="subscript-text">'));
+      expect(out, contains('הערה'));
+    });
+
+    test('תוכן ה-sub עטוף בסימני בידוד דו-כיווניים', () {
+      const line = 'מילה<sub>3</sub> עוד';
+
+      final out = TextRendererService.processText(line, settings);
+
+      expect(out, contains('\u2066₃\u2069'));
+    });
+
+    test('sub ריק מוסר לחלוטין', () {
+      const line = 'טקסט<sub> </sub> המשך';
+
+      final out = TextRendererService.processText(line, settings);
+
+      expect(out, isNot(contains('<sub')));
+      expect(out, isNot(contains('subscript-text')));
+    });
+
+    test('sub עם attributes מטופל אף הוא', () {
+      const line = 'טקסט<sub class="x">ב</sub> המשך';
+
+      final out = TextRendererService.processText(line, settings);
+
+      expect(out, isNot(contains('<sub')));
+      expect(out, contains('<span class="subscript-text">'));
     });
   });
 

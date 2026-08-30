@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:otzaria/theme/app_tokens.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_bloc.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_event.dart';
@@ -78,11 +79,14 @@ class _PluginInstallScreenState extends State<PluginInstallScreen> {
   @override
   void initState() {
     super.initState();
+    final effectivePermissions = effectiveManifestPermissions(
+      widget.manifest.permissions,
+    );
     _permissionToggles = {
-      for (final p in widget.manifest.permissions) p: _initialGrantFor(p),
+      for (final p in effectivePermissions) p: _initialGrantFor(p),
     };
     _orderedPermissions = orderedPluginPermissions(
-      widget.manifest.permissions,
+      effectivePermissions,
       isOfflineMode: widget.isOfflineMode,
     );
     _newPermissions = _orderedPermissions
@@ -158,10 +162,13 @@ class _PluginInstallScreenState extends State<PluginInstallScreen> {
           Map.unmodifiable(_permissionToggles),
           _allowOrderBeforeBuiltInsGranted,
           reportContext: widget.reportContext,
+          previousVersion: widget.previousVersion,
         ),
       );
     }
-    Navigator.of(context).pop();
+    // pop(true) = נסגר בפעולה מפורשת; סגירת barrier מחזירה null והמארח
+    // מתרגם אותה לביטול (ניקוי תיקיית ה-temp ודיווח לחנות).
+    Navigator.of(context).pop(true);
   }
 
   void _onCancel() {
@@ -175,7 +182,7 @@ class _PluginInstallScreenState extends State<PluginInstallScreen> {
         ),
       );
     }
-    Navigator.of(context).pop();
+    Navigator.of(context).pop(true);
   }
 
   Widget _permissionTile(String permission, ColorScheme colorScheme) {
@@ -185,15 +192,12 @@ class _PluginInstallScreenState extends State<PluginInstallScreen> {
         !isTemporarilyUnavailable && (_permissionToggles[permission] ?? true);
     final isSensitive = permission == pluginRunOnStartupPermission;
     final isCritical = permission == pluginBackgroundKeepAlivePermission;
-    final iconData = isSensitive || isCritical
-        ? (isGranted
-              ? FluentIcons.warning_24_filled
-              : FluentIcons.warning_24_regular)
-        : (isGranted
-              ? FluentIcons.shield_checkmark_24_regular
-              : FluentIcons.shield_error_24_regular);
     return SettingsActionTile.switchTile(
-      icon: iconData,
+      icon: pluginPermissionIcon(
+        permission,
+        isGranted: isGranted,
+        manifest: widget.manifest,
+      ),
       iconColor: isCritical
           ? colorScheme.error
           : isSensitive
@@ -215,7 +219,7 @@ class _PluginInstallScreenState extends State<PluginInstallScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final hasPermissions = widget.manifest.permissions.isNotEmpty;
+    final hasPermissions = _orderedPermissions.isNotEmpty;
     final colorScheme = Theme.of(context).colorScheme;
     final isUpdate = widget.isUpdate;
 
@@ -248,7 +252,7 @@ class _PluginInstallScreenState extends State<PluginInstallScreen> {
                   subtitle: widget.manifest.description,
                 ),
               SettingsActionTile.text(
-                icon: FluentIcons.person_24_regular,
+                icon: OtzariaIcons.person_24_regular,
                 title: 'מחבר: ${widget.manifest.author}',
                 subtitle: isUpdate
                     ? 'עדכון גרסה ${widget.previousVersion}  ←  ${widget.manifest.version}'

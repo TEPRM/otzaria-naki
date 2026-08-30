@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:otzaria/core/external_uri_router.dart';
+import 'package:otzaria/core/info/info_topic.dart';
 import 'package:otzaria/navigation/bloc/navigation_state.dart';
 import 'package:otzaria/search/models/search_configuration.dart'
     show SearchMode;
@@ -592,6 +593,38 @@ void main() {
 
         expect(action, isA<OpenScreenAction>());
         expect((action as OpenScreenAction).screen, Screen.search);
+      });
+
+      test('q מקודד Windows-1255 (מאקרו/VBA ישן) — הקוורי מפוענח לעברית', () {
+        // "שלום" בקידוד ANSI עברי — כך FollowHyperlink של Office מקודד עברית
+        final action = ExternalUriRouter.parseUri(
+          Uri.parse('otzaria://open/search?q=%F9%EC%E5%ED'),
+        );
+
+        expect(action, isA<RunSearchAction>());
+        expect((action as RunSearchAction).query, 'שלום');
+      });
+
+      test('q בקידוד Windows-1255 עם רווח כ-+ ועם mode', () {
+        // "דבר תורה" ב-Windows-1255
+        final action = ExternalUriRouter.parseUri(
+          Uri.parse(
+            'otzaria://open/search?q=%E3%E1%F8+%FA%E5%F8%E4&mode=exact',
+          ),
+        );
+
+        expect(action, isA<RunSearchAction>());
+        expect((action as RunSearchAction).query, 'דבר תורה');
+        expect(action.mode, SearchMode.exact);
+      });
+
+      test('q בעברית גולמית לא מקודדת — עובר כמו שהוא', () {
+        final action = ExternalUriRouter.parseUri(
+          Uri.parse('otzaria://open/search?q=דבר תורה'),
+        );
+
+        expect(action, isA<RunSearchAction>());
+        expect((action as RunSearchAction).query, 'דבר תורה');
       });
 
       test('q ריק/רווחים — נופל חזרה לפתיחת המסך בלבד', () {
@@ -1450,6 +1483,103 @@ void main() {
           ExternalUriRouter.parseUri(
             Uri.parse('otzaria://library/reindex/extra'),
           ),
+          isNull,
+        );
+      });
+    });
+
+    group('info/<topic>', () {
+      test('כל הנושאים מפוענחים ל-ShowInfoAction', () {
+        for (final topic in InfoTopic.values) {
+          final action = ExternalUriRouter.parseUri(
+            Uri.parse('otzaria://info/${topic.slug}'),
+          );
+          expect(action, isA<ShowInfoAction>(), reason: topic.slug);
+          expect((action as ShowInfoAction).topic, topic);
+        }
+      });
+
+      test('otzaria://info ללא נתיב שווה ל-all', () {
+        final action = ExternalUriRouter.parseUri(Uri.parse('otzaria://info'));
+
+        expect((action as ShowInfoAction).topic, InfoTopic.all);
+      });
+
+      test('ברירת המחדל של limit', () {
+        final action =
+            ExternalUriRouter.parseUri(Uri.parse('otzaria://info/errors'))
+                as ShowInfoAction;
+
+        expect(action.errorLimit, ExternalUriRouter.defaultInfoErrorLimit);
+      });
+
+      test('limit תקין נשמר', () {
+        final action =
+            ExternalUriRouter.parseUri(
+                  Uri.parse('otzaria://info/errors?limit=12'),
+                )
+                as ShowInfoAction;
+
+        expect(action.errorLimit, 12);
+      });
+
+      test('limit נחתך לתקרה', () {
+        final action =
+            ExternalUriRouter.parseUri(
+                  Uri.parse('otzaria://info/errors?limit=9999'),
+                )
+                as ShowInfoAction;
+
+        expect(action.errorLimit, ExternalUriRouter.maxInfoErrorLimit);
+      });
+
+      test('limit לא חוקי נופל לברירת המחדל', () {
+        for (final raw in ['0', '-3', 'abc', '']) {
+          final action =
+              ExternalUriRouter.parseUri(
+                    Uri.parse('otzaria://info/errors?limit=$raw'),
+                  )
+                  as ShowInfoAction;
+
+          expect(
+            action.errorLimit,
+            ExternalUriRouter.defaultInfoErrorLimit,
+            reason: 'limit=$raw',
+          );
+        }
+      });
+
+      test('aliases של נושאים', () {
+        expect(
+          (ExternalUriRouter.parseUri(Uri.parse('otzaria://info/software'))
+                  as ShowInfoAction)
+              .topic,
+          InfoTopic.app,
+        );
+        expect(
+          (ExternalUriRouter.parseUri(Uri.parse('otzaria://info/logs'))
+                  as ShowInfoAction)
+              .topic,
+          InfoTopic.errors,
+        );
+      });
+
+      test('אינו רגיש לאותיות גדולות/קטנות', () {
+        expect(
+          (ExternalUriRouter.parseUri(Uri.parse('OTZARIA://INFO/APP'))
+                  as ShowInfoAction)
+              .topic,
+          InfoTopic.app,
+        );
+      });
+
+      test('נושא לא מוכר או נתיב מרובה — null', () {
+        expect(
+          ExternalUriRouter.parseUri(Uri.parse('otzaria://info/banana')),
+          isNull,
+        );
+        expect(
+          ExternalUriRouter.parseUri(Uri.parse('otzaria://info/app/extra')),
           isNull,
         );
       });

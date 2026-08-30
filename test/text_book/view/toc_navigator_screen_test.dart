@@ -1,12 +1,16 @@
-import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria/widgets/misc/expanding_chevron.dart';
 import 'package:otzaria/models/books.dart';
 import 'package:otzaria/text_book/bloc/text_book_bloc.dart';
 import 'package:otzaria/text_book/bloc/text_book_event.dart';
 import 'package:otzaria/text_book/bloc/text_book_state.dart';
 import 'package:otzaria/text_book/view/toc_navigator_screen.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
+import 'package:otzaria/widgets/lists/nav_tree_tile.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../support/search_engine_test_init.dart';
@@ -291,12 +295,13 @@ Future<void> main() async {
     await tester.pump();
 
     expect(find.text('unique-child'), findsOneWidget);
-    await tester.tap(find.byIcon(FluentIcons.chevron_up_24_regular).first);
-    await tester.pump();
+    // הצ'ברן של שורת עץ הניווט (ExpandingChevron) — סוגר ופותח את הענף.
+    await tester.tap(find.byType(ExpandingChevron).first);
+    await tester.pumpAndSettle();
     expect(find.text('unique-child'), findsNothing);
 
-    await tester.tap(find.byIcon(FluentIcons.chevron_down_24_regular).first);
-    await tester.pump();
+    await tester.tap(find.byType(ExpandingChevron).first);
+    await tester.pumpAndSettle();
     expect(find.text('unique-child'), findsOneWidget);
   });
 
@@ -399,6 +404,78 @@ Future<void> main() async {
       expect(find.text('alpha'), findsOneWidget);
       expect(find.text('beta'), findsNothing);
       expect(find.text('alef'), findsNothing);
+    },
+    skip: !engineReady,
+  );
+
+  testWidgets(
+    'דפדוף בחיצים בין תוצאות איתור כותרת בלי לעזוב את שדה החיפוש',
+    (tester) async {
+      final toc = [
+        TocEntry(text: 'ספר', index: 0, level: 1)
+          ..children.addAll([
+            TocEntry(text: 'alpha', index: 1, level: 2),
+            TocEntry(text: 'alef', index: 2, level: 2),
+            TocEntry(text: 'beta', index: 3, level: 2),
+          ]),
+      ];
+
+      final bloc = _TestTextBookBloc(
+        _loadedState(toc: toc, visibleIndices: const [0]),
+      );
+      addTearDown(bloc.close);
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+
+      await tester.pumpWidget(
+        _wrap(
+          TocViewer(
+            scrollController: ItemScrollController(),
+            closeLeftPaneCallback: () {},
+            focusNode: focusNode,
+          ),
+          bloc,
+        ),
+      );
+      await tester.pump();
+
+      await tester.enterText(find.byType(TextField), 'al');
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('beta'), findsNothing);
+
+      List<String> selectedTitles() => tester
+          .widgetList<NavTreeTile>(find.byType(NavTreeTile))
+          .where((t) => t.isSelected)
+          .map((t) => t.title)
+          .toList();
+
+      // דפדוף: חץ למטה מסמן את התוצאה הראשונה, ועוד אחד את הבאה.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      final first = selectedTitles();
+      expect(first, hasLength(1));
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      final second = selectedTitles();
+      expect(second, hasLength(1));
+      expect(second, isNot(equals(first)));
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pump();
+      expect(selectedTitles(), equals(first));
+
+      // הפוקוס נשאר בשדה — אפשר לעדכן את השאילתה תוך כדי דפדוף.
+      expect(
+        tester.binding.focusManager.primaryFocus?.context
+            ?.findAncestorWidgetOfExactType<TextField>(),
+        isNotNull,
+      );
+      await tester.enterText(find.byType(TextField), 'alp');
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // שינוי שאילתה מאפס את סימון הדפדוף — חוזרת הדגשת מיקום הקריאה.
+      expect(selectedTitles(), equals(['ספר']));
     },
     skip: !engineReady,
   );
@@ -551,5 +628,73 @@ Future<void> main() async {
 
     expect(find.text('unique-a'), findsOneWidget);
     expect(find.text('unique-b'), findsOneWidget);
+  });
+
+  testWidgets('שורות העץ בעיצוב הספרייה: NavTreeTile בתוך כרטיס מקובץ', (
+    tester,
+  ) async {
+    final parent = TocEntry(text: 'שער', index: 0, level: 1);
+    parent.children.add(
+      TocEntry(text: 'סימן א', index: 1, level: 2, parent: parent),
+    );
+    final bloc = _TestTextBookBloc(
+      _loadedState(toc: [parent], visibleIndices: const [0]),
+    );
+    addTearDown(bloc.close);
+    final focusNode = FocusNode();
+    addTearDown(focusNode.dispose);
+
+    await tester.pumpWidget(
+      _wrap(
+        TocViewer(
+          scrollController: ItemScrollController(),
+          closeLeftPaneCallback: () {},
+          focusNode: focusNode,
+        ),
+        bloc,
+      ),
+    );
+    await tester.pump();
+
+    // כותרת ראשית מעל הרשימה — בעיצוב הכותרת של תוצאות החיפוש.
+    expect(find.byType(NavTreeHeader), findsOneWidget);
+    expect(find.byType(NavTreeGroupCard), findsWidgets);
+    // ערך עם ילדים = שורת קטגוריה; עלה = שורת פריט.
+    expect(find.widgetWithText(NavTreeTile, 'שער'), findsOneWidget);
+    expect(find.widgetWithText(NavTreeTile, 'סימן א'), findsOneWidget);
+  });
+
+  testWidgets('שורת כותרת משתמשת בגליף המותאם-RTL', (tester) async {
+    final toc = [
+      TocEntry(text: 'הקדמה', index: 0, level: 1),
+      TocEntry(text: 'שער ראשון', index: 5, level: 1),
+    ];
+    final bloc = _TestTextBookBloc(
+      _loadedState(toc: toc, visibleIndices: const [0], selectedIndex: null),
+    );
+    addTearDown(bloc.close);
+    final focusNode = FocusNode();
+    addTearDown(focusNode.dispose);
+
+    await tester.pumpWidget(
+      _wrap(
+        TocViewer(
+          scrollController: ItemScrollController(),
+          closeLeftPaneCallback: () {},
+          focusNode: focusNode,
+        ),
+        bloc,
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      find.byIcon(OtzariaIcons.text_bullet_list_24_regular),
+      findsNWidgets(2),
+    );
+    expect(
+      find.byIcon(FluentIcons.text_bullet_list_24_regular),
+      findsNothing,
+    );
   });
 }

@@ -34,6 +34,14 @@ void main() {
               },
             },
           ],
+          'shortcuts': [
+            {
+              'id': 's1',
+              'label': 'קיצור',
+              'key': 'ctrl+alt+x',
+              'command': 'runCommand',
+            },
+          ],
           'publishedData': [
             {
               'type': 'calendar.event',
@@ -60,6 +68,8 @@ void main() {
     expect(startup.isEmpty, isFalse);
     expect(startup.toolbarItems.single['id'], 'b1');
     expect(startup.contextMenuItems.single['showWhen'], isA<Map>());
+    expect(startup.shortcuts.single['id'], 's1');
+    expect(startup.shortcuts.single['key'], 'ctrl+alt+x');
     expect(startup.publishedData.single['key'], 'k1');
     expect(startup.programs.single['id'], 'p1');
     expect(startup.activationEvents, [
@@ -76,6 +86,9 @@ void main() {
           'toolbarItems': [
             {'id': 'b1', 'title': 'כפתור', 'icon': 'apps_24_regular'},
           ],
+          'shortcuts': [
+            {'id': 's1', 'label': 'קיצור', 'contextMenuItemId': 'm1'},
+          ],
           'activationEvents': ['app.startup'],
           'keepAlive': true,
         },
@@ -85,6 +98,7 @@ void main() {
     final reparsed = PluginManifest.fromJson(original.toJson());
     expect(reparsed.startup, isNotNull);
     expect(reparsed.startup!.toolbarItems.single['id'], 'b1');
+    expect(reparsed.startup!.shortcuts.single['contextMenuItemId'], 'm1');
     expect(reparsed.startup!.activationEvents, ['app.startup']);
     expect(reparsed.startup!.keepAlive, isTrue);
     expect(reparsed.startup!.contextMenuItems, isEmpty);
@@ -105,6 +119,88 @@ void main() {
     expect(startup.toolbarItems, isEmpty);
     expect(startup.contextMenuItems, isEmpty);
     expect(startup.activationEvents, ['ok']);
+  });
+
+  group('activationEvents בפורמט אובייקט', () {
+    PluginStartupContributions parse(List<Object?> events) =>
+        PluginManifest.fromJson(
+          _manifestJson(startup: {'activationEvents': events}),
+        ).startup!;
+
+    test('אובייקט עם topic ו-when נקלט לצד מחרוזות', () {
+      final startup = parse([
+        'plain.topic',
+        {
+          'topic': 'gated.topic',
+          'when': {
+            'storage': {'key': 'enabled', 'equals': true},
+          },
+        },
+      ]);
+
+      expect(startup.activationEvents, ['plain.topic', 'gated.topic']);
+      expect(startup.activationConditions.keys, ['gated.topic']);
+      expect(startup.activationConditions['gated.topic']!.storageKeys, {
+        'enabled',
+      });
+    });
+
+    test('אובייקט בלי topic תקין או עם when פגום מדולג', () {
+      final startup = parse([
+        {'when': <String, dynamic>{}},
+        {'topic': 17},
+        {
+          'topic': 'broken',
+          'when': {'nope': true},
+        },
+        'kept',
+      ]);
+
+      expect(startup.activationEvents, ['kept']);
+      expect(startup.activationConditions, isEmpty);
+    });
+
+    test('מפתח לא מוכר (טעות כתיב) פוסל את האיבר', () {
+      final startup = parse([
+        {
+          'topic': 'typo.topic',
+          'wen': {
+            'storage': {'key': 'enabled', 'equals': true},
+          },
+        },
+        'kept',
+      ]);
+
+      expect(startup.activationEvents, ['kept']);
+      expect(startup.activationConditions, isEmpty);
+    });
+
+    test('אובייקט בלי when מתנהג כמחרוזת', () {
+      final startup = parse([
+        {'topic': 'bare'},
+      ]);
+
+      expect(startup.activationEvents, ['bare']);
+      expect(startup.activationConditions, isEmpty);
+    });
+
+    test('toJson משמר את התנאי בסבב חוזר', () {
+      final startup = parse([
+        'plain.topic',
+        {
+          'topic': 'gated.topic',
+          'when': {
+            'storage': {'key': 'enabled', 'equals': true},
+          },
+        },
+      ]);
+
+      final reparsed = PluginStartupContributions.fromJson(startup.toJson());
+      expect(reparsed.activationEvents, ['plain.topic', 'gated.topic']);
+      expect(reparsed.activationConditions['gated.topic']!.storageKeys, {
+        'enabled',
+      });
+    });
   });
 
   test('a non-map contributes.startup parses as null', () {
@@ -164,6 +260,30 @@ void main() {
           'type': 'menu',
           'binding': {'program': 'links', 'visibleOutput': 'editions'},
           'childrenBinding': {'itemsOutput': 'editions'},
+        },
+      ],
+    );
+
+    expect(startup.hasBackgroundActivationTrigger, isFalse);
+  });
+
+  test('פריט תפריט הקשר עם action אינו מפעיל מנוע רקע', () {
+    const startup = PluginStartupContributions(
+      contextMenuItems: [
+        {
+          'id': 'save',
+          'type': 'item',
+          'action': {'type': 'storage.set', 'args': <String, Object?>{}},
+        },
+        {
+          'id': 'menu',
+          'type': 'submenu',
+          'children': [
+            {
+              'id': 'child',
+              'action': {'type': 'storage.set', 'args': <String, Object?>{}},
+            },
+          ],
         },
       ],
     );

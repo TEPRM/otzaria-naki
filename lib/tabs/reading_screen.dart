@@ -1,8 +1,9 @@
+import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, visibleForTesting;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/core/focus_repository.dart';
 import 'package:otzaria/history/bloc/history_bloc.dart';
@@ -11,6 +12,7 @@ import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
 import 'package:otzaria/navigation/bloc/navigation_event.dart';
 import 'package:otzaria/navigation/bloc/navigation_state.dart' show Screen;
 import 'package:otzaria/pdf_book/view/pdf_book_screen.dart';
+import 'package:otzaria/personal_notes/bloc/personal_notes_bloc.dart';
 import 'package:otzaria/plugins/services/plugin_runtime_dispatcher.dart';
 import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
 import 'package:otzaria/tabs/bloc/tabs_event.dart';
@@ -28,10 +30,11 @@ import 'package:otzaria/tabs/resolving_tab_screen.dart';
 import 'package:otzaria/tools/view/tool_tab_screen.dart';
 import 'package:otzaria/tabs/utils/tab_swipe_direction.dart';
 import 'package:otzaria/tabs/view/active_pane_marker.dart';
+import 'package:otzaria/tabs/view/pane_drag_handle.dart';
 import 'package:otzaria/tabs/view/pane_drop_geometry.dart';
 import 'package:otzaria/tabs/view/pane_drop_target.dart';
 import 'package:otzaria/tabs/view/split_pane_view.dart';
-import 'package:otzaria/search/view/full_text_search_screen.dart';
+import 'package:otzaria/search/view/tantivy_full_text_search.dart';
 import 'package:otzaria/text_book/bloc/text_book_bloc.dart';
 import 'package:otzaria/text_book/bloc/text_book_event.dart';
 import 'package:otzaria/text_book/view/text_book_screen.dart';
@@ -42,6 +45,10 @@ import 'package:otzaria/tour/tour_target_keys.dart';
 
 class ReadingScreen extends StatefulWidget {
   const ReadingScreen({super.key});
+
+  /// עקיפה לבדיקות של זיהוי פלטפורמת מגע (physics ו-onPageChanged של מובייל).
+  @visibleForTesting
+  static bool? debugForceTouchTabs;
 
   @override
   State<ReadingScreen> createState() => _ReadingScreenState();
@@ -72,6 +79,10 @@ class _ReadingScreenState extends State<ReadingScreen>
   /// ש-jumpToPage של הסנכרון לא יקטע את האנימציה באמצע.
   bool _suppressPageSync = false;
 
+  bool get _isTouchPlatform =>
+      ReadingScreen.debugForceTouchTabs ??
+      (Platform.isAndroid || Platform.isIOS);
+
   @override
   void initState() {
     super.initState();
@@ -82,8 +93,8 @@ class _ReadingScreenState extends State<ReadingScreen>
   }
 
   void _syncVisiblePluginTabs(TabsState state) {
-    PluginRuntimeDispatcher.instance.setVisiblePluginTabs(
-      ToolTab.visiblePluginIdsOf(state.currentTab),
+    PluginRuntimeDispatcher.instance.setVisiblePluginInstances(
+      ToolTab.visiblePluginInstancesOf(state.currentTab),
     );
   }
 
@@ -111,6 +122,10 @@ class _ReadingScreenState extends State<ReadingScreen>
     _pageController ??= PageController(initialPage: initialIndex);
   }
 
+  /// קפיצת סנכרון תוכנתית מתבצעת כעת — הדיווח שלה ב-onPageChanged אינו
+  /// בחירת משתמש ואסור להזין אותו חזרה כ-SetCurrentTab.
+  bool _inProgrammaticJump = false;
+
   void _syncPageController() {
     // הקפיצה נדחית לפוסט-פריים בכוונה: ה-BlocListener שמפעיל את הסנכרון רץ
     // *לפני* שה-BlocBuilder בונה מחדש את ה-PageView, כך שברגע הקריאה ל-PageView
@@ -128,7 +143,16 @@ class _ReadingScreenState extends State<ReadingScreen>
       final targetIndex = state.currentTabIndex.clamp(0, state.tabs.length - 1);
       final currentPage = controller.page?.round();
       if (currentPage != null && currentPage != targetIndex) {
-        controller.jumpToPage(targetIndex);
+        // כשהמסך מנותק מעץ הרינדור (keepAlive מחוץ למסך, למשל פתיחת ספר
+        // מהאיתור בזמן שהות בספרייה) ה-extent מיושן, וקפיצה מדווחת
+        // onPageChanged עם ערך clamp שגוי — שבמובייל היה מוזן חזרה
+        // כ-SetCurrentTab ומהפך את הבחירה לטאב הקודם. הדגל חוסם את המשוב.
+        _inProgrammaticJump = true;
+        try {
+          controller.jumpToPage(targetIndex);
+        } finally {
+          _inProgrammaticJump = false;
+        }
       }
     });
   }
@@ -138,9 +162,20 @@ class _ReadingScreenState extends State<ReadingScreen>
   /// הגרירה מזיזה את ה-PageView באופן הדרגתי, ובשחרור מתיישבים על
   /// הטאב הקרוב (או הסמוך, בהנפה מהירה) — כמו PageScrollPhysics במובייל.
   Widget _wrapWithDesktopTabSwipe(Widget child) {
-    if (Platform.isAndroid || Platform.isIOS) return child;
+    if (_isTouchPlatform) return child;
     return RawGestureDetector(
       gestures: <Type, GestureRecognizerFactory>{
+        // "בולען" אנכי: מעל WebView של תוסף אין Scrollable שמתחרה בזירה,
+        // והאופקי כחבר יחיד זכה מיד בכל גלילה אנכית (רעד ומעבר טאב בטעות).
+        VerticalDragGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<VerticalDragGestureRecognizer>(
+              () => VerticalDragGestureRecognizer(
+                supportedDevices: const {PointerDeviceKind.trackpad},
+              ),
+              (recognizer) {
+                recognizer.onStart = (_) {};
+              },
+            ),
         HorizontalDragGestureRecognizer:
             GestureRecognizerFactoryWithHandlers<
               HorizontalDragGestureRecognizer
@@ -150,6 +185,9 @@ class _ReadingScreenState extends State<ReadingScreen>
               ),
               (recognizer) {
                 recognizer
+                  // הזכייה בזירה מגיעה רק אחרי סף — down מוסר את הדלתא
+                  // שנצברה עד אז במקום לבלוע אותה (רציפות הגרירה).
+                  ..dragStartBehavior = DragStartBehavior.down
                   ..onStart = (_) {
                     final controller = _pageController;
                     if (controller == null || !controller.hasClients) return;
@@ -363,7 +401,9 @@ class _ReadingScreenState extends State<ReadingScreen>
                                   const NavigateToScreen(Screen.library),
                                 );
                               },
-                              icon: const Icon(FluentIcons.library_24_regular),
+                              icon: const Icon(
+                                FluentIcons.library_24_regular,
+                              ),
                               label: const Text('דפדף בספרייה'),
                             ),
                           ),
@@ -383,7 +423,7 @@ class _ReadingScreenState extends State<ReadingScreen>
                             // עם גלילה אופקית ב-PDF ועם אירועי גלגלת.
                             // החלקת טאצ'פד/מגע בדסקטופ ממומשת בנפרד
                             // ב-_wrapWithDesktopTabSwipe.
-                            physics: Platform.isAndroid || Platform.isIOS
+                            physics: _isTouchPlatform
                                 ? const PageScrollPhysics()
                                 : const NeverScrollableScrollPhysics(),
                             // רק במובייל הגלילה ידנית ולכן onPageChanged משקף
@@ -392,8 +432,9 @@ class _ReadingScreenState extends State<ReadingScreen>
                             // וה-callback היה יורה רק על קפיצות תוכנתיות —
                             // כולל ערך clamp שגוי רגעי בעת פתיחת טאב חדש —
                             // ודורס את האינדקס הנכון. לכן מנוטרל.
-                            onPageChanged: Platform.isAndroid || Platform.isIOS
+                            onPageChanged: _isTouchPlatform
                                 ? (index) {
+                                    if (_inProgrammaticJump) return;
                                     if (index < state.tabs.length) {
                                       context.read<TabsBloc>().add(
                                         SetCurrentTab(index),
@@ -458,17 +499,29 @@ class _ReadingScreenState extends State<ReadingScreen>
           context.read<TabsBloc>().add(UpdateSplitRatio(ratio));
         },
         paneBuilder: (pane) {
-          final content = ActivePaneMarker(
+          // ה-scope קיים תמיד ורק enabled מתחלף — שינוי צורת העץ בפיצול
+          // ובפירוק היה בונה מחדש את הספר.
+          final content = PaneDragHandleScope(
             pane: pane,
             enabled: isSplit,
-            child: _buildPaneContent(
-              pane,
-              isInCombinedView: isSplit,
-              enableTourTargets: enableTourTargets && !isSplit,
-              // חימום מטמון התוכן טוען את הספר כולו; בטאב מפוצל שתי החלוניות
-              // היו מחממות ספרים גדולים במקביל ומכפילות את צריכת הזיכרון.
-              allowBackgroundWarming: !isSplit,
-              pdfPaneCount: pdfPanes,
+            child: ActivePaneMarker(
+              pane: pane,
+              enabled: isSplit,
+              // bloc הערות פר-חלונית: bloc משותף בין טאבים הציג בחלונית ההערות
+              // את הערות הספר שנטען אחרון בטאב אחר (issue #870).
+              child: BlocProvider<PersonalNotesBloc>(
+                create: (_) => PersonalNotesBloc(),
+                child: _buildPaneContent(
+                  pane,
+                  isInCombinedView: isSplit,
+                  enableTourTargets: enableTourTargets && !isSplit,
+                  // חימום מטמון התוכן טוען את הספר כולו; בטאב מפוצל שתי
+                  // החלוניות היו מחממות ספרים גדולים במקביל ומכפילות את
+                  // צריכת הזיכרון.
+                  allowBackgroundWarming: !isSplit,
+                  pdfPaneCount: pdfPanes,
+                ),
+              ),
             ),
           );
 
@@ -519,7 +572,11 @@ class _ReadingScreenState extends State<ReadingScreen>
         ),
       );
     } else if (tab is SearchingTab) {
-      return FullTextSearchScreen(key: ValueKey(tab), tab: tab);
+      return BlocProvider.value(
+        key: ValueKey(tab),
+        value: tab.searchBloc,
+        child: TantivyFullTextSearch(tab: tab),
+      );
     } else if (tab is CommentatorsTab) {
       return _TabVisibilityBridge(
         key: ValueKey(tab),

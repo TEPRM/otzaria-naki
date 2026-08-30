@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:otzaria/plugins/declarative/compiler/declarative_program_compiler.dart';
+import 'package:otzaria/plugins/declarative/compiler/declarative_selection_action.dart';
 import 'package:otzaria/plugins/declarative/compiler/declarative_toolbar_template_compiler.dart';
 import 'package:otzaria/plugins/declarative/models/declarative_program.dart';
 import 'package:otzaria/plugins/models/plugin_manifest.dart';
@@ -11,7 +12,9 @@ import 'package:otzaria/plugins/models/plugin_search_dialog_item.dart';
 import 'package:otzaria/plugins/models/plugin_startup_contributions.dart';
 import 'package:otzaria/plugins/models/plugin_toolbar_item.dart';
 import 'package:otzaria/plugins/models/plugin_valid_permissions.dart';
+import 'package:otzaria/plugins/models/plugin_when_condition.dart';
 import 'package:otzaria/plugins/services/context_menu_registry.dart';
+import 'package:otzaria/plugins/services/plugin_settings_access_policy.dart';
 import 'package:otzaria/plugins/services/plugin_external_editions_registry.dart';
 import 'package:otzaria/plugins/services/plugin_toolbar_registry.dart';
 import 'package:otzaria/plugins/utils/plugin_version_utils.dart';
@@ -56,6 +59,9 @@ const Set<String> _knownApiMethods = {
   'app.getGrantedPermissions',
   'app.getConnectivity',
   'app.openUrl',
+  'app.registerShortcut',
+  'app.unregisterShortcut',
+  'app.updateShortcut',
   'library.findBooks',
   'library.getBookMetadata',
   'library.resolveBooks',
@@ -66,14 +72,24 @@ const Set<String> _knownApiMethods = {
   'library.listBookAltStructures',
   'library.getBookAltToc',
   'library.getTree',
+  'library.getCommentators',
+  'library.getLinks',
+  'library.getRawLinks',
+  'library.getLinkTargetsSummary',
+  'library.getLinkContent',
   'search.fullText',
   'search.query',
   'search.getOptions',
   'reader.openBook',
   'reader.openBookAtRef',
+  'reader.openSearchTab',
   'reader.getCurrentState',
   'reader.getCurrentRef',
   'reader.getSelection',
+  'reader.getActiveCommentators',
+  'reader.setActiveCommentators',
+  'reader.scrollToSection',
+  'reader.getHighlightCapabilities',
   'reader.addContextMenuItem',
   'reader.removeContextMenuItem',
   'reader.updateContextMenuItem',
@@ -82,6 +98,10 @@ const Set<String> _knownApiMethods = {
   'reader.updateToolbarItem',
   'reader.findTextOccurrences',
   'reader.getSectionTextMap',
+  'reader.registerInBookSearchProvider',
+  'reader.respondInBookSearch',
+  'reader.registerExternalSearchProvider',
+  'reader.respondExternalSearch',
   'reader.setHighlight',
   'reader.updateHighlight',
   'reader.getHighlights',
@@ -90,7 +110,9 @@ const Set<String> _knownApiMethods = {
   'reader.clearAllHighlights',
   'navigation.goTo',
   'plugin.openSelf',
+  'plugin.openOther',
   'plugin.backgroundDone',
+  'plugin.listInstalled',
   'notes.list',
   'notes.getBookNotesSummary',
   'notes.add',
@@ -102,17 +124,35 @@ const Set<String> _knownApiMethods = {
   'ui.showConfirm',
   'ui.showWarning',
   'ui.pickFolder',
+  'ui.print',
+  'ui.exportPdf',
   'fs.extractZip',
   'fs.deleteFile',
   'fs.pickUserFile',
   'fs.resolveFileUrl',
   'fs.readTextFile',
   'fs.revokeFile',
+  'fs.beginBinaryWrite',
+  'fs.commitUserFileWrite',
+  'fs.abortBinaryWrite',
+  'fs.writeFile',
+  'fs.readFile',
+  'fs.listDir',
+  'fs.makeDir',
+  'fs.deleteEntry',
+  'fs.stat',
   'feedback.sendEmail',
+  'feedback.report',
+  'feedback.hasReporterEmail',
   'history.list',
   'history.listSearches',
   'history.clear',
   'history.remove',
+  'bookmarks.list',
+  'bookmarks.add',
+  'bookmarks.remove',
+  'tools.gematria',
+  'tools.dictionary',
   'notifications.showInApp',
   'notifications.sendSystem',
   'notifications.scheduleSystem',
@@ -145,12 +185,9 @@ const Set<String> _knownApiMethods = {
   'shortcut.create',
 };
 
-/// APIs קיימות בתוספים אך אינן מתועדות פומבית — לא נאזהיר עליהן.
-const Set<String> _knownUndocumentedMethods = {
-  'plugin.listInstalled',
-  'plugin.requestInstall',
-  'plugin.uninstall',
-};
+/// API פנימי שקיים בתוספים אך אינו מתועד פומבית, ולכן לא נאזהיר עליו.
+/// השיטה מיועדת לחנות התוספים וב-d.ts מסומנת `@internal`.
+const Set<String> _knownUndocumentedMethods = {'plugin.requestInstall'};
 
 /// אירועי lifecycle ו-events נתמכים.
 const Set<String> _knownEvents = {
@@ -166,6 +203,8 @@ const Set<String> _knownEvents = {
   'reader.sectionContentChanged',
   'reader.context_menu_item_clicked',
   'reader.toolbar_item_clicked',
+  'reader.inBookSearch.requested',
+  'ui.messageClicked',
   'plugin.page_opened',
   'contextMenu.itemClicked',
   'contextMenu.colorClicked',
@@ -174,6 +213,7 @@ const Set<String> _knownEvents = {
   'workspace.changed',
   'settings.changed',
   'plugin.permissions_changed',
+  'app.command',
   'search.requested',
   // אירוע ממוקד מ-PluginExternalSearchService: בקשת חיפוש חיצוני ממסך
   // החיפוש המובנה. תוסף-ספק מצהיר עליו ב-activationEvents כדי שהבקשה
@@ -190,6 +230,9 @@ const Map<String, String> _methodRequiredPermission = {
   'app.getConnectivity': 'app.info.read',
   'app.getUserEmail': 'app.user_email.read',
   'app.openUrl': 'app.open_url',
+  'app.registerShortcut': 'app.shortcuts',
+  'app.unregisterShortcut': 'app.shortcuts',
+  'app.updateShortcut': 'app.shortcuts',
   'library.findBooks': 'library.books.read',
   'library.getBookMetadata': 'library.books.read',
   'library.resolveBooks': 'library.books.read',
@@ -200,14 +243,24 @@ const Map<String, String> _methodRequiredPermission = {
   'library.getBookToc': 'library.content.read',
   'library.listBookAltStructures': 'library.content.read',
   'library.getBookAltToc': 'library.content.read',
+  'library.getLinkContent': 'library.content.read',
+  'library.getCommentators': pluginLinksReadPermission,
+  'library.getLinks': pluginLinksReadPermission,
+  'library.getRawLinks': pluginLinksReadPermission,
+  'library.getLinkTargetsSummary': pluginLinksReadPermission,
   'search.fullText': 'search.fulltext.read',
   'search.query': 'search.fulltext.read',
   'search.getOptions': 'search.fulltext.read',
   'reader.openBook': 'reader.open',
   'reader.openBookAtRef': 'reader.open',
+  'reader.openSearchTab': 'reader.open',
   'reader.getCurrentState': 'reader.open',
   'reader.getCurrentRef': 'reader.open',
   'reader.getSelection': 'reader.open',
+  'reader.getActiveCommentators': 'reader.open',
+  'reader.setActiveCommentators': 'reader.open',
+  'reader.scrollToSection': 'reader.open',
+  'reader.getHighlightCapabilities': 'reader.open',
   'reader.addContextMenuItem': 'reader.context_menu',
   'reader.removeContextMenuItem': 'reader.context_menu',
   'reader.updateContextMenuItem': 'reader.context_menu',
@@ -216,6 +269,10 @@ const Map<String, String> _methodRequiredPermission = {
   'reader.updateToolbarItem': 'reader.toolbar',
   'reader.findTextOccurrences': 'reader.open',
   'reader.getSectionTextMap': 'reader.open',
+  'reader.registerInBookSearchProvider': 'reader.open',
+  'reader.respondInBookSearch': 'reader.open',
+  'reader.registerExternalSearchProvider': 'reader.open',
+  'reader.respondExternalSearch': 'reader.open',
   'reader.setHighlight': 'reader.highlight',
   'reader.updateHighlight': 'reader.highlight',
   'reader.getHighlights': 'reader.highlight',
@@ -224,6 +281,8 @@ const Map<String, String> _methodRequiredPermission = {
   'reader.clearAllHighlights': 'reader.highlight',
   'navigation.goTo': 'navigation.write',
   'plugin.openSelf': 'navigation.write',
+  'plugin.openOther': pluginOpenOtherPermission,
+  'plugin.listInstalled': 'app.info.read',
   'notes.list': 'notes.read',
   'notes.getBookNotesSummary': 'notes.read',
   'notes.add': 'notes.write',
@@ -234,18 +293,28 @@ const Map<String, String> _methodRequiredPermission = {
   'ui.showError': 'ui.feedback',
   'ui.showConfirm': 'ui.feedback',
   'ui.showWarning': 'ui.feedback',
-  'ui.pickFolder': 'ui.feedback',
+  'ui.pickFolder': 'fs.folder_access',
   // fs.extractZip/deleteFile מכוונים בכוונה לא להופיע כאן — ה-runtime לא דורש
   // עבורם הרשאת manifest (הם מגודרים ע"י תיקייה שנבחרה ב-ui.pickFolder).
+  // כך גם פעולות המרחב הפרטי (writeFile/readFile/listDir/makeDir/
+  // deleteEntry/stat) — השורש הפרטי של התוסף הוא הגבול.
   'fs.pickUserFile': 'fs.user_files.read',
   'fs.resolveFileUrl': 'fs.user_files.read',
   'fs.readTextFile': 'fs.user_files.read',
   'fs.revokeFile': 'fs.user_files.read',
+  'fs.beginBinaryWrite': 'fs.user_files.write',
+  'fs.commitUserFileWrite': 'fs.user_files.write',
+  'fs.abortBinaryWrite': 'fs.user_files.write',
   'feedback.sendEmail': 'feedback.send_email',
   'history.list': 'history.read',
   'history.listSearches': 'history.read',
   'history.clear': 'history.write',
   'history.remove': 'history.write',
+  'bookmarks.list': pluginBookmarksReadPermission,
+  'bookmarks.add': pluginBookmarksWritePermission,
+  'bookmarks.remove': pluginBookmarksWritePermission,
+  'tools.gematria': pluginToolsReadPermission,
+  'tools.dictionary': pluginToolsReadPermission,
   'notifications.showInApp': 'notifications.send',
   'notifications.sendSystem': 'notifications.system',
   'notifications.scheduleSystem': 'notifications.system',
@@ -301,14 +370,21 @@ const Map<String, String> _methodMinVersion = {
   'library.listRecentBooks': '0.9.89',
   'library.getBookContent': '0.9.89',
   'library.getBookToc': '0.9.89',
+  'library.getCommentators': '0.9.97',
+  'library.getLinks': '0.9.97',
+  'library.getRawLinks': '0.9.97',
+  'library.getLinkTargetsSummary': '0.9.97',
+  'library.getLinkContent': '0.9.97',
   'search.fullText': '0.9.89',
   'search.query': '0.9.97',
   'search.getOptions': '0.9.97',
   'reader.openBook': '0.9.89',
   'reader.openBookAtRef': '0.9.89',
+  'reader.openSearchTab': '0.9.89',
   'reader.getCurrentState': '0.9.89',
   'reader.getCurrentRef': '0.9.89',
   'reader.getSelection': '0.9.89',
+  'reader.getActiveCommentators': '0.9.97',
   'reader.addContextMenuItem': '0.9.89',
   'reader.removeContextMenuItem': '0.9.89',
   'reader.updateContextMenuItem': '0.9.95',
@@ -317,6 +393,10 @@ const Map<String, String> _methodMinVersion = {
   'reader.updateToolbarItem': '0.9.97',
   'reader.findTextOccurrences': '0.9.95',
   'reader.getSectionTextMap': '0.9.95',
+  'reader.registerInBookSearchProvider': '0.9.97',
+  'reader.respondInBookSearch': '0.9.97',
+  'reader.registerExternalSearchProvider': '0.9.97',
+  'reader.respondExternalSearch': '0.9.97',
   'reader.setHighlight': '0.9.89',
   'reader.updateHighlight': '0.9.95',
   'reader.getHighlights': '0.9.89',
@@ -334,7 +414,11 @@ const Map<String, String> _methodMinVersion = {
   'ui.showError': '0.9.89',
   'ui.showConfirm': '0.9.89',
   'ui.showWarning': '0.9.89',
+  'ui.print': '0.9.97',
+  'ui.exportPdf': '0.9.97',
   'feedback.sendEmail': '0.9.89',
+  'feedback.report': '0.9.97',
+  'feedback.hasReporterEmail': '0.9.97',
   'history.list': '0.9.89',
   'history.listSearches': '0.9.89',
   'history.clear': '0.9.89',
@@ -353,12 +437,11 @@ const Map<String, String> _methodMinVersion = {
   'settings.get': '0.9.89',
   'settings.getMany': '0.9.89',
   'calendar.getSelectedDate': '0.9.89',
-  'calendar.getDailyTimes': '0.9.97',
-  'calendar.getHalachicTimes': '0.9.97',
+  'calendar.getDailyTimes': '0.9.92',
+  'calendar.getHalachicTimes': '0.9.92',
   'calendar.getJewishDate': '0.9.89',
   'calendar.getEvents': '0.9.89',
-  // 0.9.97 — זמנים לפי תאריך/עיר שרירותיים ורשימת הערים.
-  'calendar.getCities': '0.9.97',
+  'calendar.getCities': '0.9.96',
   'publishedData.upsert': '0.9.89',
   'publishedData.remove': '0.9.89',
   'publishedData.listOwn': '0.9.89',
@@ -380,15 +463,37 @@ const Map<String, String> _methodMinVersion = {
   'fs.readTextFile': '0.9.94',
   'fs.resolveFileUrl': '0.9.94',
   'fs.revokeFile': '0.9.94',
+  'fs.beginBinaryWrite': '0.9.97',
+  'fs.commitUserFileWrite': '0.9.97',
+  'fs.abortBinaryWrite': '0.9.97',
   // 0.9.95
   'app.openUrl': '0.9.95',
   // 0.9.96
   'plugin.openSelf': '0.9.96',
+  'plugin.openOther': '0.9.97',
   'library.listBookAltStructures': '0.9.96',
   'library.getBookAltToc': '0.9.96',
   // 0.9.97
   'plugin.backgroundDone': '0.9.97',
+  'plugin.listInstalled': '0.9.97',
   'app.getConnectivity': '0.9.96',
+  'fs.writeFile': '0.9.97',
+  'fs.readFile': '0.9.97',
+  'fs.listDir': '0.9.97',
+  'fs.makeDir': '0.9.97',
+  'fs.deleteEntry': '0.9.97',
+  'fs.stat': '0.9.97',
+  'reader.setActiveCommentators': '0.9.97',
+  'reader.scrollToSection': '0.9.97',
+  'reader.getHighlightCapabilities': '0.9.97',
+  'bookmarks.list': '0.9.97',
+  'bookmarks.add': '0.9.97',
+  'bookmarks.remove': '0.9.97',
+  'tools.gematria': '0.9.97',
+  'tools.dictionary': '0.9.97',
+  'app.registerShortcut': '0.9.97',
+  'app.unregisterShortcut': '0.9.97',
+  'app.updateShortcut': '0.9.97',
 };
 
 /// שדות שמורים שאינם API methods (כדי שלא ייתפסו ב-shorthand scanner).
@@ -487,7 +592,15 @@ class PluginExtendedValidator {
     for (final method in apiUsage.keys) {
       final required = _methodRequiredPermission[method];
       if (required == null) continue;
+      // הרשאות בסיס ניתנות אוטומטית — אין צורך בהצהרה.
+      if (pluginBaselinePermissions.contains(required)) continue;
       if (declaredPermissions.contains(required)) continue;
+      // הצהרה ותיקה מכסה הרשאה שפוצלה ממנה (ui.feedback → fs.folder_access).
+      if (declaredPermissions.contains(
+        pluginLegacyPermissionAliases[required],
+      )) {
+        continue;
+      }
       // קריאות רשת מסתפקות גם ב-network.localhost
       // (גישה לשירות מקומי), לא רק ב-network.access.
       if (required == 'network.access' &&
@@ -499,6 +612,37 @@ class PluginExtendedValidator {
       );
     }
 
+    // הרשאת בסיס שהוצהרה — מיותרת; מומלץ להסיר בהזדמנות.
+    for (final permission in declaredPermissions) {
+      if (pluginBaselinePermissions.contains(permission)) {
+        warnings.add(
+          'ההרשאה "$permission" ניתנת כיום אוטומטית לכל תוסף — '
+          'אפשר להסירה מה-manifest',
+        );
+      }
+    }
+
+    // הרשאה שלא הייתה קיימת בגרסת המינימום תפיל את ההתקנה באוצריא ישנה.
+    if (declaredPermissions.contains(pluginFolderAccessPermission)) {
+      int? cmp;
+      try {
+        cmp = PluginVersionUtils.compareCoreVersions(
+          _folderAccessPermissionMinVersion,
+          manifest.minAppVersion,
+        );
+      } on PluginVersionFormatException {
+        cmp = null; // minAppVersion לא חוקי — נתפס ב-PluginManifestValidator.
+      }
+      if (cmp != null && cmp > 0) {
+        errors.add(
+          'ההרשאה "$pluginFolderAccessPermission" קיימת החל מגרסה '
+          '$_folderAccessPermissionMinVersion, אך minAppVersion שהוצהר הוא '
+          '${manifest.minAppVersion}. עדכן את minAppVersion ל-'
+          '$_folderAccessPermissionMinVersion לפחות',
+        );
+      }
+    }
+
     // Cross-check: method חדש מ-minAppVersion שהוצהר — שגיאה חוסמת. תוסף שקורא
     // ל-API שלא היה קיים בגרסת המינימום שלו יקרוס אצל משתמש בגרסה כזו.
     _checkMethodVersions(apiUsage, manifest.minAppVersion, errors);
@@ -507,6 +651,7 @@ class PluginExtendedValidator {
     for (final ev in eventUsage.keys) {
       final eventPerm = 'events.subscribe:$ev';
       if (!pluginValidPermissions.contains(eventPerm)) continue;
+      if (pluginBaselinePermissions.contains(eventPerm)) continue;
       if (!declaredPermissions.contains(eventPerm)) {
         warnings.add(
           'רישום ל-event "$ev" דורש את ההרשאה "$eventPerm" שלא הוכרזה ב-manifest',
@@ -554,10 +699,138 @@ class PluginExtendedValidator {
 
   /// הגרסה שבה נוסף מנגנון contributes.startup — נאכף מול minAppVersion.
   static const String _startupContributionsMinVersion = '0.9.96';
+  static const String _folderAccessPermissionMinVersion = '0.9.97';
   static const String _declarativeProgramsMinVersion = '0.9.96';
-  static const String _dataChooseMinVersion = '0.9.97';
+
+  /// פקודות דקלרטיביות שנוספו אחרי מנגנון ה-programs — נאכפות מול minAppVersion.
+  static const Map<String, String> _commandMinVersions = {
+    'data.choose': '0.9.97',
+    'settings.get': '0.9.97',
+    'storage.get': '0.9.97',
+  };
+
+  /// פעולות דקלרטיביות (action בפקדים) שנוספו מאוחר — נאכפות מול minAppVersion.
+  static const Map<String, String> _actionMinVersions = {
+    'storage.set': '0.9.97',
+    'storage.remove': '0.9.97',
+  };
+  static const String _contextMenuActionMinVersion = '0.9.97';
   static const String _searchSubmitRoutingMinVersion = '0.9.97';
   static const String _externalEditionsMinVersion = '0.9.97';
+  static const String _whenConditionMinVersion = '0.9.97';
+
+  /// ולידציית תנאי `when`: סכימה, מפתח הגדרה קריא וגרסת מינימום. מפתח
+  /// חסום מוערך כ-false בזמן ריצה, ולכן נחשב לשגיאה כבר בהתקנה.
+  static void _validateWhenConditions(
+    PluginManifest manifest,
+    PluginStartupContributions startup,
+    Map<String, dynamic> startupMap,
+    List<String> errors,
+  ) {
+    var hasWhen = false;
+    void validateRaw(String field, Object? raw) {
+      if (raw == null) return;
+      hasWhen = true;
+      try {
+        final condition = PluginWhenCondition.fromJson(raw);
+        for (final key in condition.settingKeys) {
+          if (!PluginSettingsAccessPolicy.isReadable(key)) {
+            errors.add(
+              'contributes.startup.$field: when קורא הגדרה שאינה '
+              'זמינה לתוספים ("$key")',
+            );
+          }
+        }
+      } on PluginWhenConditionException catch (error) {
+        errors.add('contributes.startup.$field: when לא תקין: $error');
+      }
+    }
+
+    final categories = {
+      'toolbarItems': startup.toolbarItems,
+      'contextMenuItems': startup.contextMenuItems,
+      'searchDialogItems': startup.searchDialogItems,
+    };
+    for (final entry in categories.entries) {
+      for (final item in entry.value) {
+        validateRaw(entry.key, item['when']);
+      }
+    }
+    final events = startupMap['activationEvents'];
+    if (events is List) {
+      for (final entry in events) {
+        if (entry is Map) validateRaw('activationEvents', entry['when']);
+      }
+    }
+    if (!hasWhen) return;
+    try {
+      if (PluginVersionUtils.compareCoreVersions(
+            _whenConditionMinVersion,
+            manifest.minAppVersion,
+          ) >
+          0) {
+        errors.add(
+          'תנאי when נתמך החל מגרסה $_whenConditionMinVersion, אך '
+          'minAppVersion שהוצהר הוא ${manifest.minAppVersion}',
+        );
+      }
+    } on PluginVersionFormatException {
+      // minAppVersion נבדק ב-PluginManifestValidator.
+    }
+  }
+
+  /// פעולות host על פריטי תפריט הקשר: הצהרת הרשאה וגרסת מינימום. השגיאות
+  /// המבניות נתפסות כבר ברישום דרך ContextMenuRegistry.
+  static void _validateContextMenuActions(
+    PluginManifest manifest,
+    List<Map<String, dynamic>> items,
+    Set<String> declaredPermissions,
+    List<String> errors,
+  ) {
+    final actions = <Map<String, dynamic>>[];
+    void collect(Map<String, dynamic> item) {
+      if (item['action'] is Map) {
+        actions.add(Map<String, dynamic>.from(item['action'] as Map));
+      }
+      final children = item['children'];
+      if (children is List) {
+        for (final child in children.whereType<Map>()) {
+          collect(Map<String, dynamic>.from(child));
+        }
+      }
+    }
+
+    for (final item in items) {
+      collect(item);
+    }
+    if (actions.isEmpty) return;
+
+    try {
+      if (PluginVersionUtils.compareCoreVersions(
+            _contextMenuActionMinVersion,
+            manifest.minAppVersion,
+          ) >
+          0) {
+        errors.add(
+          'action על פריט תפריט הקשר נתמך החל מגרסה '
+          '$_contextMenuActionMinVersion, אך minAppVersion שהוצהר הוא '
+          '${manifest.minAppVersion}',
+        );
+      }
+    } on PluginVersionFormatException {
+      // minAppVersion נבדק ב-PluginManifestValidator.
+    }
+    for (final action in actions) {
+      try {
+        DeclarativeSelectionAction.validateTemplate(
+          action,
+          declaredPermissions: declaredPermissions,
+        );
+      } on DeclarativeProgramException catch (error) {
+        errors.add('contributes.startup.contextMenuItems לא תקין: $error');
+      }
+    }
+  }
 
   /// ולידציית contributes.startup: סכימה (דרך אותם parsers של ה-runtime),
   /// הרשאות נדרשות וגרסת מינימום.
@@ -606,7 +879,25 @@ class PluginExtendedValidator {
     checkListField('programs', (e) => e is Map, 'אובייקט');
     checkListField('searchDialogItems', (e) => e is Map, 'אובייקט');
     checkListField('externalEditions', (e) => e is Map, 'אובייקט');
-    checkListField('activationEvents', (e) => e is String, 'מחרוזת');
+    checkListField(
+      'activationEvents',
+      (e) => e is String || (e is Map && e['topic'] is String),
+      'מחרוזת או אובייקט עם topic',
+    );
+    final rawEvents = startupMap['activationEvents'];
+    if (rawEvents is List) {
+      for (final entry in rawEvents.whereType<Map>()) {
+        final unknown = entry.keys.where(
+          (key) => key != 'topic' && key != 'when',
+        );
+        if (unknown.isEmpty) continue;
+        errors.add(
+          'contributes.startup.activationEvents: שדה לא מוכר '
+          '"${unknown.first}" (מותרים topic ו-when בלבד)',
+        );
+        hasTypeErrors = true;
+      }
+    }
     final keepAliveRaw = startupMap['keepAlive'];
     if (keepAliveRaw != null && keepAliveRaw is! bool) {
       errors.add('contributes.startup.keepAlive חייב להיות bool');
@@ -648,6 +939,8 @@ class PluginExtendedValidator {
     } on PluginVersionFormatException {
       // minAppVersion לא חוקי — נתפס ב-PluginManifestValidator.
     }
+
+    _validateWhenConditions(manifest, startup, startupMap, errors);
 
     if (startup.toolbarItems.isNotEmpty) {
       final hasDeclarativeItems = startup.toolbarItems.any(
@@ -704,6 +997,12 @@ class PluginExtendedValidator {
           errors.add('contributes.startup.contextMenuItems לא תקין: $e');
         }
       }
+      _validateContextMenuActions(
+        manifest,
+        startup.contextMenuItems,
+        declaredPermissions,
+        errors,
+      );
     }
 
     if (startup.publishedData.isNotEmpty) {
@@ -848,22 +1147,22 @@ class PluginExtendedValidator {
       } on PluginVersionFormatException {
         // minAppVersion נבדק ב-PluginManifestValidator.
       }
-      final usesDataChoose = startup.programs.any((program) {
-        final commands = program['commands'];
-        return commands is List &&
-            commands.whereType<Map>().any(
-              (command) => command['type'] == 'data.choose',
-            );
-      });
-      if (usesDataChoose) {
+      final usedCommandTypes = <String>{
+        for (final program in startup.programs)
+          if (program['commands'] case final List commands)
+            for (final command in commands.whereType<Map>())
+              if (command['type'] case final String type) type,
+      };
+      for (final entry in _commandMinVersions.entries) {
+        if (!usedCommandTypes.contains(entry.key)) continue;
         try {
           if (PluginVersionUtils.compareCoreVersions(
-                _dataChooseMinVersion,
+                entry.value,
                 manifest.minAppVersion,
               ) >
               0) {
             errors.add(
-              'data.choose נתמך החל מגרסה $_dataChooseMinVersion, אך '
+              '${entry.key} נתמכת החל מגרסה ${entry.value}, אך '
               'minAppVersion שהוצהר הוא ${manifest.minAppVersion}',
             );
           }
@@ -900,6 +1199,32 @@ class PluginExtendedValidator {
         .where(DeclarativeToolbarTemplateCompiler.isDeclarative)
         .toList();
     if (declarativeToolbarItems.isNotEmpty) {
+      final usedActionTypes = <String>{
+        for (final item in declarativeToolbarItems) ...[
+          if (item['action'] case {'type': final String type}) type,
+          if (item['childrenBinding'] case {
+            'itemTemplate': {'action': {'type': final String type}},
+          })
+            type,
+        ],
+      };
+      for (final entry in _actionMinVersions.entries) {
+        if (!usedActionTypes.contains(entry.key)) continue;
+        try {
+          if (PluginVersionUtils.compareCoreVersions(
+                entry.value,
+                manifest.minAppVersion,
+              ) >
+              0) {
+            errors.add(
+              '${entry.key} נתמכת החל מגרסה ${entry.value}, אך '
+              'minAppVersion שהוצהר הוא ${manifest.minAppVersion}',
+            );
+          }
+        } on PluginVersionFormatException {
+          // minAppVersion נבדק ב-PluginManifestValidator.
+        }
+      }
       try {
         DeclarativeToolbarTemplateCompiler(
           declaredPermissions: declaredPermissions,

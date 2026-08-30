@@ -8,7 +8,9 @@ import 'package:otzaria/core/app_paths.dart';
 import 'package:otzaria/data/data_providers/hive_data_provider.dart';
 import 'package:otzaria/plugins/models/installed_plugin.dart';
 import 'package:otzaria/plugins/models/plugin_manifest.dart';
+import 'package:otzaria/plugins/services/plugin_report_service.dart';
 import 'package:otzaria/plugins/storage/plugin_system_database.dart';
+import 'package:otzaria/services/direct_error_report_service.dart';
 import 'package:otzaria/personal_notes/models/personal_note.dart';
 import 'package:otzaria/personal_notes/storage/personal_notes_database.dart';
 import 'package:otzaria/settings/engine/settings_repository.dart';
@@ -505,6 +507,73 @@ void main() {
               as Map<String, dynamic>;
 
       expect(backupJson['plugins'], isEmpty);
+    });
+
+    // ה-plugin_id מגיע מקובץ הגיבוי ומרכיב נתיב שנמחק ב-recursive; `..` היה
+    // מוחק את תיקיית האב של תיקיות התוספים.
+    test('שחזור דוחה plugin_id זדוני ואינו מוחק תיקייה שרירותית', () async {
+      const pluginId = 'evil.plugin';
+      await installTestPlugin(pluginId);
+      final backup = await createPluginsBackup();
+
+      final dataRoot = Directory(
+        p.dirname(await AppPaths.getPluginDataPath(pluginId)),
+      );
+      final bystander = File(p.join(dataRoot.path, 'bystander.txt'))
+        ..writeAsStringSync('חייב לשרוד');
+
+      final json =
+          jsonDecode(await File(backup.path).readAsString())
+              as Map<String, dynamic>;
+      final entry = (json['plugins'] as List).single as Map<String, dynamic>;
+      (entry['installation'] as Map)['plugin_id'] = '..';
+      await File(backup.path).writeAsString(jsonEncode(json));
+
+      final result = await BackupService.restoreFromBackup(backup.path);
+
+      expect(bystander.existsSync(), isTrue);
+      expect(bystander.readAsStringSync(), 'חייב לשרוד');
+      expect(dataRoot.existsSync(), isTrue);
+      expect(result.skippedSections, contains('plugins'));
+    });
+
+    test('גיבוי אינו עוקב אחרי symlink בתיקיית נתוני התוסף', () async {
+      const pluginId = 'link.plugin';
+      final paths = await installTestPlugin(pluginId);
+
+      final outside = Directory(p.join(tempDir.path, 'outside_secret'))
+        ..createSync(recursive: true);
+      File(p.join(outside.path, 'secret.txt')).writeAsStringSync('סוד');
+      try {
+        Link(p.join(paths.dataPath, 'leak')).createSync(outside.path);
+      } catch (_) {
+        markTestSkipped('יצירת symlink אינה נתמכת בסביבה זו');
+        return;
+      }
+
+      final backup = await createPluginsBackup();
+      final json =
+          jsonDecode(await File(backup.path).readAsString())
+              as Map<String, dynamic>;
+      final entry = (json['plugins'] as List).single as Map<String, dynamic>;
+      final data = (entry['data'] as Map).cast<String, dynamic>();
+
+      expect(data.keys, contains('state.bin'));
+      expect(data.keys.any((k) => k.contains('secret')), isFalse);
+    });
+
+    test('תוסף שחורג מתקרת הארכיון מדולג ומדווח כחלקי', () async {
+      await installTestPlugin('small.plugin');
+      BackupService.debugMaxPluginBytesOverride = 1; // כל תוסף חורג
+      addTearDown(() => BackupService.debugMaxPluginBytesOverride = null);
+
+      final backup = await createPluginsBackup();
+
+      expect(backup.skipped, contains('plugins'));
+      final json =
+          jsonDecode(await File(backup.path).readAsString())
+              as Map<String, dynamic>;
+      expect(json['plugins'], isEmpty);
     });
 
     test(
@@ -1066,6 +1135,120 @@ void main() {
       await BackupService.restoreFromBackup(path);
 
       expect((tabsBox.get('key-tabs') as List), hasLength(1));
+    });
+  });
+
+  group('גיבוי ושחזור דיווחי טעות שמורים', () {
+    late Box<dynamic> reportsBox;
+
+    setUp(() async {
+      reportsBox = await Hive.openBox<dynamic>(
+        DirectErrorReportService.queueBoxName,
+      );
+      await Hive.openBox<dynamic>(PluginReportService.queueBoxName);
+    });
+
+    Map<String, dynamic> report(String id) => {
+      'id': id,
+      'senderEmail': 'a@b.com',
+      'subject': 'טעות',
+      'bookTitle': 'בראשית',
+      'currentRef': 'א,א',
+      'lineNumber': 1,
+      'createdAt': '2026-08-20T10:00:00.000',
+    };
+
+    Future<String> createSettingsBackup() async =>
+        (await BackupService.createBackup(
+          includeSettings: true,
+          includeBookmarks: false,
+          includeHistory: false,
+          includeNotes: false,
+          includeWorkspaces: false,
+          includeShamorZachor: false,
+          includePlugins: false,
+        )).path;
+
+    test('הדיווחים הממתינים וההיסטוריה עוברים גיבוי ושחזור', () async {
+      await reportsBox.put(DirectErrorReportService.pendingReportsKey, [
+        report('pending-1'),
+      ]);
+      await reportsBox.put(DirectErrorReportService.sentReportsKey, [
+        report('sent-1'),
+      ]);
+
+      final path = await createSettingsBackup();
+      // איפוס הגדרות מוחק את התור — זה בדיוק המצב שבו השחזור נדרש.
+      await reportsBox.clear();
+
+      await BackupService.restoreFromBackup(path);
+
+      // דרך השירות ולא רק דרך ה-box: מאמת שהצורה ששוחזרה נטענת למודל.
+      final service = DirectErrorReportService();
+      expect((await service.getPendingReports()).single.id, 'pending-1');
+      expect((await service.getSentReports()).single.id, 'sent-1');
+      await service.closeHttpClient();
+    });
+
+    test('דיווח שנשלח מאז אינו חוזר לתור בשחזור', () async {
+      await reportsBox.put(DirectErrorReportService.pendingReportsKey, [
+        report('r-1'),
+      ]);
+      final path = await createSettingsBackup();
+
+      // הדיווח נשלח בין הגיבוי לשחזור: עבר לרשימת הנשלחים והתור התרוקן.
+      await reportsBox.put(
+        DirectErrorReportService.pendingReportsKey,
+        <dynamic>[],
+      );
+      await reportsBox.put(DirectErrorReportService.sentReportsKey, [
+        report('r-1'),
+      ]);
+
+      await BackupService.restoreFromBackup(path);
+
+      expect(
+        reportsBox.get(DirectErrorReportService.pendingReportsKey),
+        isEmpty,
+      );
+      expect(
+        (reportsBox.get(DirectErrorReportService.sentReportsKey) as List),
+        hasLength(1),
+      );
+    });
+
+    test('דיווח שנוצר אחרי הגיבוי שורד את השחזור', () async {
+      await reportsBox.put(DirectErrorReportService.pendingReportsKey, [
+        report('old'),
+      ]);
+      final path = await createSettingsBackup();
+
+      await reportsBox.put(DirectErrorReportService.pendingReportsKey, [
+        report('new'),
+      ]);
+      await BackupService.restoreFromBackup(path);
+
+      final ids =
+          (reportsBox.get(DirectErrorReportService.pendingReportsKey) as List)
+              .map((e) => (e as Map)['id'])
+              .toList();
+      expect(ids, containsAll(['new', 'old']));
+    });
+
+    test('box סגור בזמן הגיבוי מסמן את הסעיף כחלקי', () async {
+      await reportsBox.close();
+
+      final result = await BackupService.createBackup(
+        includeSettings: true,
+        includeBookmarks: false,
+        includeHistory: false,
+        includeNotes: false,
+        includeWorkspaces: false,
+        includeShamorZachor: false,
+        includePlugins: false,
+      );
+
+      expect(result.skippedSections, contains('reportQueues'));
     });
   });
 }

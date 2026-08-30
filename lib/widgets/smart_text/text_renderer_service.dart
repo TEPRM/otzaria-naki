@@ -2,7 +2,9 @@ import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
 import 'package:otzaria/text_book/utils/inline_notes_utils.dart' as notes;
+import 'package:otzaria/utils/text/superscript_digits.dart';
 import 'package:otzaria/utils/text/text_manipulation.dart' as utils;
+import 'package:otzaria/widgets/smart_text/raised_markers.dart';
 import 'package:otzaria/widgets/smart_text/render_settings.dart';
 
 /// שירות מרכזי לעיבוד טקסט
@@ -56,6 +58,9 @@ class TextRendererService {
 
     // 0. תיקון סדר סימוני הערות (<sup>) ב-RTL
     processed = _fixFootnoteMarkers(processed);
+
+    // 0a. המרת טקסט תחתי (<sub>) לטקסט טהור — ראו _fixSubscripts.
+    processed = _fixSubscripts(processed);
 
     // 0b. הסרת גוף הערות inline (<i class="footnote">...</i>) - מוצגות כמפרש בצד.
     processed = notes.stripInlineNotes(processed);
@@ -119,11 +124,10 @@ class TextRendererService {
     r'\bclass\s*=\s*"[^"]*\bfootnote-marker\b[^"]*"',
     caseSensitive: false,
   );
-  static final RegExp _simpleInnerRegex = RegExp(r'^[0-9\u0590-\u05FF]+$');
   static final RegExp _isolateStartRegex = RegExp(r'[\u2066\u2067\u2068]');
   static final RegExp _rtlCharRegex = RegExp(r'[\u0590-\u08FF]');
 
-  /// מתקן תגי <sup> כדי למנוע היפוך סדר ב-RTL
+  /// מתקן תגי <sup> כדי למנוע היפוך סדר ב-RTL ולאפשר הצגה מורמת אמיתית
   ///
   /// הבעיה האמיתית אינה bidi של הטקסט: HtmlWidget מממש `<sup>` באמצעות
   /// WidgetSpan, ומנוע Flutter משבץ inline-placeholders בפסקת RTL בסדר
@@ -133,12 +137,20 @@ class TextRendererService {
   ///
   /// הפתרון: sup *מספרי* (עם או בלי class — שניהם משמשים כמרקרים בספרים)
   /// מומר לספרות-עיליות יוניקוד (¹²³…) — טקסט טהור שמוצג מוגבה ומוקטן בכל
-  /// הגופנים, ללא WidgetSpan. מרקר לא-מספרי *מסומן* (`class="footnote-marker"`,
-  /// למשל אות עברית) נפלט כ-`<span class="footnote-marker-number">` — ה-class
-  /// מקבל גופן מוקטן ונטוי גם ב-[SmartTextWidget] (customStylesBuilder) וגם
-  /// בפרסר של מצב קריאה רציפה. sup לא-מספרי שאינו מסומן (superscript תוכני,
-  /// כגון `<sup>מעלית</sup>`) נשאר sup. בנוסף, התוכן עטוף בסימני בידוד
-  /// דו־כיווניות (LRI/RLI + PDI) בהתאם לתוכן כדי שסימונים סמוכים לא יתמזגו.
+  /// הגופנים, ללא WidgetSpan. sup פשוט ולא-מספרי נפלט כ-span טקסט טהור, בשני
+  /// טעמים ששומרים על המטריקות המקוריות של כל אחד:
+  ///   * מרקר הערה (`class="footnote-marker"`) → `footnote-marker-number`,
+  ///     מוקטן ל-0.75em ונטוי.
+  ///   * sup חשוף — אות הפניה מקובץ משתמש או superscript תוכני
+  ///     (`<sup>מעלית</sup>`) → `raised-sup`, מוקטן ל-5/6 בלי נטייה, כמו
+  ///     שה-`<sup>` נראה קודם ב-fwfh ובקריאה הרציפה.
+  ///
+  /// ההרמה הוויזואלית מעל השורה נעשית בציור: [SmartTextWidget] צובע את שני
+  /// ה-class-ים שקופים ומצייר את תוכנם מורם דרך RaisedMarkerOverlay — ל-fwfh
+  /// אין תמיכה ב-`position`/`top` (הן היו no-op גם קודם, ולכן מרקרי הערות
+  /// כלל לא הורמו), ולכן ההרמה חייבת שכבת ציור; ראו raised_markers.dart.
+  /// בנוסף, התוכן עטוף בסימני בידוד דו־כיווניות (LRI/RLI + PDI) בהתאם
+  /// לתוכן כדי שסימונים סמוכים לא יתמזגו.
   static String _fixFootnoteMarkers(String text) {
     // Early-exit מהיר: אם אין בכלל תג <sup> בשורה, מחזירים את הטקסט כפי שהוא
     // בלי לבצע replaceAllMapped (שמקצה StringBuffer גם כשאין התאמות).
@@ -154,57 +166,86 @@ class TextRendererService {
         return '';
       }
 
-      final isFootnoteMarker = _footnoteMarkerClassRegex.hasMatch(attrs);
-      final isSimple = _simpleInnerRegex.hasMatch(innerText);
-
       final wrappedInner = _wrapWithBidiIsolate(innerHtml);
-      if (!isFootnoteMarker && !isSimple) {
-        if (identical(wrappedInner, innerHtml)) {
-          return match[0]!;
-        }
+      final isFootnoteMarker = _footnoteMarkerClassRegex.hasMatch(attrs);
+
+      // sup סמנטי או מעוצב נשאר בנתיב ה-HTML כדי לא לאבד attributes וסגנונות
+      // מקוננים שהציור המורם אינו יכול לשחזר מ-TextStyle הבסיסי בלבד.
+      if (!isFootnoteMarker &&
+          (attrs.trim().isNotEmpty || _htmlTagRegex.hasMatch(innerHtml))) {
         return '<sup$attrs>$wrappedInner</sup>';
       }
 
       // מספר טהור → ספרות-עיליות יוניקוד (מוגבה ומוקטן מטבעו, ללא תגית).
       // חל גם על <sup>1</sup> חשוף בלי class: חלק מספרי ההערות-inline
       // מקודדים כך את המרקרים, וההמרה חסרת-אובדן גם ל-superscript מספרי אמיתי.
-      final trimmedInner = innerText.trim();
-      if (_digitsOnlyRegex.hasMatch(trimmedInner)) {
-        final superscript = trimmedInner.split('').map((d) {
-          return _superscriptDigits[d]!;
-        }).join();
+      final superscript = superscriptDigitsOrNull(innerText.trim());
+      if (superscript != null) {
         return _wrapWithBidiIsolate(superscript);
       }
 
-      // תוכן לא-מספרי: רק מרקר *מסומן* (class="footnote-marker") הופך ל-span.
+      // מרקר הערה מסומן — 0.75em ונטוי.
       if (isFootnoteMarker) {
-        return '<span class="footnote-marker-number">$wrappedInner</span>';
+        return '<span class="$kFootnoteMarkerClass">$wrappedInner</span>';
       }
 
-      // sup פשוט שאינו מרקר (למשל <sup>מעלית</sup> מייבוא Word) נשאר sup —
-      // שומר הגבהה אמיתית. נשאר חשוף לבאג ההיפוך רק אם יופיעו כמה כאלה
-      // באותה פסקה (נדיר עבור superscript תוכני).
-      return '<sup>$wrappedInner</sup>';
+      // sup חשוף (אות הפניה מקובץ משתמש, או superscript תוכני) — 5/6 בלי
+      // נטייה. גם הוא נפלט כ-span טקסט טהור ולא נשאר `<sup>`: מסלול ה-sup של
+      // fwfh בונה WidgetSpan, וזה מה שהפך את הסדר כששני סימונים באותה פסקה.
+      return '<span class="$kRaisedSupClass">$wrappedInner</span>';
     });
   }
 
-  static final RegExp _digitsOnlyRegex = RegExp(r'^[0-9]+$');
+  static final RegExp _subRegex = RegExp(
+    r'<sub(\s[^>]*)?>(.*?)</sub>',
+    caseSensitive: false,
+    dotAll: true,
+  );
 
-  /// מיפוי ספרה רגילה → ספרת-עילית יוניקוד. 1–3 בבלוק Latin-1 (U+00B9/B2/B3),
-  /// השאר בבלוק Superscripts (U+2070, U+2074–U+2079) — אלה נקודות הקוד
-  /// הקנוניות; אין חלופות ל-1–3 בבלוק U+2070.
-  static const Map<String, String> _superscriptDigits = {
-    '0': '⁰',
-    '1': '¹',
-    '2': '²',
-    '3': '³',
-    '4': '⁴',
-    '5': '⁵',
-    '6': '⁶',
-    '7': '⁷',
-    '8': '⁸',
-    '9': '⁹',
+  /// ממיר תגי <sub> לטקסט טהור.
+  ///
+  /// HtmlWidget מממש `<sub>` כ-WidgetSpan עם padding עליון (0.4×fontSize),
+  /// ולכן הוא מותח את השורה / נשבר לשורה נפרדת, ואינו נכלל בבחירת טקסט
+  /// (SelectableRegion מדלג על WidgetSpan). sub *מספרי* מומר לספרות-תחתיות
+  /// יוניקוד (₁₂₃…); לתוכן אחר (למשל עברית) אין גליפים תחתיים — נפלט
+  /// כ-`<span class="subscript-text">` שמוקטן ב-CSS ונשאר טקסט נבחר.
+  static String _fixSubscripts(String text) {
+    if (!_subRegex.hasMatch(text)) return text;
+
+    return text.replaceAllMapped(_subRegex, (match) {
+      final innerHtml = match[2] ?? '';
+      final innerText = innerHtml.replaceAll(_htmlTagRegex, '');
+      if (innerText.trim().isEmpty) {
+        return '';
+      }
+
+      final trimmedInner = innerText.trim();
+      if (_digitsOnlyRegex.hasMatch(trimmedInner)) {
+        final subscript = trimmedInner.split('').map((d) {
+          return _subscriptDigits[d]!;
+        }).join();
+        return _wrapWithBidiIsolate(subscript);
+      }
+
+      return '<span class="subscript-text">${_wrapWithBidiIsolate(innerHtml)}</span>';
+    });
+  }
+
+  /// מיפוי ספרה רגילה → ספרת-תחתית יוניקוד (U+2080–U+2089).
+  static const Map<String, String> _subscriptDigits = {
+    '0': '₀',
+    '1': '₁',
+    '2': '₂',
+    '3': '₃',
+    '4': '₄',
+    '5': '₅',
+    '6': '₆',
+    '7': '₇',
+    '8': '₈',
+    '9': '₉',
   };
+
+  static final RegExp _digitsOnlyRegex = RegExp(r'^[0-9]+$');
 
   static String _wrapWithBidiIsolate(String innerHtml) {
     if (innerHtml.isEmpty) return innerHtml;

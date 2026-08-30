@@ -106,10 +106,18 @@ abstract class SettingsMessages {
 
   static String backupSaved(String size) => 'הגיבוי נשמר! גודל: $size';
 
+  static String backupPluginTooLarge(String pluginId) =>
+      'התוסף "$pluginId" גדול מדי ולא נכלל בגיבוי';
+
   static String backupCreateError(Object error) =>
       'שגיאה ביצירת הגיבוי: $error';
 
   static const String noBackupFileFound = 'לא נמצא קובץ גיבוי בתיקיית הגיבוי';
+
+  static const String backupExported = 'קובץ הגיבוי נשמר במיקום שנבחר';
+
+  static String backupExportError(Object error) =>
+      'שגיאה בייצוא הגיבוי: $error';
 
   static const String archiveNotCreatedYet =
       'עדיין לא נוצר ארכיון — הוא נבנה כשגיבויים ישנים ממוזגים';
@@ -136,6 +144,12 @@ abstract class SettingsMessages {
 
   static String hebrewBooksPathRemoveError(Object error) =>
       'שגיאה בהסרת המיקום: $error';
+
+  static String oldLibraryCopyDeleted(String size) =>
+      'העותק הישן נמחק — התפנו $size';
+
+  static String oldLibraryCopyDeleteError(Object error) =>
+      'שגיאה במחיקת העותק הישן: $error';
 
   // ── רשימת ספרים (books_list_dialog) ────────────────────────────────────
 

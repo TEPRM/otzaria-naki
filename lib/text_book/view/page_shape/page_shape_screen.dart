@@ -4,10 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:otzaria/theme/app_fonts.dart';
 import 'package:otzaria/text_book/bloc/text_book_bloc.dart';
 import 'package:otzaria/text_book/bloc/text_book_event.dart';
 import 'package:otzaria/text_book/bloc/text_book_state.dart';
+import 'package:otzaria/text_book/utils/reader_build_policy.dart';
 import 'package:otzaria/text_book/view/page_shape/utils/page_shape_settings_manager.dart';
 import 'package:otzaria/text_book/view/page_shape/utils/default_commentators.dart';
 import 'package:otzaria/text_book/view/tabbed_commentary_panel.dart';
@@ -29,10 +31,10 @@ import 'package:otzaria/models/links.dart';
 import 'package:otzaria/models/link_types.dart';
 import 'package:otzaria/utils/text/text_manipulation.dart' as utils;
 import 'package:otzaria/utils/text/ref_helper.dart';
+import 'package:otzaria/widgets/layout/reading_area_width.dart';
 import 'package:otzaria/widgets/layout/resizable_drag_handle.dart';
 import 'package:otzaria/widgets/layout/adaptive_side_pane.dart';
 import 'package:otzaria/widgets/layout/context_overlay_panel.dart';
-import 'package:otzaria/widgets/layout/split_pane_content_inset.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:collection/collection.dart';
@@ -59,6 +61,24 @@ const double _kCommentaryPaneWidthFactor = 0.17;
 
 /// רוחב הכותרת האנכית + רווחים + מפריד (20 לכותרת + 4 לרווח + 8 למפריד)
 const double _kCommentaryLabelAndSpacingWidth = 32.0;
+
+@visibleForTesting
+double pageShapeAnchorProgress(ItemPosition position) {
+  final extent = position.itemTrailingEdge - position.itemLeadingEdge;
+  if (position.itemLeadingEdge >= 0 || extent <= 0) return 0;
+  return (-position.itemLeadingEdge / extent).clamp(0.0, 1.0);
+}
+
+@visibleForTesting
+double pageShapeAnchorRestorationOffset({
+  required ItemPosition position,
+  required double progress,
+  required double viewportExtent,
+}) {
+  final itemExtent =
+      (position.itemTrailingEdge - position.itemLeadingEdge) * viewportExtent;
+  return position.itemLeadingEdge * viewportExtent + progress * itemExtent;
+}
 
 /// מסך תצוגת צורת הדף - מציג את הטקסט המרכזי עם מפרשים מסביב
 class PageShapeScreen extends StatefulWidget {
@@ -92,6 +112,7 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
   String? _bottomCommentator;
   String? _bottomRightCommentator;
   bool _isLoadingConfig = true;
+  int _loadConfigurationGeneration = 0;
   bool _isLeftSidebarOpen = false;
   int _leftSidebarTabIndex = 0;
   String? _notesBookIdOverride;
@@ -109,6 +130,8 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
   );
   final ValueNotifier<int> _closeCommentatorsFilterNotifier =
       ValueNotifier<int>(0);
+  final GlobalKey _mainTextViewerKey = GlobalKey();
+  int _reanchorGeneration = 0;
 
   // גדלים לחלוניות - יחושבו לפי גודל המסך
   double? _leftSidebarWidth;
@@ -216,6 +239,7 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
 
   /// עיגון מחדש לפריט העליון הנראה לפני שינוי רוחב התוכן.
   void _reanchorMainText() {
+    final generation = ++_reanchorGeneration;
     final blocState = context.read<TextBookBloc>().state;
     if (blocState is! TextBookLoaded) return;
 
@@ -234,10 +258,63 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
     final anchor = atOrBelowFold.isNotEmpty
         ? pickByMin(atOrBelowFold)
         : pickByMin(visible);
+    final progress = pageShapeAnchorProgress(anchor);
 
     controller.jumpTo(
       index: anchor.index,
       alignment: anchor.itemLeadingEdge.clamp(0.0, 1.0),
+    );
+
+    final offsetController = blocState.scrollOffsetController;
+    if (progress == 0 || offsetController == null) return;
+    unawaited(
+      _restoreMainTextAnchor(
+        generation: generation,
+        anchorIndex: anchor.index,
+        progress: progress,
+        offsetController: offsetController,
+      ),
+    );
+  }
+
+  Future<void> _restoreMainTextAnchor({
+    required int generation,
+    required int anchorIndex,
+    required double progress,
+    required ScrollOffsetController offsetController,
+  }) async {
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted || generation != _reanchorGeneration) return;
+
+    final blocState = context.read<TextBookBloc>().state;
+    if (blocState is! TextBookLoaded ||
+        blocState.scrollOffsetController != offsetController ||
+        !blocState.scrollController.isAttached) {
+      return;
+    }
+
+    final measured = blocState.positionsListener.itemPositions.value
+        .where((position) => position.index == anchorIndex)
+        .firstOrNull;
+    final viewportExtent = _mainTextViewerKey.currentContext?.size?.height;
+    if (measured == null ||
+        viewportExtent == null ||
+        !viewportExtent.isFinite ||
+        viewportExtent <= 0) {
+      return;
+    }
+
+    final offset = pageShapeAnchorRestorationOffset(
+      position: measured,
+      progress: progress,
+      viewportExtent: viewportExtent,
+    );
+    if (!offset.isFinite || offset.abs() < 0.5) return;
+
+    await offsetController.animateScroll(
+      offset: offset,
+      duration: const Duration(milliseconds: 1),
+      curve: Curves.linear,
     );
   }
 
@@ -319,6 +396,8 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
       return;
     }
 
+    final generation = ++_loadConfigurationGeneration;
+
     final config = PageShapeSettingsManager.loadConfiguration(
       state.book.title,
       heCategories: state.book.heCategories,
@@ -344,6 +423,8 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
         state.book,
         availableCommentators: state.availableCommentators,
       );
+      // טעינה חדשה יותר (למשל אחרי העשרת heCategories) כבר רצה — לא לדרוס.
+      if (generation != _loadConfigurationGeneration) return;
       commentators = defaults.commentators;
       for (final entry in defaults.visibility.entries) {
         if (!entry.value) _columnVisibility[entry.key] = false;
@@ -609,9 +690,7 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
 
     if (showSnack && global && persist) {
       UiSnack.show(
-        _hiddenColumnMessage(
-          _activeDisplaySettingsScope(state.book.title),
-        ),
+        _hiddenColumnMessage(_activeDisplaySettingsScope(state.book.title)),
       );
     }
 
@@ -636,7 +715,7 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
           children: [
             ActionButton.recommended(
               onPressed: onSelectCommentator,
-              icon: FluentIcons.book_24_regular,
+              icon: OtzariaIcons.book_24_regular,
               text: 'בחר מפרש',
             ),
             const SizedBox(height: 12),
@@ -885,8 +964,11 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
         BlocListener<TextBookBloc, TextBookState>(
           listenWhen: (previous, current) {
             if (previous is TextBookLoaded && current is TextBookLoaded) {
+              // heCategories מועשר ברקע אחרי הטעינה; בלעדיו הגדרות הקטגוריה
+              // לא נמצאות וברירות המחדל נשארות על המסך (issue #770).
               return previous.availableCommentators.length !=
-                  current.availableCommentators.length;
+                      current.availableCommentators.length ||
+                  previous.book.heCategories != current.book.heCategories;
             }
             return previous is! TextBookLoaded && current is TextBookLoaded;
           },
@@ -896,6 +978,15 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
               _loadConfiguration();
             }
           },
+        ),
+        BlocListener<TextBookBloc, TextBookState>(
+          // שינוי גודל גופן משנה את גובה כל הפריטים; בלי עיגון-מחדש ההיסט
+          // בפיקסלים נוחת על מקום אחר (issue #915).
+          listenWhen: (previous, current) =>
+              previous is TextBookLoaded &&
+              current is TextBookLoaded &&
+              previous.fontSize != current.fontSize,
+          listener: (context, state) => _reanchorMainText(),
         ),
         BlocListener<PersonalNotesBloc, PersonalNotesState>(
           // מאזינים גם לשינוי newNoteBookId, כדי לתפוס מעבר ישיר מטיוטה
@@ -920,13 +1011,10 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
         ),
       ],
       child: _isLoadingConfig
-          ? const Scaffold(
-              body: LoadingIndicator(),
-            )
+          ? const Scaffold(body: LoadingIndicator())
           : TextBookStateBuilder(
-              loadingWidget: const Scaffold(
-                body: LoadingIndicator(),
-              ),
+              buildWhen: shouldRebuildReader,
+              loadingWidget: const Scaffold(body: LoadingIndicator()),
               builder: (context, state) {
                 // נראות כל פאנל תחתון נשלטת בנפרד; האזור התחתון מוצג רק אם
                 // לפחות אחד מהם גלוי ובעל מפרש.
@@ -981,244 +1069,29 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
                         ),
                         mainContent: Stack(
                           children: [
-                            Padding(
-                              padding: SplitPaneContentInset.of(context),
-                              child: Row(
-                                children: [
-                                  Expanded(
-                                    child: Column(
-                                      children: [
-                                        Expanded(
-                                          child: Row(
-                                            children: [
-                                              if (_columnVisibility['left'] ==
-                                                  true) ...[
-                                                if (_leftCommentator !=
-                                                    null) ...[
-                                                  SizedBox(
-                                                    width: 20,
-                                                    child: Center(
-                                                      child: RotatedBox(
-                                                        quarterTurns: 1,
-                                                        child: Text(
-                                                          _leftCommentator!,
-                                                          style:
-                                                              const TextStyle(
-                                                                fontSize: 14,
-                                                              ),
-                                                        ),
-                                                      ),
-                                                    ),
-                                                  ),
-                                                  const SizedBox(width: 4),
-                                                  SizedBox(
-                                                    width:
-                                                        _leftWidth ??
-                                                        MediaQuery.of(
-                                                              context,
-                                                            ).size.width *
-                                                            _kCommentaryPaneWidthFactor,
-                                                    child: _CommentaryPane(
-                                                      commentatorName:
-                                                          _leftCommentator!,
-                                                      openBookCallback: widget
-                                                          .openBookCallback,
-                                                      workspaceId:
-                                                          _activeWorkspaceId,
-                                                      selectionSyncController:
-                                                          _selectionSyncController,
-                                                      onOpenPersonalNote:
-                                                          _openCommentaryPersonalNote,
-                                                      onLoadFailed: () =>
-                                                          _hideColumn(
-                                                            'left',
-                                                            global: false,
-                                                            showSnack: false,
-                                                            persist: false,
-                                                          ),
-                                                    ),
-                                                  ),
-                                                ] else ...[
-                                                  SizedBox(
-                                                    width:
-                                                        _leftWidth ??
-                                                        MediaQuery.of(
-                                                              context,
-                                                            ).size.width *
-                                                            _kCommentaryPaneWidthFactor,
-                                                    child: _buildEmptyColumnContent(
-                                                      columnName: 'left',
-                                                      onSelectCommentator: () {
-                                                        setState(() {
-                                                          _columnVisibility['left'] =
-                                                              true;
-                                                        });
-                                                        final state = context
-                                                            .read<
-                                                              TextBookBloc
-                                                            >()
-                                                            .state;
-                                                        if (state
-                                                            is TextBookLoaded) {
-                                                          PageShapeSettingsManager.saveColumnVisibility(
-                                                            state.book.title,
-                                                            _columnVisibility,
-                                                            scope:
-                                                                _activeDisplaySettingsScope(
-                                                                  state
-                                                                      .book
-                                                                      .title,
-                                                                ),
-                                                            workspaceId:
-                                                                _activeWorkspaceId,
-                                                          );
-                                                        }
-                                                        _openSettingsPane();
-                                                      },
-                                                      onHideColumn: () =>
-                                                          _hideColumn('left'),
-                                                    ),
-                                                  ),
-                                                ],
-                                                SizedBox(
-                                                  width: 8,
-                                                  child: Stack(
-                                                    children: [
-                                                      Positioned(
-                                                        top: 0,
-                                                        bottom: 0,
-                                                        child: ResizableDragHandle(
-                                                          isVertical: true,
-                                                          showDivider: false,
-                                                          onDragDelta: (delta) {
-                                                            setState(() {
-                                                              _leftWidth =
-                                                                  ((_leftWidth ??
-                                                                              MediaQuery.of(context).size.width *
-                                                                                  _kCommentaryPaneWidthFactor) -
-                                                                          delta)
-                                                                      .clamp(
-                                                                        80.0,
-                                                                        MediaQuery.of(
-                                                                              context,
-                                                                            ).size.width *
-                                                                            0.4,
-                                                                      );
-                                                            });
-                                                          },
-                                                          onDragEnd: _saveSizes,
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                              ],
-                                              Expanded(
-                                                child: Listener(
-                                                  onPointerDown: (_) =>
-                                                      _focusMainBookNotes(),
-                                                  child: SimpleTextViewer(
-                                                    content: state.content,
-                                                    fontSize: state.fontSize,
-                                                    selectionSyncController:
-                                                        _selectionSyncController,
-                                                    openBookCallback:
-                                                        widget.openBookCallback,
-                                                    scrollController:
-                                                        state.scrollController,
-                                                    positionsListener:
-                                                        state.positionsListener,
-                                                    isMainText: true,
-                                                    isPersonalNotesTabActive:
-                                                        _isLeftSidebarOpen &&
-                                                        _leftSidebarTabIndex ==
-                                                            kNotesTabIndex,
-                                                    isCommentatorsTabActive:
-                                                        _isLeftSidebarOpen &&
-                                                        _leftSidebarTabIndex ==
-                                                            kCommentaryTabIndex,
-                                                    onOpenCommentatorsPane:
-                                                        _openCommentatorsPane,
-                                                    onOpenCommentatorsPaneWithFilter:
-                                                        _openCommentatorsPaneWithFilter,
-                                                    tab: widget.tab,
-                                                    labelForIndex:
-                                                        state
-                                                            .tableOfContents
-                                                            .isEmpty
-                                                        ? null
-                                                        : (index) =>
-                                                              _mainTextLabelForIndex(
-                                                                index,
-                                                                state,
-                                                              ),
-                                                    onOpenSidebarTab:
-                                                        _openLeftSidebarTab,
-                                                    onOpenSearch:
-                                                        widget.onOpenSearch,
-                                                  ),
-                                                ),
-                                              ),
-                                              if (_columnVisibility['right'] ==
-                                                  true) ...[
-                                                SizedBox(
-                                                  width: 8,
-                                                  child: Stack(
-                                                    children: [
-                                                      Positioned(
-                                                        top: 0,
-                                                        bottom: 0,
-                                                        child: ResizableDragHandle(
-                                                          isVertical: true,
-                                                          showDivider: false,
-                                                          onDragDelta: (delta) {
-                                                            setState(() {
-                                                              _rightWidth =
-                                                                  ((_rightWidth ??
-                                                                              MediaQuery.of(context).size.width *
-                                                                                  _kCommentaryPaneWidthFactor) +
-                                                                          delta)
-                                                                      .clamp(
-                                                                        80.0,
-                                                                        MediaQuery.of(
-                                                                              context,
-                                                                            ).size.width *
-                                                                            0.4,
-                                                                      );
-                                                            });
-                                                          },
-                                                          onDragEnd: _saveSizes,
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                                if (_rightPaneSelectableCommentators(
-                                                  state,
-                                                ).isNotEmpty) ...[
-                                                  SizedBox(
-                                                    width:
-                                                        _rightWidth ??
-                                                        MediaQuery.of(
-                                                              context,
-                                                            ).size.width *
-                                                            _kCommentaryPaneWidthFactor,
-                                                    child: _buildRightPane(
-                                                      state,
-                                                    ),
-                                                  ),
-                                                  if (_rightPaneLabel(state) !=
+                            // הגדרת "רוחב הטקסט" מגבילה כאן את כל תוכן הדף
+                            // (טקסט + מפרשים) עם שוליים בצדדים.
+                            LayoutBuilder(
+                              builder: (context, pageConstraints) {
+                                final page = Row(
+                                  children: [
+                                    Expanded(
+                                      child: Column(
+                                        children: [
+                                          Expanded(
+                                            child: Row(
+                                              children: [
+                                                if (_columnVisibility['left'] ==
+                                                    true) ...[
+                                                  if (_leftCommentator !=
                                                       null) ...[
-                                                    const SizedBox(width: 4),
                                                     SizedBox(
                                                       width: 20,
                                                       child: Center(
                                                         child: RotatedBox(
-                                                          quarterTurns: 3,
+                                                          quarterTurns: 1,
                                                           child: Text(
-                                                            _rightPaneLabel(
-                                                              state,
-                                                            )!,
+                                                            _leftCommentator!,
                                                             style:
                                                                 const TextStyle(
                                                                   fontSize: 14,
@@ -1227,91 +1100,461 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
                                                         ),
                                                       ),
                                                     ),
+                                                    const SizedBox(width: 4),
+                                                    SizedBox(
+                                                      width:
+                                                          _leftWidth ??
+                                                          MediaQuery.of(
+                                                                context,
+                                                              ).size.width *
+                                                              _kCommentaryPaneWidthFactor,
+                                                      child: _CommentaryPane(
+                                                        commentatorName:
+                                                            _leftCommentator!,
+                                                        openBookCallback: widget
+                                                            .openBookCallback,
+                                                        workspaceId:
+                                                            _activeWorkspaceId,
+                                                        selectionSyncController:
+                                                            _selectionSyncController,
+                                                        onOpenPersonalNote:
+                                                            _openCommentaryPersonalNote,
+                                                        onLoadFailed: () =>
+                                                            _hideColumn(
+                                                              'left',
+                                                              global: false,
+                                                              showSnack: false,
+                                                              persist: false,
+                                                            ),
+                                                      ),
+                                                    ),
+                                                  ] else ...[
+                                                    SizedBox(
+                                                      width:
+                                                          _leftWidth ??
+                                                          MediaQuery.of(
+                                                                context,
+                                                              ).size.width *
+                                                              _kCommentaryPaneWidthFactor,
+                                                      child: _buildEmptyColumnContent(
+                                                        columnName: 'left',
+                                                        onSelectCommentator: () {
+                                                          setState(() {
+                                                            _columnVisibility['left'] =
+                                                                true;
+                                                          });
+                                                          final state = context
+                                                              .read<
+                                                                TextBookBloc
+                                                              >()
+                                                              .state;
+                                                          if (state
+                                                              is TextBookLoaded) {
+                                                            PageShapeSettingsManager.saveColumnVisibility(
+                                                              state.book.title,
+                                                              _columnVisibility,
+                                                              scope:
+                                                                  _activeDisplaySettingsScope(
+                                                                    state
+                                                                        .book
+                                                                        .title,
+                                                                  ),
+                                                              workspaceId:
+                                                                  _activeWorkspaceId,
+                                                            );
+                                                          }
+                                                          _openSettingsPane();
+                                                        },
+                                                        onHideColumn: () =>
+                                                            _hideColumn('left'),
+                                                      ),
+                                                    ),
                                                   ],
-                                                ] else ...[
                                                   SizedBox(
-                                                    width:
-                                                        _rightWidth ??
-                                                        MediaQuery.of(
-                                                              context,
-                                                            ).size.width *
-                                                            _kCommentaryPaneWidthFactor,
-                                                    child: _buildEmptyColumnContent(
-                                                      columnName: 'right',
-                                                      onSelectCommentator: () {
-                                                        setState(() {
-                                                          _columnVisibility['right'] =
-                                                              true;
-                                                        });
-                                                        final state = context
-                                                            .read<
-                                                              TextBookBloc
-                                                            >()
-                                                            .state;
-                                                        if (state
-                                                            is TextBookLoaded) {
-                                                          PageShapeSettingsManager.saveColumnVisibility(
-                                                            state.book.title,
-                                                            _columnVisibility,
-                                                            scope:
-                                                                _activeDisplaySettingsScope(
-                                                                  state
-                                                                      .book
-                                                                      .title,
-                                                                ),
-                                                            workspaceId:
-                                                                _activeWorkspaceId,
-                                                          );
-                                                        }
-                                                        _openSettingsPane();
-                                                      },
-                                                      onHideColumn: () =>
-                                                          _hideColumn('right'),
+                                                    width: 8,
+                                                    child: Stack(
+                                                      children: [
+                                                        Positioned(
+                                                          top: 0,
+                                                          bottom: 0,
+                                                          child: ResizableDragHandle(
+                                                            isVertical: true,
+                                                            showDivider: false,
+                                                            onDragDelta: (delta) {
+                                                              setState(() {
+                                                                _leftWidth =
+                                                                    ((_leftWidth ??
+                                                                                MediaQuery.of(context).size.width *
+                                                                                    _kCommentaryPaneWidthFactor) -
+                                                                            delta)
+                                                                        .clamp(
+                                                                          80.0,
+                                                                          MediaQuery.of(
+                                                                                context,
+                                                                              ).size.width *
+                                                                              0.4,
+                                                                        );
+                                                              });
+                                                            },
+                                                            onDragEnd:
+                                                                _saveSizes,
+                                                          ),
+                                                        ),
+                                                      ],
                                                     ),
                                                   ),
                                                 ],
-                                              ],
-                                            ],
-                                          ),
-                                        ),
-                                        if (showBottom || showBottomRight) ...[
-                                          _HorizontalDragHandle(
-                                            leftWidth: _leftWidth,
-                                            rightWidth: _rightWidth,
-                                            leftCommentator: _leftCommentator,
-                                            rightCommentator: _rightPaneLabel(
-                                              state,
-                                            ),
-                                            onPanUpdate: (details) {
-                                              setState(() {
-                                                _bottomHeight =
-                                                    ((_bottomHeight ?? 0) -
-                                                            details.delta.dy)
-                                                        .clamp(
-                                                          80.0,
+                                                Expanded(
+                                                  child: Listener(
+                                                    onPointerDown: (_) =>
+                                                        _focusMainBookNotes(),
+                                                    child: SimpleTextViewer(
+                                                      key: _mainTextViewerKey,
+                                                      content: state.content,
+                                                      fontSize: state.fontSize,
+                                                      selectionSyncController:
+                                                          _selectionSyncController,
+                                                      openBookCallback: widget
+                                                          .openBookCallback,
+                                                      scrollController: state
+                                                          .scrollController,
+                                                      positionsListener: state
+                                                          .positionsListener,
+                                                      isMainText: true,
+                                                      isPersonalNotesTabActive:
+                                                          _isLeftSidebarOpen &&
+                                                          _leftSidebarTabIndex ==
+                                                              kNotesTabIndex,
+                                                      isCommentatorsTabActive:
+                                                          _isLeftSidebarOpen &&
+                                                          _leftSidebarTabIndex ==
+                                                              kCommentaryTabIndex,
+                                                      onOpenCommentatorsPane:
+                                                          _openCommentatorsPane,
+                                                      onOpenCommentatorsPaneWithFilter:
+                                                          _openCommentatorsPaneWithFilter,
+                                                      tab: widget.tab,
+                                                      labelForIndex:
+                                                          state
+                                                              .tableOfContents
+                                                              .isEmpty
+                                                          ? null
+                                                          : (index) =>
+                                                                _mainTextLabelForIndex(
+                                                                  index,
+                                                                  state,
+                                                                ),
+                                                      onOpenSidebarTab:
+                                                          _openLeftSidebarTab,
+                                                      onOpenSearch:
+                                                          widget.onOpenSearch,
+                                                    ),
+                                                  ),
+                                                ),
+                                                if (_columnVisibility['right'] ==
+                                                    true) ...[
+                                                  SizedBox(
+                                                    width: 8,
+                                                    child: Stack(
+                                                      children: [
+                                                        Positioned(
+                                                          top: 0,
+                                                          bottom: 0,
+                                                          child: ResizableDragHandle(
+                                                            isVertical: true,
+                                                            showDivider: false,
+                                                            onDragDelta: (delta) {
+                                                              setState(() {
+                                                                _rightWidth =
+                                                                    ((_rightWidth ??
+                                                                                MediaQuery.of(context).size.width *
+                                                                                    _kCommentaryPaneWidthFactor) +
+                                                                            delta)
+                                                                        .clamp(
+                                                                          80.0,
+                                                                          MediaQuery.of(
+                                                                                context,
+                                                                              ).size.width *
+                                                                              0.4,
+                                                                        );
+                                                              });
+                                                            },
+                                                            onDragEnd:
+                                                                _saveSizes,
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                  if (_rightPaneSelectableCommentators(
+                                                    state,
+                                                  ).isNotEmpty) ...[
+                                                    SizedBox(
+                                                      width:
+                                                          _rightWidth ??
                                                           MediaQuery.of(
                                                                 context,
-                                                              ).size.height *
-                                                              0.5,
-                                                        );
-                                              });
-                                            },
-                                            onPanEnd: _saveSizes,
+                                                              ).size.width *
+                                                              _kCommentaryPaneWidthFactor,
+                                                      child: _buildRightPane(
+                                                        state,
+                                                      ),
+                                                    ),
+                                                    if (_rightPaneLabel(
+                                                          state,
+                                                        ) !=
+                                                        null) ...[
+                                                      const SizedBox(width: 4),
+                                                      SizedBox(
+                                                        width: 20,
+                                                        child: Center(
+                                                          child: RotatedBox(
+                                                            quarterTurns: 3,
+                                                            child: Text(
+                                                              _rightPaneLabel(
+                                                                state,
+                                                              )!,
+                                                              style:
+                                                                  const TextStyle(
+                                                                    fontSize:
+                                                                        14,
+                                                                  ),
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ] else ...[
+                                                    SizedBox(
+                                                      width:
+                                                          _rightWidth ??
+                                                          MediaQuery.of(
+                                                                context,
+                                                              ).size.width *
+                                                              _kCommentaryPaneWidthFactor,
+                                                      child: _buildEmptyColumnContent(
+                                                        columnName: 'right',
+                                                        onSelectCommentator: () {
+                                                          setState(() {
+                                                            _columnVisibility['right'] =
+                                                                true;
+                                                          });
+                                                          final state = context
+                                                              .read<
+                                                                TextBookBloc
+                                                              >()
+                                                              .state;
+                                                          if (state
+                                                              is TextBookLoaded) {
+                                                            PageShapeSettingsManager.saveColumnVisibility(
+                                                              state.book.title,
+                                                              _columnVisibility,
+                                                              scope:
+                                                                  _activeDisplaySettingsScope(
+                                                                    state
+                                                                        .book
+                                                                        .title,
+                                                                  ),
+                                                              workspaceId:
+                                                                  _activeWorkspaceId,
+                                                            );
+                                                          }
+                                                          _openSettingsPane();
+                                                        },
+                                                        onHideColumn: () =>
+                                                            _hideColumn(
+                                                              'right',
+                                                            ),
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ],
+                                              ],
+                                            ),
                                           ),
-                                          SizedBox(
-                                            height:
-                                                _bottomHeight ??
-                                                MediaQuery.of(
-                                                      context,
-                                                    ).size.height *
-                                                    0.27,
-                                            child: Column(
-                                              children: [
-                                                Expanded(
-                                                  child: showBottomRight
-                                                      ? Row(
-                                                          children: [
-                                                            if (showBottom) ...[
+                                          if (showBottom ||
+                                              showBottomRight) ...[
+                                            _HorizontalDragHandle(
+                                              leftWidth: _leftWidth,
+                                              rightWidth: _rightWidth,
+                                              leftCommentator: _leftCommentator,
+                                              rightCommentator: _rightPaneLabel(
+                                                state,
+                                              ),
+                                              onPanUpdate: (details) {
+                                                setState(() {
+                                                  _bottomHeight =
+                                                      ((_bottomHeight ?? 0) -
+                                                              details.delta.dy)
+                                                          .clamp(
+                                                            80.0,
+                                                            MediaQuery.of(
+                                                                  context,
+                                                                ).size.height *
+                                                                0.5,
+                                                          );
+                                                });
+                                              },
+                                              onPanEnd: _saveSizes,
+                                            ),
+                                            SizedBox(
+                                              height:
+                                                  _bottomHeight ??
+                                                  MediaQuery.of(
+                                                        context,
+                                                      ).size.height *
+                                                      0.27,
+                                              child: Column(
+                                                children: [
+                                                  Expanded(
+                                                    child: showBottomRight
+                                                        ? Row(
+                                                            children: [
+                                                              if (showBottom) ...[
+                                                                SizedBox(
+                                                                  width: 20,
+                                                                  child: Center(
+                                                                    child: RotatedBox(
+                                                                      quarterTurns:
+                                                                          1,
+                                                                      child: Text(
+                                                                        _bottomCommentator!,
+                                                                        style: const TextStyle(
+                                                                          fontSize:
+                                                                              14,
+                                                                        ),
+                                                                      ),
+                                                                    ),
+                                                                  ),
+                                                                ),
+                                                                const SizedBox(
+                                                                  width: 4,
+                                                                ),
+                                                                SizedBox(
+                                                                  width:
+                                                                      _bottomLeftWidth ??
+                                                                      MediaQuery.of(
+                                                                            context,
+                                                                          ).size.width *
+                                                                          0.5,
+                                                                  child: _CommentaryPane(
+                                                                    commentatorName:
+                                                                        _bottomCommentator!,
+                                                                    openBookCallback:
+                                                                        widget
+                                                                            .openBookCallback,
+                                                                    workspaceId:
+                                                                        _activeWorkspaceId,
+                                                                    isBottom:
+                                                                        true,
+                                                                    selectionSyncController:
+                                                                        _selectionSyncController,
+                                                                    onOpenPersonalNote:
+                                                                        _openCommentaryPersonalNote,
+                                                                    onLoadFailed: () => _hideColumn(
+                                                                      'bottom',
+                                                                      global:
+                                                                          false,
+                                                                      showSnack:
+                                                                          false,
+                                                                      persist:
+                                                                          false,
+                                                                    ),
+                                                                  ),
+                                                                ),
+                                                                SizedBox(
+                                                                  width: 8,
+                                                                  child: Stack(
+                                                                    children: [
+                                                                      Positioned(
+                                                                        top: 0,
+                                                                        bottom:
+                                                                            0,
+                                                                        child: ResizableDragHandle(
+                                                                          isVertical:
+                                                                              true,
+                                                                          showDivider:
+                                                                              false,
+                                                                          onDragDelta:
+                                                                              (
+                                                                                delta,
+                                                                              ) {
+                                                                                setState(
+                                                                                  () {
+                                                                                    _bottomLeftWidth =
+                                                                                        ((_bottomLeftWidth ??
+                                                                                                    MediaQuery.of(
+                                                                                                          context,
+                                                                                                        ).size.width *
+                                                                                                        0.5) -
+                                                                                                delta)
+                                                                                            .clamp(
+                                                                                              100.0,
+                                                                                              MediaQuery.of(
+                                                                                                    context,
+                                                                                                  ).size.width *
+                                                                                                  0.8,
+                                                                                            );
+                                                                                  },
+                                                                                );
+                                                                              },
+                                                                          onDragEnd:
+                                                                              _saveSizes,
+                                                                        ),
+                                                                      ),
+                                                                    ],
+                                                                  ),
+                                                                ),
+                                                              ],
+                                                              Expanded(
+                                                                child: _CommentaryPane(
+                                                                  commentatorName:
+                                                                      _bottomRightCommentator!,
+                                                                  openBookCallback:
+                                                                      widget
+                                                                          .openBookCallback,
+                                                                  workspaceId:
+                                                                      _activeWorkspaceId,
+                                                                  isBottom:
+                                                                      true,
+                                                                  selectionSyncController:
+                                                                      _selectionSyncController,
+                                                                  onOpenPersonalNote:
+                                                                      _openCommentaryPersonalNote,
+                                                                  onLoadFailed: () => _hideColumn(
+                                                                    'bottomRight',
+                                                                    global:
+                                                                        false,
+                                                                    showSnack:
+                                                                        false,
+                                                                    persist:
+                                                                        false,
+                                                                  ),
+                                                                ),
+                                                              ),
+                                                              const SizedBox(
+                                                                width: 4,
+                                                              ),
+                                                              SizedBox(
+                                                                width: 20,
+                                                                child: Center(
+                                                                  child: RotatedBox(
+                                                                    quarterTurns:
+                                                                        3,
+                                                                    child: Text(
+                                                                      _bottomRightCommentator!,
+                                                                      style: const TextStyle(
+                                                                        fontSize:
+                                                                            14,
+                                                                      ),
+                                                                    ),
+                                                                  ),
+                                                                ),
+                                                              ),
+                                                            ],
+                                                          )
+                                                        : Row(
+                                                            children: [
                                                               SizedBox(
                                                                 width: 20,
                                                                 child: Center(
@@ -1331,13 +1574,7 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
                                                               const SizedBox(
                                                                 width: 4,
                                                               ),
-                                                              SizedBox(
-                                                                width:
-                                                                    _bottomLeftWidth ??
-                                                                    MediaQuery.of(
-                                                                          context,
-                                                                        ).size.width *
-                                                                        0.5,
+                                                              Expanded(
                                                                 child: _CommentaryPane(
                                                                   commentatorName:
                                                                       _bottomCommentator!,
@@ -1364,150 +1601,38 @@ class _PageShapeScreenState extends State<PageShapeScreen> {
                                                                       ),
                                                                 ),
                                                               ),
-                                                              SizedBox(
-                                                                width: 8,
-                                                                child: Stack(
-                                                                  children: [
-                                                                    Positioned(
-                                                                      top: 0,
-                                                                      bottom: 0,
-                                                                      child: ResizableDragHandle(
-                                                                        isVertical:
-                                                                            true,
-                                                                        showDivider:
-                                                                            false,
-                                                                        onDragDelta: (delta) {
-                                                                          setState(() {
-                                                                            _bottomLeftWidth =
-                                                                                ((_bottomLeftWidth ??
-                                                                                            MediaQuery.of(
-                                                                                                  context,
-                                                                                                ).size.width *
-                                                                                                0.5) -
-                                                                                        delta)
-                                                                                    .clamp(
-                                                                                      100.0,
-                                                                                      MediaQuery.of(
-                                                                                            context,
-                                                                                          ).size.width *
-                                                                                          0.8,
-                                                                                    );
-                                                                          });
-                                                                        },
-                                                                        onDragEnd:
-                                                                            _saveSizes,
-                                                                      ),
-                                                                    ),
-                                                                  ],
-                                                                ),
-                                                              ),
                                                             ],
-                                                            Expanded(
-                                                              child: _CommentaryPane(
-                                                                commentatorName:
-                                                                    _bottomRightCommentator!,
-                                                                openBookCallback:
-                                                                    widget
-                                                                        .openBookCallback,
-                                                                workspaceId:
-                                                                    _activeWorkspaceId,
-                                                                isBottom: true,
-                                                                selectionSyncController:
-                                                                    _selectionSyncController,
-                                                                onOpenPersonalNote:
-                                                                    _openCommentaryPersonalNote,
-                                                                onLoadFailed: () =>
-                                                                    _hideColumn(
-                                                                      'bottomRight',
-                                                                      global:
-                                                                          false,
-                                                                      showSnack:
-                                                                          false,
-                                                                      persist:
-                                                                          false,
-                                                                    ),
-                                                              ),
-                                                            ),
-                                                            const SizedBox(
-                                                              width: 4,
-                                                            ),
-                                                            SizedBox(
-                                                              width: 20,
-                                                              child: Center(
-                                                                child: RotatedBox(
-                                                                  quarterTurns:
-                                                                      3,
-                                                                  child: Text(
-                                                                    _bottomRightCommentator!,
-                                                                    style: const TextStyle(
-                                                                      fontSize:
-                                                                          14,
-                                                                    ),
-                                                                  ),
-                                                                ),
-                                                              ),
-                                                            ),
-                                                          ],
-                                                        )
-                                                      : Row(
-                                                          children: [
-                                                            SizedBox(
-                                                              width: 20,
-                                                              child: Center(
-                                                                child: RotatedBox(
-                                                                  quarterTurns:
-                                                                      1,
-                                                                  child: Text(
-                                                                    _bottomCommentator!,
-                                                                    style: const TextStyle(
-                                                                      fontSize:
-                                                                          14,
-                                                                    ),
-                                                                  ),
-                                                                ),
-                                                              ),
-                                                            ),
-                                                            const SizedBox(
-                                                              width: 4,
-                                                            ),
-                                                            Expanded(
-                                                              child: _CommentaryPane(
-                                                                commentatorName:
-                                                                    _bottomCommentator!,
-                                                                openBookCallback:
-                                                                    widget
-                                                                        .openBookCallback,
-                                                                workspaceId:
-                                                                    _activeWorkspaceId,
-                                                                isBottom: true,
-                                                                selectionSyncController:
-                                                                    _selectionSyncController,
-                                                                onOpenPersonalNote:
-                                                                    _openCommentaryPersonalNote,
-                                                                onLoadFailed: () =>
-                                                                    _hideColumn(
-                                                                      'bottom',
-                                                                      global:
-                                                                          false,
-                                                                      showSnack:
-                                                                          false,
-                                                                      persist:
-                                                                          false,
-                                                                    ),
-                                                              ),
-                                                            ),
-                                                          ],
-                                                        ),
-                                                ),
-                                              ],
+                                                          ),
+                                                  ),
+                                                ],
+                                              ),
                                             ),
-                                          ),
+                                          ],
                                         ],
-                                      ],
+                                      ),
                                     ),
+                                  ],
+                                );
+                                final pageMaxWidth = textColumnMaxWidthOf(
+                                  context,
+                                  setting: context.select<SettingsBloc, double>(
+                                    (bloc) => bloc.state.textMaxWidth,
                                   ),
-                                ],
-                              ),
+                                  availableWidth: pageConstraints.maxWidth,
+                                );
+                                if (pageMaxWidth <= 0 ||
+                                    pageMaxWidth >= pageConstraints.maxWidth) {
+                                  return page;
+                                }
+                                return Center(
+                                  child: ConstrainedBox(
+                                    constraints: BoxConstraints(
+                                      maxWidth: pageMaxWidth,
+                                    ),
+                                    child: page,
+                                  ),
+                                );
+                              },
                             ),
                             // כפתור צף לפתיחת הסיידבר
                             if (!_isLeftSidebarOpen)
@@ -1581,10 +1706,7 @@ class _LoadedCommentaryData {
   final TextBook book;
   final List<String> content;
 
-  const _LoadedCommentaryData({
-    required this.book,
-    required this.content,
-  });
+  const _LoadedCommentaryData({required this.book, required this.content});
 }
 
 class _CommentaryPaneState extends State<_CommentaryPane> {
@@ -1634,8 +1756,11 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
   final ItemScrollController _scrollController = ItemScrollController();
   final ItemPositionsListener _positionsListener =
       ItemPositionsListener.create();
+  final ScrollOffsetController _scrollOffsetController =
+      ScrollOffsetController();
   List<Link> _relevantLinks = [];
   int? _lastSyncedIndex; // האינדקס האחרון שסונכרן
+  int? _lastSyncedMainIndex; // השורה הנבחרת שממנה נגזר הסנכרון האחרון
   int _initialSyncAttempts = 0; // ניסיונות סנכרון ראשוני עד שה-controller מחובר
   List<Link>? _lastLinks; // לדידוב: מסנן מחדש רק כשהקישורים השתנו
   StreamSubscription<TextBookState>? _blocSubscription;
@@ -1796,6 +1921,7 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
       _content = content;
       _isLoading = false;
       _lastSyncedIndex = null;
+      _lastSyncedMainIndex = null;
     });
     _scheduleInitialSync();
     return true;
@@ -1882,6 +2008,10 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
   /// ששניהם יהיו באותו מיקום אנכי.
   static const double _syncAlignment = 1 / 3;
 
+  /// סף בפיקסלים שמתחתיו היעד נחשב כבר במקומו. בלעדיו תזוזה של שבר פיקסל
+  /// הייתה יורה אנימציה חדשה שמבטלת את הקודמת.
+  static const double _glideEpsilonPixels = 2;
+
   /// מחזיר את אינדקס השורה שבכשליש העליון של ה-viewport מתוך השורות
   /// הגלויות. הסנכרון מכוון לנקודה זו ולא לשורה העליונה, כדי שהמפרש
   /// יעקוב אחר מה שהמשתמש קורא בפועל. מניחים שהרשימה אינה ריקה.
@@ -1943,10 +2073,7 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
     }
 
     final lines = await Isolate.run(() => bookContent.split('\n'));
-    return _LoadedCommentaryData(
-      book: book,
-      content: lines,
-    );
+    return _LoadedCommentaryData(book: book, content: lines);
   }
 
   Future<void> _applyFullCommentaryData(
@@ -1975,6 +2102,7 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
       _content = data.content;
       _isLoading = false;
       _lastSyncedIndex = null;
+      _lastSyncedMainIndex = null;
     });
 
     _scheduleInitialSync();
@@ -2066,10 +2194,7 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
       if (state is! TextBookLoaded) {
         try {
           state = await bloc.stream
-              .firstWhere(
-                (s) => s is TextBookLoaded,
-                orElse: () => state,
-              )
+              .firstWhere((s) => s is TextBookLoaded, orElse: () => state)
               .timeout(const Duration(seconds: 5));
         } catch (e) {
           // הספר לא נטען תוך 5 שניות — ממשיכים בלי רענון קישורים
@@ -2176,10 +2301,7 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
 
       final fullCommentaryFuture = _getOrLoadFullCommentary(
         _commentaryCacheKey(book, preferDatabase: useDatabaseSource),
-        () => _fetchFullCommentaryData(
-          book,
-          preferDatabase: useDatabaseSource,
-        ),
+        () => _fetchFullCommentaryData(book, preferDatabase: useDatabaseSource),
       );
       await _applyFullCommentaryData(
         fullCommentaryFuture,
@@ -2231,10 +2353,7 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
         return;
       }
       _initialSyncAttempts++;
-      Future.delayed(
-        const Duration(milliseconds: 50),
-        _runInitialSyncAttempt,
-      );
+      Future.delayed(const Duration(milliseconds: 50), _runInitialSyncAttempt);
     });
   }
 
@@ -2279,12 +2398,18 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
       return;
     }
 
-    // אם כבר סונכרנו לאינדקס הזה ואין לחיצה מפורשת - לא צריך לגלול שוב
-    if (targetIndex == _lastSyncedIndex && state.selectedIndex == null) {
+    // יעד שכבר סונכרנו אליו אינו נוגע במפרש שוב: בלעדי זה כל emission של
+    // ה-bloc (חימום תוכן ברקע, בחירת טקסט) גורר את המפרש בחזרה מעוגן גלילה
+    // ידנית שהמשתמש עשה בחלונית.
+    if (!CommentarySyncHelper.shouldMoveCommentary(
+      targetIndex: targetIndex,
+      selectedMainIndex: state.selectedIndex,
+      lastSyncedIndex: _lastSyncedIndex,
+      lastSyncedMainIndex: _lastSyncedMainIndex,
+    )) {
       return;
     }
 
-    // גלילה למיקום הנכון במפרש
     if (targetIndex >= 0 &&
         targetIndex < _content!.length &&
         _scrollController.isAttached) {
@@ -2293,27 +2418,65 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
       if (_useWindowedLoading) {
         unawaited(_ensureWindowLoaded(targetIndex, targetIndex));
       }
-      // סנכרון מגלילה רציפה (או ראשוני) — קפיצה מיידית כדי שהמפרש יעקוב
-      // צמוד אחר הטקסט הראשי. אנימציה כאן הייתה יוצרת פיגור והתנגשות בין
-      // אנימציות עוקבות, וגם בונה אלפי פריטים בזמן אנימציה (תקיעה).
-      // רק לחיצה מפורשת על שורה מקבלת גלילה מונפשת.
-      // מציב את שורת היעד בכשליש העליון של חלון המפרש (_syncAlignment),
-      // מקביל לשורת המקור שנבחרה מאותה נקודה ב-viewport של הטקסט הראשי,
-      // ולא בראש החלון.
-      if (_lastSyncedIndex == null || state.selectedIndex == null) {
-        _scrollController.jumpTo(
-          index: targetIndex,
-          alignment: _syncAlignment,
-        );
-      } else {
+      if (_lastSyncedIndex == null) {
+        // סנכרון ראשוני: הרשימה נבנתה מאינדקס 0 וחייבת להגיע למקומה מיד.
+        _scrollController.jumpTo(index: targetIndex, alignment: _syncAlignment);
+      } else if (state.selectedIndex != null) {
         _scrollController.scrollTo(
           index: targetIndex,
           duration: const Duration(milliseconds: 300),
           alignment: _syncAlignment,
         );
+      } else {
+        _glideToTarget(targetIndex);
       }
       _lastSyncedIndex = targetIndex;
+      _lastSyncedMainIndex = state.selectedIndex;
     }
+  }
+
+  /// מזיז את המפרש ליעד בגלילה רציפה במקום בקפיצה.
+  ///
+  /// `jumpTo` מחליף את פריט העוגן ומרכיב מחדש את החלונית כולה; כשהיעד כבר
+  /// גלוי די בהזזת ההיסט בפיקסלים, בלי בנייה מחדש.
+  void _glideToTarget(int targetIndex) {
+    final position = _visiblePositionFor(targetIndex);
+    final viewportHeight =
+        context.size?.height ?? MediaQuery.sizeOf(context).height;
+
+    // יעד שלא נפרש — המרחק בפיקסלים אינו ידוע, ורק קפיצה תגיע אליו.
+    if (position == null || viewportHeight <= 0) {
+      _scrollController.jumpTo(index: targetIndex, alignment: _syncAlignment);
+      return;
+    }
+
+    final delta = CommentarySyncHelper.glideDelta(
+      leadingEdge: position.itemLeadingEdge,
+      viewportHeight: viewportHeight,
+      alignment: _syncAlignment,
+      epsilon: _glideEpsilonPixels,
+    );
+    if (delta == null) {
+      return;
+    }
+
+    unawaited(
+      _scrollOffsetController.animateScroll(
+        offset: delta,
+        duration: const Duration(milliseconds: 120),
+        curve: Curves.easeOut,
+      ),
+    );
+  }
+
+  /// המיקום הנוכחי של [index] אם הוא בין הפריטים שנפרשו, אחרת null.
+  ItemPosition? _visiblePositionFor(int index) {
+    for (final position in _positionsListener.itemPositions.value) {
+      if (position.index == index) {
+        return position;
+      }
+    }
+    return null;
   }
 
   @override
@@ -2338,6 +2501,7 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
     }
 
     return TextBookStateBuilder(
+      buildWhen: shouldRebuildReader,
       loadingWidget: const SizedBox(),
       builder: (context, state) {
         return BlocBuilder<SettingsBloc, SettingsState>(
@@ -2345,7 +2509,9 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
             // רק המפרשים התחתונים משתמשים בגופן שנבחר בדיאלוג צורת הדף;
             // המפרשים הצדדיים נשארים עם גופן המפרשים הגלובלי מההגדרות.
             final bottomFont =
-                Settings.getValue<String>('page_shape_bottom_font') ??
+                Settings.getValue<String>(
+                  SettingsRepository.keyPageShapeBottomFont,
+                ) ??
                 AppFonts.defaultFont;
             final fontFamily = widget.isBottom
                 ? bottomFont
@@ -2360,6 +2526,7 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
               openBookCallback: widget.openBookCallback,
               scrollController: _scrollController,
               positionsListener: _positionsListener,
+              scrollOffsetController: _scrollOffsetController,
               isMainText: false,
               bookTitle: widget.commentatorName, // לפתיחה בטאב נפרד
               labelForIndex: _commentaryToc == null
@@ -2420,10 +2587,7 @@ class _HorizontalDragHandle extends StatelessWidget {
         child: Center(
           child: FractionallySizedBox(
             widthFactor: 0.5,
-            child: Container(
-              height: 1,
-              color: Theme.of(context).dividerColor,
-            ),
+            child: Container(height: 1, color: Theme.of(context).dividerColor),
           ),
         ),
       );

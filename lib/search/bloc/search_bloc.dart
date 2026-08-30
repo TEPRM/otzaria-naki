@@ -77,13 +77,11 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
   SearchBloc({
     SearchConfiguration? initialConfiguration,
     this._repository = const SearchRepository(),
-    Future<bool> Function(Book book, Library library)? indexedBookVerifier,
   }) : super(
          SearchState(
            configuration: initialConfiguration ?? const SearchConfiguration(),
          ),
        ) {
-    _indexedBookVerifier = indexedBookVerifier;
     on<UpdateSearchQuery>(_onUpdateSearchQuery);
     on<RerunSearch>((_, _) => _reSearch());
     on<UpdateDistance>(_onUpdateDistance);
@@ -477,47 +475,16 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     );
   }
 
-  Future<void> _onUpdateFilterQuery(
+  /// שדה "איתור ספר" בחלונית סינון התוצאות. הסינון עצמו מתבצע ב-
+  /// [SearchNavigationTree] מול הספרים שיש להם תוצאות, ישירות מטקסט השדה —
+  /// ולכן כאן רק מפרסמים את השאילתה כדי שהעץ ייבנה מחדש. סינכרוני בכוונה:
+  /// חיפוש ספרייה כאן היה שורף שנייה של CPU בכל תו ומעכב את רענון העץ עד
+  /// שהסתיים.
+  void _onUpdateFilterQuery(
     UpdateFilterQuery event,
     Emitter<SearchState> emit,
-  ) async {
-    if (event.query.length < 3) {
-      emit(
-        state.copyWith(
-          filterQuery: event.query,
-          filteredBooks: null,
-        ),
-      );
-      return;
-    }
-
-    try {
-      final results = await DataRepository.instance.findBooks(
-        event.query,
-        null,
-        sortByRatio: false,
-      );
-
-      emit(
-        state.copyWith(
-          filterQuery: event.query,
-          filteredBooks: results,
-        ),
-      );
-    } catch (e, stackTrace) {
-      // זיהוי שגיאה גם במסלול סינון הספרים — אחרת המשתמש רואה "אין תוצאות"
-      // ולא מבין שזו תקלה, בדיוק כמו במסלולי החיפוש הראשי וטעינת עוד.
-      // הסינון נורה על כל הקלדה, אך UiSnack מחזיק overlay יחיד שמתרענן
-      // (לא נערם), כך שאין הצפת toasts גם אם הכשל מתמשך.
-      debugPrint('❌ Book filter failed: $e\n$stackTrace');
-      UiSnack.showError(LibraryMessages.bookFilterError);
-      emit(
-        state.copyWith(
-          filterQuery: event.query,
-          filteredBooks: null,
-        ),
-      );
-    }
+  ) {
+    emit(state.copyWith(filterQuery: event.query));
   }
 
   void _onClearFilter(
@@ -768,9 +735,10 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     SetFacet event,
     Emitter<SearchState> emit,
   ) async {
-    // Clicking root "/" in a scoped search means "all books within scope"
-    final effectiveFacets = (event.facet == '/' && state.hasScopedFacetFilter)
-        ? state.searchScopeFacets
+    // בחיפוש בהיקף מוגבל הלחיצה נחתכת עם ההיקף — החלפה גורפת הייתה בורחת
+    // ממנו ומחזירה תוצאות שהעץ (שסופר בתוך ההיקף) מעולם לא הראה.
+    final effectiveFacets = state.hasScopedFacetFilter
+        ? intersectFacetWithScope(event.facet, state.searchScopeFacets)
         : [event.facet];
     final newConfig = state.configuration.copyWith(
       currentFacets: effectiveFacets,
@@ -803,6 +771,24 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
   @visibleForTesting
   static bool facetContains(String parent, String child) =>
       parent == '/' || child == parent || child.startsWith('$parent/');
+
+  /// חיתוך הענף הנלחץ [facet] עם היקף החיפוש [scopeFacets]: מכל facet בהיקף
+  /// נשמר הצד הצר יותר. חיתוך ריק (הענף זר להיקף) נופל ל-[facet] עצמו —
+  /// העץ הראה אותו, ותוצאותיו עדיפות על רשימה ריקה.
+  @visibleForTesting
+  static List<String> intersectFacetWithScope(
+    String facet,
+    List<String> scopeFacets,
+  ) {
+    final intersection = <String>{
+      for (final scopeFacet in scopeFacets)
+        if (facetContains(facet, scopeFacet))
+          scopeFacet
+        else if (facetContains(scopeFacet, facet))
+          facet,
+    };
+    return intersection.isEmpty ? [facet] : intersection.toList();
+  }
 
   /// האם המעבר ל-[newFacets] רק מצמצם את ההיקף הנוכחי [oldFacets] —
   /// כלומר כל facet חדש מוכל באחד הקיימים.
@@ -1240,47 +1226,23 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
   /// פתיחה לפי כותרת בלבד מאבדת את זהות הספר (isUserBook/categoryId),
   /// וספר אישי שכותרתו זהה לספר רשמי היה נפתח כרשמי. [indexedTitle] היא
   /// הכותרת מאותו מסמך, לאימות מול הקטלוג. [IndexedBookResolution.isStale]
-  /// מונע נפילה לפי כותרת כשמסמך האינדקס כבר אינו שייך לספר שבקטלוג.
+  /// מונע נפילה לפי כותרת כשמסמך האינדקס כבר אינו שייך לספר שבקטלוג —
+  /// כולל מפתח יציב שנעלם (סריקה מחדש של ספרים אישיים מקצה מזהים חדשים).
+  /// רק מפתח legacy בפורמט נתיב ממשיך ליפול לפתיחה לפי כותרת.
+  ///
+  /// אימות זהות בלבד — בלי השוואת טביעת אצבע: החתימה הקנונית כוללת את
+  /// הסדר הקטלוגי, שמשתנה בכל הוספת/הסרת ספר וחסם פתיחת תוצאות תקינות.
   Future<IndexedBookResolution> resolveBookForIndexedPath(
     String indexedFilePath, {
     required String indexedTitle,
   }) async {
+    final isStableKey =
+        indexedFilePath.startsWith('id:') || indexedFilePath.startsWith('uid:');
     final library = await DataRepository.instance.library;
     final book = _booksByIndexedFilePathFor(library)[indexedFilePath];
-    if (book == null) return (book: null, isStale: false);
+    if (book == null) return (book: null, isStale: isStableKey);
     if (book.title != indexedTitle) return (book: null, isStale: true);
-    if ((!indexedFilePath.startsWith('id:') &&
-        !indexedFilePath.startsWith('uid:'))) {
-      return (book: book, isStale: false);
-    }
-
-    final matches = await _indexedBookVerificationByPath.putIfAbsent(
-      indexedFilePath,
-      () async {
-        final verifier = _indexedBookVerifier;
-        if (verifier != null) return verifier(book, library);
-        return _indexingRepository.textBookMatchesIndexedFingerprint(
-          book,
-          library,
-          await _indexFingerprintsFor(library),
-        );
-      },
-    );
-    return (book: matches ? book : null, isStale: !matches);
-  }
-
-  late final Future<bool> Function(Book book, Library library)?
-  _indexedBookVerifier;
-  late final IndexingRepository _indexingRepository = IndexingRepository(
-    TantivyDataProvider.instance,
-  );
-  Future<Map<String, BigInt>>? _indexFingerprints;
-  final Map<String, Future<bool>> _indexedBookVerificationByPath = {};
-
-  Future<Map<String, BigInt>> _indexFingerprintsFor(Library library) {
-    return _indexFingerprints ??= TantivyDataProvider.instance.engine.then(
-      (engine) => engine.getBookFingerprints(),
-    );
+    return (book: book, isStale: false);
   }
 
   /// מפת המפתח היציב של האינדקס → ספר, במטמון לכל עוד הספרייה לא הוחלפה.
@@ -1292,8 +1254,6 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     final books = _buildBooksByIndexedFilePath(library);
     _resolveCacheLibrary = library;
     _booksByIndexedFilePathCache = books;
-    _indexFingerprints = null;
-    _indexedBookVerificationByPath.clear();
     return books;
   }
 

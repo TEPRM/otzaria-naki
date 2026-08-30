@@ -1,14 +1,35 @@
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'dart:ui' show Tristate;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:otzaria/settings/engine/settings_bloc.dart';
+import 'package:otzaria/settings/engine/settings_event.dart';
+import 'package:otzaria/settings/engine/settings_state.dart';
 import 'package:otzaria/widgets/misc/app_popup_menu.dart';
 import 'package:otzaria/widgets/navigation/responsive_action_bar.dart';
 
 void main() {
+  // כפתור ה-"..." נבנה כ-BarButton שקורא את compactMenuMode מה-SettingsBloc.
+  late _TestSettingsBloc settingsBloc;
+
+  setUp(() async {
+    await Settings.init(cacheProvider: _MemoryCacheProvider());
+    settingsBloc = _TestSettingsBloc();
+  });
+
+  tearDown(() async {
+    await settingsBloc.close();
+  });
+
+  Widget withSettings(Widget app) =>
+      BlocProvider<SettingsBloc>.value(value: settingsBloc, child: app);
+
   testWidgets(
     'כשיש alwaysInMenu לא מציגים את כל הכפתורים אם עדיין צריך overflow',
     (tester) async {
@@ -22,14 +43,14 @@ void main() {
 
       final actions = [
         ActionButtonData(
-          widget: buildAction(FluentIcons.book_24_regular, 'ספר'),
-          icon: FluentIcons.book_24_regular,
+          widget: buildAction(OtzariaIcons.book_24_regular, 'ספר'),
+          icon: OtzariaIcons.book_24_regular,
           tooltip: 'ספר',
           onPressed: () {},
         ),
         ActionButtonData(
-          widget: buildAction(FluentIcons.search_24_regular, 'חיפוש'),
-          icon: FluentIcons.search_24_regular,
+          widget: buildAction(OtzariaIcons.search_24_regular, 'חיפוש'),
+          icon: OtzariaIcons.search_24_regular,
           tooltip: 'חיפוש',
           onPressed: () {},
         ),
@@ -51,18 +72,20 @@ void main() {
       ];
 
       await tester.pumpWidget(
-        MaterialApp(
-          home: Directionality(
-            textDirection: TextDirection.rtl,
-            child: Scaffold(
-              appBar: AppBar(
-                actions: [
-                  ResponsiveActionBar(
-                    actions: actions,
-                    alwaysInMenu: alwaysInMenu,
-                    maxVisibleButtons: 2,
-                  ),
-                ],
+        withSettings(
+          MaterialApp(
+            home: Directionality(
+              textDirection: TextDirection.rtl,
+              child: Scaffold(
+                appBar: AppBar(
+                  actions: [
+                    ResponsiveActionBar(
+                      actions: actions,
+                      alwaysInMenu: alwaysInMenu,
+                      maxVisibleButtons: 2,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -70,8 +93,8 @@ void main() {
       );
 
       expect(find.byIcon(FluentIcons.more_vertical_24_regular), findsOneWidget);
-      expect(find.byIcon(FluentIcons.book_24_regular), findsOneWidget);
-      expect(find.byIcon(FluentIcons.search_24_regular), findsOneWidget);
+      expect(find.byIcon(OtzariaIcons.book_24_regular), findsOneWidget);
+      expect(find.byIcon(OtzariaIcons.search_24_regular), findsOneWidget);
       expect(find.byIcon(FluentIcons.settings_24_regular), findsNothing);
     },
   );
@@ -135,26 +158,28 @@ void main() {
       // אותה הגדרת locale כמו ב-app.dart: ה-RTL חייב לחול גם על ה-Overlay
       // שבו נפתח התפריט, לא רק על עץ המסך.
       await tester.pumpWidget(
-        MaterialApp(
-          theme: theme,
-          localizationsDelegates: const [
-            GlobalCupertinoLocalizations.delegate,
-            GlobalMaterialLocalizations.delegate,
-            GlobalWidgetsLocalizations.delegate,
-          ],
-          supportedLocales: const [Locale('he', 'IL')],
-          locale: const Locale('he', 'IL'),
-          home: Scaffold(
-            appBar: AppBar(
-              actions: [
-                ResponsiveActionBar(
-                  actions: actions,
-                  alwaysInMenu: originalOrder == null ? alwaysInMenu : null,
-                  originalOrder: originalOrder,
-                  menuHeaderActions: menuHeaderActions,
-                  maxVisibleButtons: maxVisibleButtons,
-                ),
-              ],
+        withSettings(
+          MaterialApp(
+            theme: theme,
+            localizationsDelegates: const [
+              GlobalCupertinoLocalizations.delegate,
+              GlobalMaterialLocalizations.delegate,
+              GlobalWidgetsLocalizations.delegate,
+            ],
+            supportedLocales: const [Locale('he', 'IL')],
+            locale: const Locale('he', 'IL'),
+            home: Scaffold(
+              appBar: AppBar(
+                actions: [
+                  ResponsiveActionBar(
+                    actions: actions,
+                    alwaysInMenu: originalOrder == null ? alwaysInMenu : null,
+                    originalOrder: originalOrder,
+                    menuHeaderActions: menuHeaderActions,
+                    maxVisibleButtons: maxVisibleButtons,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -513,30 +538,34 @@ void main() {
       addTearDown(tester.view.reset);
 
       await tester.pumpWidget(
-        MaterialApp(
-          theme: theme,
-          localizationsDelegates: const [
-            GlobalCupertinoLocalizations.delegate,
-            GlobalMaterialLocalizations.delegate,
-            GlobalWidgetsLocalizations.delegate,
-          ],
-          supportedLocales: const [Locale('he', 'IL')],
-          locale: const Locale('he', 'IL'),
-          builder: (context, child) => MediaQuery.withClampedTextScaling(
-            minScaleFactor: 2,
-            maxScaleFactor: 2,
-            child: child!,
-          ),
-          home: Scaffold(
-            appBar: AppBar(
-              actions: [
-                ResponsiveActionBar(
-                  actions: const [],
-                  alwaysInMenu: [action(FluentIcons.print_24_regular, 'הדפסה')],
-                  menuHeaderActions: navActions(onPressed: (_) {}),
-                  maxVisibleButtons: 0,
-                ),
-              ],
+        withSettings(
+          MaterialApp(
+            theme: theme,
+            localizationsDelegates: const [
+              GlobalCupertinoLocalizations.delegate,
+              GlobalMaterialLocalizations.delegate,
+              GlobalWidgetsLocalizations.delegate,
+            ],
+            supportedLocales: const [Locale('he', 'IL')],
+            locale: const Locale('he', 'IL'),
+            builder: (context, child) => MediaQuery.withClampedTextScaling(
+              minScaleFactor: 2,
+              maxScaleFactor: 2,
+              child: child!,
+            ),
+            home: Scaffold(
+              appBar: AppBar(
+                actions: [
+                  ResponsiveActionBar(
+                    actions: const [],
+                    alwaysInMenu: [
+                      action(FluentIcons.print_24_regular, 'הדפסה'),
+                    ],
+                    menuHeaderActions: navActions(onPressed: (_) {}),
+                    maxVisibleButtons: 0,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -564,7 +593,7 @@ void main() {
     });
 
     testWidgets('השורה מוצגת גם במצב הישן (originalOrder)', (tester) async {
-      final visible = [action(FluentIcons.search_24_regular, 'חיפוש')];
+      final visible = [action(OtzariaIcons.search_24_regular, 'חיפוש')];
       await pumpBar(
         tester,
         actions: visible,
@@ -584,14 +613,14 @@ void main() {
       await pumpBar(
         tester,
         actions: [
-          action(FluentIcons.search_24_regular, 'חיפוש'),
+          action(OtzariaIcons.search_24_regular, 'חיפוש'),
           action(FluentIcons.settings_24_regular, 'הגדרות'),
         ],
         menuHeaderActions: navActions(onPressed: (_) {}),
         maxVisibleButtons: 2,
       );
 
-      expect(find.byIcon(FluentIcons.search_24_regular), findsOneWidget);
+      expect(find.byIcon(OtzariaIcons.search_24_regular), findsOneWidget);
       expect(find.byIcon(FluentIcons.settings_24_regular), findsOneWidget);
       // אייקוני הניווט מופיעים רק אחרי פתיחת התפריט
       expect(find.byIcon(FluentIcons.chevron_right_24_regular), findsNothing);
@@ -619,4 +648,70 @@ void main() {
       expect(maxToolbarButtonsForWidth(1400), greaterThan(20));
     });
   });
+}
+
+class _TestSettingsBloc extends Bloc<SettingsEvent, SettingsState>
+    implements SettingsBloc {
+  _TestSettingsBloc() : super(SettingsState.initial()) {
+    on<SettingsEvent>((event, emit) {});
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _MemoryCacheProvider extends CacheProvider {
+  final Map<String, Object?> _values = {};
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  bool containsKey(String key) => _values.containsKey(key);
+
+  @override
+  bool? getBool(String key, {bool? defaultValue}) =>
+      (_values[key] as bool?) ?? defaultValue;
+
+  @override
+  double? getDouble(String key, {double? defaultValue}) =>
+      (_values[key] as double?) ?? defaultValue;
+
+  @override
+  int? getInt(String key, {int? defaultValue}) =>
+      (_values[key] as int?) ?? defaultValue;
+
+  @override
+  String? getString(String key, {String? defaultValue}) =>
+      (_values[key] as String?) ?? defaultValue;
+
+  @override
+  Set<Object?> getKeys() => _values.keys.toSet();
+
+  @override
+  T? getValue<T>(String key, {T? defaultValue}) =>
+      (_values[key] as T?) ?? defaultValue;
+
+  @override
+  Future<void> remove(String key) async => _values.remove(key);
+
+  @override
+  Future<void> removeAll() async => _values.clear();
+
+  @override
+  Future<void> setBool(String key, bool? value) async => _values[key] = value;
+
+  @override
+  Future<void> setDouble(String key, double? value) async =>
+      _values[key] = value;
+
+  @override
+  Future<void> setInt(String key, int? value) async => _values[key] = value;
+
+  @override
+  Future<void> setObject<T>(String key, T? value) async => _values[key] = value;
+
+  @override
+  Future<void> setString(String key, String? value) async =>
+      _values[key] = value;
 }

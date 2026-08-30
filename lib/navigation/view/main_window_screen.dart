@@ -10,7 +10,9 @@ import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:otzaria/widgets/misc/rtl_icon.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:collection/collection.dart';
+import 'package:otzaria/core/error_log_file.dart';
 import 'package:otzaria/core/ui_snack.dart';
+import 'package:otzaria/core/messages/common_messages.dart';
 import 'package:otzaria/core/messages/library_messages.dart';
 import 'package:otzaria/data/repository/data_repository.dart';
 import 'package:otzaria/core/focus_repository.dart';
@@ -18,6 +20,7 @@ import 'package:otzaria/data/data_providers/tantivy_data_provider.dart';
 import 'package:otzaria/indexing/bloc/indexing_bloc.dart';
 import 'package:otzaria/indexing/bloc/indexing_event.dart';
 import 'package:otzaria/indexing/bloc/indexing_state.dart';
+import 'package:otzaria/indexing/indexing_work_status.dart';
 import 'package:otzaria/indexing/repository/indexing_repository.dart';
 import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
 import 'package:otzaria/navigation/bloc/navigation_event.dart';
@@ -56,6 +59,7 @@ import 'package:window_manager/window_manager.dart';
 import 'package:otzaria/main.dart' show appWindowListener, presentMainWindow;
 import 'package:otzaria/core/splash_screen.dart' show SplashIcon;
 import 'package:otzaria/navigation/view/custom_title_bar.dart';
+import 'package:otzaria/navigation/view/reading_tabs_side_panel.dart';
 import 'package:otzaria/migration/sync/background_sync_initializer.dart';
 import 'package:otzaria/library/bloc/library_bloc.dart';
 import 'package:otzaria/library/bloc/library_event.dart';
@@ -64,7 +68,6 @@ import 'package:otzaria/workspaces/bloc/workspace_bloc.dart';
 import 'package:otzaria/workspaces/bloc/workspace_state.dart';
 import 'package:otzaria/widgets/layout/context_overlay_panel.dart';
 import 'package:otzaria/work_status/work_status_cubit.dart';
-import 'package:otzaria/work_status/work_status_item.dart';
 import 'package:otzaria/work_status/work_status_overlay.dart';
 import 'package:otzaria/history/bloc/history_bloc.dart';
 import 'package:otzaria/history/bloc/history_event.dart';
@@ -86,19 +89,24 @@ import 'package:otzaria/tabs/services/windows_jump_list_service.dart';
 import 'package:otzaria/tabs/bloc/tabs_state.dart';
 import 'package:otzaria/tabs/models/combined_tab.dart';
 import 'package:otzaria/tabs/models/searching_tab.dart';
+import 'package:otzaria/tabs/models/tab.dart';
 import 'package:otzaria/tabs/models/text_tab.dart';
 import 'package:otzaria/tabs/models/pdf_tab.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_bloc.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_event.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_state.dart';
 import 'package:otzaria/plugins/models/installed_plugin.dart';
-import 'package:otzaria/plugins/utils/fluent_icon_resolver.dart';
+import 'package:otzaria/plugins/utils/plugin_icon_resolver.dart';
 import 'package:otzaria/plugins/bridge/plugin_bridge_adapter.dart'
     show buildThemePayloadFromScheme;
 import 'package:otzaria/theme/app_theme_data.dart' show AppThemeData;
+import 'package:otzaria/core/sequential_dialog_queue.dart';
 import 'package:otzaria/core/external_activation_queue.dart';
 import 'package:otzaria/core/external_activation_channel.dart';
 import 'package:otzaria/core/external_uri_router.dart';
+import 'package:otzaria/core/info/app_info_service.dart';
+import 'package:otzaria/core/info/view/app_info_dialog.dart';
+import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
 import 'package:otzaria/tools/built_in_tools_catalog.dart';
 import 'package:otzaria/plugins/services/reader_location_tracker.dart';
 import 'package:otzaria/tour/bloc/tour_cubit.dart';
@@ -167,7 +175,7 @@ class _PinnedToolNavItem {
       toolId: plugin.pluginId,
       label: plugin.manifest.toolTabTitle,
       icon:
-          fluentIconFromName(plugin.manifest.toolTabIconName) ??
+          pluginIconFromName(plugin.manifest.toolTabIconName) ??
           FluentIcons.puzzle_piece_24_regular,
       isPlugin: true,
       plugin: plugin,
@@ -343,8 +351,16 @@ class MainWindowScreenState extends State<MainWindowScreen>
   // עוקב אחר מצב הלוח הקודם לצורך dispatch ספציפי
   CalendarState? _prevCalendarState;
 
+  // דיאלוגי התקנת תוספים מוצגים אחד-אחד: כמה בקשות במקביל (קישורי עומק
+  // מרובים) נכנסות לתור, והבא נפתח רק כשהקודם נסגר — אחרת הם נערמים זה על זה.
+  late final SequentialDialogQueue<PluginSystemState>
+  _pluginInstallDialogQueue = SequentialDialogQueue(_showPluginInstallDialog);
+
   bool _hasInitializedPageController = false;
   bool _isProcessingExternalActivations = false;
+
+  /// מונע הערמת פופאפים כשמגיעים כמה קישורי `info` בזה אחר זה.
+  bool _isShowingInfoReport = false;
   StreamSubscription<FileSystemEvent>? _externalActivationWatchSub;
   StreamSubscription<String>? _externalActivationChannelSub;
   final WindowsJumpListService _jumpListService = WindowsJumpListService();
@@ -375,8 +391,8 @@ class MainWindowScreenState extends State<MainWindowScreen>
     ),
     (
       screen: Screen.reading,
-      icon: OtzariaIcons.book_open_large_24_regular,
-      iconFilled: OtzariaIcons.book_open_large_24_filled,
+      icon: OtzariaIcons.otzaria_icon_2_page_24_regular,
+      iconFilled: OtzariaIcons.otzaria_icon_2_page_24_filled,
       label: 'עיון',
       shortcutKey: 'key-shortcut-open-reading-screen',
     ),
@@ -596,10 +612,11 @@ class MainWindowScreenState extends State<MainWindowScreen>
             .read<WorkspaceBloc>()
             .state
             .activeWorkspaceId;
-        final bookId = context.read<TabsBloc>().state.currentTab?.title;
+        final currentTab = context.read<TabsBloc>().state.currentTab;
         _calendarCubit.refreshPluginEvents(
           currentWorkspaceId: workspaceId,
-          currentBookId: bookId,
+          currentBookId: currentTab?.title,
+          currentBookUid: _readingPaneBookUid(currentTab),
         );
       } catch (e) {
         debugPrint('⚠️ refreshPluginEvents failed after init: $e');
@@ -1106,6 +1123,83 @@ class MainWindowScreenState extends State<MainWindowScreen>
     }
   }
 
+  Future<void> _showPluginInstallDialog(PluginSystemState state) async {
+    if (!mounted) return;
+    final bloc = context.read<PluginSystemBloc>();
+    final isOfflineMode = context.read<SettingsBloc>().state.isOfflineMode;
+    if (state is PluginSystemInstallRequiresPermissions) {
+      final handled = await showDialog<bool>(
+        context: context,
+        builder: (_) => BlocProvider.value(
+          value: bloc,
+          child: PluginInstallScreen(
+            manifest: state.manifest,
+            tempDirPath: state.tempDirPath,
+            previousVersion: state.previousVersion,
+            previousAllowOrderBeforeBuiltInsGranted:
+                state.previousAllowOrderBeforeBuiltInsGranted,
+            previousGrantedPermissions: state.previousGrantedPermissions,
+            reportContext: state.reportContext,
+            isOfflineMode: isOfflineMode,
+          ),
+        ),
+      );
+      // סגירה דרך ה-barrier (בלי כפתור) = ביטול: ניקוי תיקיית ה-temp
+      // של ההתקנה ודיווח לחנות, כמו לחיצה על "ביטול".
+      if (handled != true) {
+        bloc.add(
+          CancelPluginInstall(
+            state.tempDirPath,
+            reportContext: state.reportContext,
+          ),
+        );
+      }
+    } else if (state is PluginSystemDevInstallRequiresPermissions) {
+      final handled = await showDialog<bool>(
+        context: context,
+        builder: (_) => PluginInstallScreen(
+          manifest: state.manifest,
+          tempDirPath: '',
+          previousVersion: state.previousVersion,
+          previousAllowOrderBeforeBuiltInsGranted:
+              state.previousAllowOrderBeforeBuiltInsGranted,
+          isOfflineMode: isOfflineMode,
+          onConfirm: (perms, allowOrder) => bloc.add(
+            ConfirmDevPluginInstall(
+              manifest: state.manifest,
+              sourcePath: state.sourcePath,
+              sourceType: state.sourceType,
+              grantedPermissions: perms,
+              allowOrderBeforeBuiltInsGranted: allowOrder,
+              previousVersion: state.previousVersion,
+            ),
+          ),
+          onCancel: () => bloc.add(LoadPlugins()),
+        ),
+      );
+      if (handled != true) {
+        bloc.add(LoadPlugins());
+      }
+    } else if (state is PluginSystemOverwriteRequired) {
+      final value = await showWarningDialog(
+        context: context,
+        title: 'התוסף כבר קיים',
+        content:
+            'התוסף "${state.pluginName}" בגרסה ${state.version} כבר מותקן.',
+        subtitle: 'האם ברצונך להתקין מחדש ולדרוס אותו?',
+        cancelText: 'ביטול',
+        confirmText: 'התקן מחדש',
+      );
+      if (value == true) {
+        bloc.add(
+          InstallPluginRequested(state.archivePath, forceOverwrite: true),
+        );
+      } else {
+        bloc.add(LoadPlugins());
+      }
+    }
+  }
+
   /// מחזיר `true` כאשר הפעולה בוצעה במלואה (לדוגמה: ספר אומת ונפתח). חשוב
   /// במיוחד עבור book/pdf — אם ה-id לא קיים בספרייה, מחזיר `false` כדי ששדה
   /// החיפוש בספרייה לא ינקה את הקישור שהמשתמש הדביק.
@@ -1186,7 +1280,9 @@ class MainWindowScreenState extends State<MainWindowScreen>
         );
         return true;
       case OpenDailyPageAction():
-        final Daf daf = getDafYomi(DateTime.now());
+        await _calendarCubit.initialized;
+        if (!mounted) return false;
+        final Daf daf = getDafYomi(_calendarCubit.state.todayGregorianDate);
         openDafYomiBook(
           context,
           daf.getMasechta(),
@@ -1199,6 +1295,8 @@ class MainWindowScreenState extends State<MainWindowScreen>
       case OpenBookmarksAction():
         showDialog(context: context, builder: (_) => const BookmarksDialog());
         return true;
+      case ShowInfoAction():
+        return await _showInfoReport(action);
       case OpenSettingsTabAction(:final tab):
         context.read<NavigationBloc>().add(
           const NavigateToScreen(Screen.settings),
@@ -1211,6 +1309,43 @@ class MainWindowScreenState extends State<MainWindowScreen>
         }
         return true;
     }
+  }
+
+  /// אוסף את דוח המידע ומציג אותו בפופאפ. אינו מנווט לשום מקום — קישור `info`
+  /// הוא שאילתה, לא יעד.
+  ///
+  /// הדיאלוג נדחה לפוסט-פריים ואינו מומתן: המתנה לסגירתו הייתה חוסמת את
+  /// `_processPendingExternalActivations` (שמתנקז רק בעקבות אירוע קובץ), וכן
+  /// גורמת ל-`Navigator.pop` של הקורא — דיאלוג איתור מקורות — לסגור את
+  /// הפופאפ הזה במקום את עצמו.
+  Future<bool> _showInfoReport(ShowInfoAction action) async {
+    if (_isShowingInfoReport) return true;
+    _isShowingInfoReport = true;
+
+    final pluginState = context.read<PluginSystemBloc>().state;
+    final report = await AppInfoService.collect(
+      action.topic,
+      // מצב שאינו Loaded אינו "אין תוספים" — קוראים מהמרשם, אותו מקור שה-CLI
+      // משתמש בו, כדי ששני הערוצים לא ידווחו מספרים שונים.
+      pluginsLoader: () async => pluginState is PluginSystemLoaded
+          ? pluginState.plugins
+          : await PluginRegistryRepository().getAllPlugins(),
+      errorLimit: action.errorLimit,
+    );
+    if (!mounted) {
+      _isShowingInfoReport = false;
+      return false;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        if (mounted) await showAppInfoDialog(context, report);
+      } finally {
+        _isShowingInfoReport = false;
+      }
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+    return true;
   }
 
   void _runExternalSearch(String query, {SearchMode? mode}) {
@@ -1288,6 +1423,7 @@ class MainWindowScreenState extends State<MainWindowScreen>
     appWindowListener?.onWindowStateChanged = null;
     appWindowListener?.onWindowResizeOccurred = null;
     _splashFailsafeTimer?.cancel();
+    _pluginInstallDialogQueue.clear();
     _externalActivationWatchSub?.cancel();
     _externalActivationChannelSub?.cancel();
     _externalActivationChannel.dispose();
@@ -1340,6 +1476,34 @@ class MainWindowScreenState extends State<MainWindowScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       oldController.dispose();
     });
+  }
+
+  DateTime? _lastBackPressAt;
+
+  /// מקש Back באנדרואיד: סוגר פאנל פתוח, חוזר לספרייה, ורק לחיצה
+  /// כפולה בספרייה יוצאת מהאפליקציה.
+  void _handleAndroidBackPress() {
+    if (_isToolsLauncherOpen) {
+      _closeToolsLauncher();
+      return;
+    }
+    if (_isReadingSettingsPanelOpen) {
+      _toggleReadingSettingsPanel();
+      return;
+    }
+    final navigationBloc = context.read<NavigationBloc>();
+    if (navigationBloc.state.currentScreen != Screen.library) {
+      navigationBloc.add(const NavigateToScreen(Screen.library));
+      return;
+    }
+    final now = DateTime.now();
+    if (_lastBackPressAt != null &&
+        now.difference(_lastBackPressAt!) < const Duration(seconds: 2)) {
+      SystemNavigator.pop();
+      return;
+    }
+    _lastBackPressAt = now;
+    UiSnack.show(CommonMessages.pressBackAgainToExit);
   }
 
   void _toggleToolsLauncher() {
@@ -1525,6 +1689,7 @@ class MainWindowScreenState extends State<MainWindowScreen>
       // שלא תירה מאוחר יותר, כשהתוכן נרשם, ותחטוף פוקוס משדה במסך הנוכחי.
       if (state.currentScreen != Screen.reading) {
         context.read<FocusRepository>().cancelPendingTabContentFocus();
+        PluginRuntimeDispatcher.instance.cancelPendingKeyboardFocus();
       }
       _lastScreen = state.currentScreen;
     }
@@ -1829,7 +1994,11 @@ class MainWindowScreenState extends State<MainWindowScreen>
     focusRepository.findRefSearchController.selection =
         const TextSelection.collapsed(offset: 'בראשית'.length);
     context.read<FindRefBloc>().add(const SearchRefRequested('בראשית'));
-    _handleFindRefOpen(context, closeIfOpen: false);
+    _handleFindRefOpen(
+      context,
+      closeIfOpen: false,
+      transparentBarrier: true,
+    );
     _scheduleBringTourOverlayToFront(remainingFrames: 6);
   }
 
@@ -1913,7 +2082,7 @@ class MainWindowScreenState extends State<MainWindowScreen>
       case 'advanced_search':
         return _rectForGlobalKey(tourSearchDialogTargetKey);
       case 'find_ref':
-        return _findRefDialogTourRect();
+        return _rectForGlobalKey(tourFindRefDialogTargetKey);
       case 'reading':
         return _rectForGlobalKey(tourReadingScreenTargetKey);
       case 'tabs':
@@ -1951,7 +2120,7 @@ class MainWindowScreenState extends State<MainWindowScreen>
     }
 
     if (step.id == 'find_ref') {
-      final dialogRect = _findRefDialogTourRect();
+      final dialogRect = _rectForGlobalKey(tourFindRefDialogTargetKey);
       final navFindRefRect = _navItemTourRectForScreen(Screen.find);
       return [?dialogRect, ?navFindRefRect];
     }
@@ -1962,6 +2131,14 @@ class MainWindowScreenState extends State<MainWindowScreen>
           _rectForGlobalKey(pdfBookNavigationTourTargetKey);
       final panelRect = _rectForGlobalKey(activeTextBookNavPanelTourTargetKey);
       return [?buttonRect, ?panelRect];
+    }
+
+    if (step.id == 'tools') {
+      final navRect = _navItemTourRect(_toolsNavIndex);
+      final panelRect = _isToolsLauncherOpen
+          ? _rectForGlobalKey(tourToolsLauncherPanelTargetKey)
+          : null;
+      return [?navRect, ?panelRect];
     }
 
     if (step.id == 'bookmark') {
@@ -2082,6 +2259,12 @@ class MainWindowScreenState extends State<MainWindowScreen>
   }
 
   Rect? _tabsTourTargetRect() {
+    // במצב "בצד" העמודה האנכית היא רצועת הכרטיסיות; במצב "למעלה" היא נשארת
+    // בעץ ברוחב 0, ולכן רק רוחב ממשי מעיד שהיא זו שמוצגת.
+    final sideRect = _rectForGlobalKey(tourReadingTabsSideTargetKey);
+    if (sideRect != null && sideRect.width > 1) {
+      return sideRect;
+    }
     final rect = _rectForGlobalKey(tourReadingTabsTargetKey, inflate: 0);
     if (rect == null) {
       return null;
@@ -2091,22 +2274,6 @@ class MainWindowScreenState extends State<MainWindowScreen>
       rect.top - 4,
       rect.right,
       rect.bottom + 4,
-    );
-  }
-
-  Rect? _findRefDialogTourRect() {
-    final contentRect = _rectForGlobalKey(
-      tourFindRefDialogTargetKey,
-      inflate: 0,
-    );
-    if (contentRect == null) {
-      return null;
-    }
-    return Rect.fromLTRB(
-      contentRect.left - 24,
-      contentRect.top - 80,
-      contentRect.right + 24,
-      contentRect.bottom + 88,
     );
   }
 
@@ -2224,6 +2391,13 @@ class MainWindowScreenState extends State<MainWindowScreen>
     });
   }
 
+  /// מזהה יציב של הספר בחלונית הקריאה, ל-scope של `book:<bookUid>` בלוח.
+  static String? _readingPaneBookUid(OpenedTab? pane) {
+    if (pane is TextBookTab) return PluginBookIdentity.uidOf(pane.book);
+    if (pane is PdfBookTab) return PluginBookIdentity.uidOf(pane.book);
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final Widget content = MultiBlocProvider(
@@ -2289,10 +2463,7 @@ class MainWindowScreenState extends State<MainWindowScreen>
             },
           ),
           BlocListener<LibraryBloc, LibraryState>(
-            listenWhen: (previous, current) =>
-                previous.isLoading &&
-                !current.isLoading &&
-                current.library != null,
+            listenWhen: LibraryState.reloadCompleted,
             listener: (context, state) {
               _startupWorkGate.markLibraryLoaded();
               _tryStartDeferredStartupWork();
@@ -2403,28 +2574,26 @@ class MainWindowScreenState extends State<MainWindowScreen>
             listener: (context, state) {
               final cubit = context.read<WorkStatusCubit>();
               if (state is IndexingInProgress && state.isCreatingIndex) {
-                final total = state.totalBooks ?? 0;
-                final processed = state.booksProcessed ?? 0;
-                final progress = total > 0
-                    ? (processed / total).clamp(0.0, 1.0)
-                    : null;
+                final indexingBloc = context.read<IndexingBloc>();
                 cubit.upsert(
-                  WorkStatusItem(
-                    id: 'indexing',
-                    title: 'אינדוקס ספרים',
-                    message: 'התוכנה בתהליך אינדוקס',
-                    detail: 'התקדמות: $processed/$total',
-                    progress: progress,
+                  indexingWorkStatusItem(
+                    state,
+                    onTogglePause: () => indexingBloc.add(
+                      state.isPaused ? ResumeIndexing() : PauseIndexing(),
+                    ),
+                    onToggleEconomy: () =>
+                        indexingBloc.add(SetEconomyIndexing(!state.isEconomy)),
                     onTap: _openIndexingSettings,
                   ),
                 );
               } else {
-                cubit.remove('indexing');
+                cubit.remove(kIndexingWorkStatusId);
                 if (state is IndexingComplete && !state.isClean) {
                   UiSnack.show(
                     LibraryMessages.indexingCompletedWithFailures(
                       state.failureCount,
                     ),
+                    onTap: _openErrorLogFile,
                   );
                 }
               }
@@ -2744,13 +2913,14 @@ class MainWindowScreenState extends State<MainWindowScreen>
             listenWhen: (previous, current) =>
                 previous.readingPane?.title != current.readingPane?.title,
             listener: (context, state) {
-              final bookId = state.readingPane?.title;
+              final pane = state.readingPane;
               final workspaceId = context
                   .read<WorkspaceBloc>()
                   .state
                   .activeWorkspaceId;
               _calendarCubit.refreshPluginEvents(
-                currentBookId: bookId,
+                currentBookId: pane?.title,
+                currentBookUid: _readingPaneBookUid(pane),
                 currentWorkspaceId: workspaceId,
               );
             },
@@ -2761,27 +2931,40 @@ class MainWindowScreenState extends State<MainWindowScreen>
                 previous.activeWorkspaceId != current.activeWorkspaceId,
             listener: (context, state) {
               final workspaceId = state.activeWorkspaceId;
-              final bookId = context.read<TabsBloc>().state.readingPane?.title;
+              final pane = context.read<TabsBloc>().state.readingPane;
               _calendarCubit.refreshPluginEvents(
                 currentWorkspaceId: workspaceId,
-                currentBookId: bookId,
+                currentBookId: pane?.title,
+                currentBookUid: _readingPaneBookUid(pane),
               );
             },
+          ),
+          // הסרת תוסף סוגרת את הכרטיסיה הפתוחה שלו. ההסרה יכולה להגיע מכמה
+          // מסכים, ולכן מגיבים לרשימה המעודכנת ולא לאירוע ההסרה עצמו.
+          BlocListener<PluginSystemBloc, PluginSystemState>(
+            listenWhen: (_, current) => current is PluginSystemLoaded,
+            listener: (context, _) => closeUninstalledPluginTabs(context),
+          ),
+          // אותו ניקוי בכיוון ההפוך: כרטיסיה של תוסף שהוסר יכולה להגיע
+          // מסביבת עבודה שלא הייתה פעילה בזמן המחיקה, או משחזור הכרטיסיות
+          // בעלייה — שם היא נטענת אחרי שרשימת התוספים כבר עודכנה.
+          BlocListener<TabsBloc, TabsState>(
+            listenWhen: (previous, current) =>
+                !listEquals(previous.tabs, current.tabs),
+            listener: (context, _) => closeUninstalledPluginTabs(context),
           ),
           BlocListener<PluginSystemBloc, PluginSystemState>(
             listenWhen: (_, current) => current is PluginSystemLoaded,
             listener: (context, _) async {
               try {
+                final pane = context.read<TabsBloc>().state.readingPane;
                 await _calendarCubit.refreshPluginEvents(
                   currentWorkspaceId: context
                       .read<WorkspaceBloc>()
                       .state
                       .activeWorkspaceId,
-                  currentBookId: context
-                      .read<TabsBloc>()
-                      .state
-                      .readingPane
-                      ?.title,
+                  currentBookId: pane?.title,
+                  currentBookUid: _readingPaneBookUid(pane),
                 );
               } catch (error) {
                 debugPrint('Plugin calendar refresh failed: $error');
@@ -2793,76 +2976,8 @@ class MainWindowScreenState extends State<MainWindowScreen>
                 current is PluginSystemInstallRequiresPermissions ||
                 current is PluginSystemDevInstallRequiresPermissions ||
                 current is PluginSystemOverwriteRequired,
-            listener: (context, state) {
-              final isOfflineMode = context
-                  .read<SettingsBloc>()
-                  .state
-                  .isOfflineMode;
-              if (state is PluginSystemInstallRequiresPermissions) {
-                showDialog(
-                  context: context,
-                  builder: (_) => BlocProvider.value(
-                    value: context.read<PluginSystemBloc>(),
-                    child: PluginInstallScreen(
-                      manifest: state.manifest,
-                      tempDirPath: state.tempDirPath,
-                      previousVersion: state.previousVersion,
-                      previousAllowOrderBeforeBuiltInsGranted:
-                          state.previousAllowOrderBeforeBuiltInsGranted,
-                      previousGrantedPermissions:
-                          state.previousGrantedPermissions,
-                      reportContext: state.reportContext,
-                      isOfflineMode: isOfflineMode,
-                    ),
-                  ),
-                );
-              } else if (state is PluginSystemDevInstallRequiresPermissions) {
-                final bloc = context.read<PluginSystemBloc>();
-                showDialog(
-                  context: context,
-                  builder: (_) => PluginInstallScreen(
-                    manifest: state.manifest,
-                    tempDirPath: '',
-                    previousVersion: state.previousVersion,
-                    previousAllowOrderBeforeBuiltInsGranted:
-                        state.previousAllowOrderBeforeBuiltInsGranted,
-                    isOfflineMode: isOfflineMode,
-                    onConfirm: (perms, allowOrder) => bloc.add(
-                      ConfirmDevPluginInstall(
-                        manifest: state.manifest,
-                        sourcePath: state.sourcePath,
-                        sourceType: state.sourceType,
-                        grantedPermissions: perms,
-                        allowOrderBeforeBuiltInsGranted: allowOrder,
-                      ),
-                    ),
-                    onCancel: () => bloc.add(LoadPlugins()),
-                  ),
-                );
-              } else if (state is PluginSystemOverwriteRequired) {
-                final bloc = context.read<PluginSystemBloc>();
-                showWarningDialog(
-                  context: context,
-                  title: 'התוסף כבר קיים',
-                  content:
-                      'התוסף "${state.pluginName}" בגרסה ${state.version} כבר מותקן.',
-                  subtitle: 'האם ברצונך להתקין מחדש ולדרוס אותו?',
-                  cancelText: 'ביטול',
-                  confirmText: 'התקן מחדש',
-                ).then((value) {
-                  if (value == true) {
-                    bloc.add(
-                      InstallPluginRequested(
-                        state.archivePath,
-                        forceOverwrite: true,
-                      ),
-                    );
-                  } else {
-                    bloc.add(LoadPlugins());
-                  }
-                });
-              }
-            },
+            listener: (context, state) =>
+                _pluginInstallDialogQueue.enqueue(state),
           ),
         ],
         child: BlocBuilder<NavigationBloc, NavigationState>(
@@ -2882,7 +2997,10 @@ class MainWindowScreenState extends State<MainWindowScreen>
 
             if (libraryBuildDecision ==
                 LibraryPageBuildDecision.buildRealPage) {
-              _cachedLibraryPage = LibraryBrowser(key: libraryBrowserKey);
+              _cachedLibraryPage = KeepAlivePage(
+                key: const ValueKey('page-library'),
+                child: LibraryBrowser(key: libraryBrowserKey),
+              );
               _hasBuiltRealLibraryPage = true;
             } else if (libraryBuildDecision ==
                 LibraryPageBuildDecision.usePlaceholder) {
@@ -2892,10 +3010,19 @@ class MainWindowScreenState extends State<MainWindowScreen>
               _cachedLibraryPage = const SizedBox.shrink();
             }
 
-            _cachedReadingPage ??= ReadingScreen(key: _readingScreenKey);
-            _cachedSettingsPage ??= MySettingsScreen(
-              key: _settingsScreenKey,
-              controller: _settingsScreenController,
+            // KeepAlivePage: בלעדיו פריים שבו ה-viewport לא בונה את העמוד
+            // (מזעור לחלון 0x0, החלפת controller) זורק את ה-State של המסך —
+            // וטאב תוסף פתוח נטען מאפס לדף הראשי שלו.
+            _cachedReadingPage ??= KeepAlivePage(
+              key: const ValueKey('page-reading'),
+              child: ReadingScreen(key: _readingScreenKey),
+            );
+            _cachedSettingsPage ??= KeepAlivePage(
+              key: const ValueKey('page-settings'),
+              child: MySettingsScreen(
+                key: _settingsScreenKey,
+                controller: _settingsScreenController,
+              ),
             );
 
             _pages = _buildPagesList();
@@ -2935,70 +3062,83 @@ class MainWindowScreenState extends State<MainWindowScreen>
                 onFindRefRequested: () => _handleFindRefOpen(context),
                 onNewSearchRequested: () => _handleSearchTabOpen(context),
                 child: MyUpdatWidget(
-                  child: Scaffold(
-                    resizeToAvoidBottomInset: false,
-                    body: Stack(
-                      children: [
-                        Column(
-                          children: [
-                            if (!isImmersive)
-                              // מסגרת החלון יושבת מעל ה-scrim של פאנל הכלים;
-                              // Listener פסיבי סוגר בלי לחטוף את הלחיצה.
-                              Listener(
-                                behavior: HitTestBehavior.translucent,
-                                onPointerDown: (_) => _closeToolsLauncher(),
-                                child: CustomTitleBar(
-                                  onReadingSettingsPressed:
-                                      _toggleReadingSettingsPanel,
-                                  isReadingSettingsPanelOpen:
-                                      _isReadingSettingsPanelOpen,
+                  child: PopScope(
+                    canPop: !Platform.isAndroid,
+                    onPopInvokedWithResult: (didPop, _) {
+                      if (didPop) return;
+                      _handleAndroidBackPress();
+                    },
+                    child: Scaffold(
+                      // בדסקטופ המקלדת הווירטואלית לא קיימת; במובייל חייבים
+                      // resize כדי שכפתורי שמירה לא ייחסמו מאחורי המקלדת.
+                      resizeToAvoidBottomInset:
+                          Platform.isAndroid || Platform.isIOS,
+                      body: Stack(
+                        children: [
+                          Column(
+                            children: [
+                              if (!isImmersive)
+                                // מסגרת החלון יושבת מעל ה-scrim של פאנל הכלים;
+                                // Listener פסיבי סוגר בלי לחטוף את הלחיצה.
+                                Listener(
+                                  behavior: HitTestBehavior.translucent,
+                                  onPointerDown: (_) => _closeToolsLauncher(),
+                                  child: CustomTitleBar(
+                                    onReadingSettingsPressed:
+                                        _toggleReadingSettingsPanel,
+                                    isReadingSettingsPanelOpen:
+                                        _isReadingSettingsPanelOpen,
+                                  ),
                                 ),
-                              ),
-                            Expanded(
-                              child: OrientationBuilder(
-                                builder: (context, orientation) {
-                                  _handleOrientationChange(
-                                    context,
-                                    orientation,
-                                  );
+                              Expanded(
+                                child: OrientationBuilder(
+                                  builder: (context, orientation) {
+                                    _handleOrientationChange(
+                                      context,
+                                      orientation,
+                                    );
 
-                                  final pageView = Stack(
-                                    children: [
-                                      PageView(
-                                        controller: pageController,
-                                        scrollDirection:
-                                            orientation == Orientation.landscape
-                                            ? Axis.vertical
-                                            : Axis.horizontal,
-                                        physics:
-                                            const NeverScrollableScrollPhysics(),
-                                        children: _pages,
-                                      ),
-                                      // צמוד לסרגל הניווט (ימין ב-RTL) ובתוך
-                                      // אזור התוכן בלבד — כך ה-scrim אינו בולע
-                                      // לחיצות בסרגל וכפתור "כלים" נשאר לחיץ
-                                      // לסגירה.
-                                      ContextOverlayPanel(
-                                        isOpen: _isToolsLauncherOpen,
-                                        onClose: _closeToolsLauncher,
-                                        alignment:
-                                            AlignmentDirectional.centerStart,
-                                        // רחב מספיק שארבע הקוביות שבשורה יהיו
-                                        // מרווחות, ועדיין לא חמש.
-                                        width: 440,
-                                        deferChildBuildOnOpen: true,
-                                        child: ToolsLauncherPanel(
-                                          onClose: _closeToolsLauncher,
-                                          onToolSelected: (entry) {
-                                            _closeToolsLauncher();
-                                            openToolTab(context, entry);
-                                          },
+                                    final pageView = Stack(
+                                      children: [
+                                        PageView(
+                                          controller: pageController,
+                                          scrollDirection:
+                                              orientation ==
+                                                  Orientation.landscape
+                                              ? Axis.vertical
+                                              : Axis.horizontal,
+                                          physics:
+                                              const NeverScrollableScrollPhysics(),
+                                          children: _pages,
                                         ),
-                                      ),
-                                    ],
-                                  );
+                                        // צמוד לסרגל הניווט (ימין ב-RTL) ובתוך
+                                        // אזור התוכן בלבד — כך ה-scrim אינו בולע
+                                        // לחיצות בסרגל וכפתור "כלים" נשאר לחיץ
+                                        // לסגירה.
+                                        ContextOverlayPanel(
+                                          isOpen: _isToolsLauncherOpen,
+                                          onClose: _closeToolsLauncher,
+                                          alignment:
+                                              AlignmentDirectional.centerStart,
+                                          // רחב מספיק שתוויות הכלים הארוכות
+                                          // ייכנסו בשורה בלי קיצור.
+                                          width: 440,
+                                          deferChildBuildOnOpen: true,
+                                          child: ToolsLauncherPanel(
+                                            key:
+                                                tourToolsLauncherPanelTargetKey,
+                                            onClose: _closeToolsLauncher,
+                                            onToolSelected: (entry) {
+                                              _closeToolsLauncher();
+                                              openToolTab(context, entry);
+                                            },
+                                          ),
+                                        ),
+                                      ],
+                                    );
 
-                                  if (orientation == Orientation.landscape) {
+                                    final isLandscape =
+                                        orientation == Orientation.landscape;
                                     final isCompactRail = context
                                         .select<SettingsBloc, bool>(
                                           (b) => b.state.compactMenuMode,
@@ -3006,214 +3146,245 @@ class MainWindowScreenState extends State<MainWindowScreen>
                                     final railWidth = isCompactRail
                                         ? NavRailItem.compactWidth
                                         : NavRailItem.width;
-                                    return Row(
+                                    final showRail =
+                                        isLandscape && !isImmersive;
+                                    // צורת העץ קבועה בשני הכיוונים: הסתרה היא
+                                    // מידה 0 ולא הוצאה מהעץ — החלפת Row/Column
+                                    // הורסת את ה-PageView וכל מסך (כולל WebView
+                                    // של תוסף פתוח) נבנה מאפס בכל שינוי כיוון.
+                                    return Column(
                                       children: [
-                                        if (!isImmersive)
-                                          ColoredBox(
-                                            color: AppSurfaces.panelBackground(
-                                              context,
-                                            ),
-                                            child: SizedBox.fromSize(
-                                              size: Size.fromWidth(railWidth),
-                                              child: Column(
-                                                children: [
-                                                  Expanded(
-                                                    child: Material(
-                                                      color:
-                                                          AppSurfaces.panelBackground(
-                                                            context,
-                                                          ),
-                                                      surfaceTintColor:
-                                                          Colors.transparent,
-                                                      child:
-                                                          BlocBuilder<
-                                                            PluginSystemBloc,
-                                                            PluginSystemState
-                                                          >(
-                                                            buildWhen:
-                                                                _pinnedNavRailIdsChanged,
-                                                            builder:
-                                                                (
-                                                                  context,
-                                                                  pluginState,
-                                                                ) {
-                                                                  final settingsState =
-                                                                      context.select<
-                                                                        SettingsBloc,
-                                                                        SettingsState
-                                                                      >(
-                                                                        (b) => b
-                                                                            .state,
-                                                                      );
-                                                                  final pinnedItems = _resolvePinnedItems(
-                                                                    pluginState:
-                                                                        pluginState,
-                                                                    pinnedBuiltInIds:
-                                                                        settingsState
-                                                                            .builtInToolsPinnedToNavRail,
-                                                                    hiddenBuiltInIds:
-                                                                        settingsState
-                                                                            .hiddenBuiltInToolIds,
-                                                                    isOfflineMode:
-                                                                        settingsState
-                                                                            .isOfflineMode,
-                                                                    builtInToolsOrder:
-                                                                        settingsState
-                                                                            .builtInToolsOrder,
-                                                                  );
-                                                                  return BlocBuilder<
-                                                                    TabsBloc,
-                                                                    TabsState
+                                        Expanded(
+                                          child: Row(
+                                            children: [
+                                              SizedBox(
+                                                width: showRail ? railWidth : 0,
+                                                child: !showRail
+                                                    ? null
+                                                    : Column(
+                                                        children: [
+                                                          Expanded(
+                                                            child: Material(
+                                                              color:
+                                                                  AppSurfaces.topBarBackground(
+                                                                    context,
+                                                                  ),
+                                                              surfaceTintColor:
+                                                                  Colors
+                                                                      .transparent,
+                                                              child:
+                                                                  BlocBuilder<
+                                                                    PluginSystemBloc,
+                                                                    PluginSystemState
                                                                   >(
-                                                                    buildWhen: (p, c) =>
-                                                                        _activeToolIdOf(
-                                                                          p,
-                                                                        ) !=
-                                                                        _activeToolIdOf(
-                                                                          c,
-                                                                        ),
+                                                                    buildWhen:
+                                                                        _pinnedNavRailIdsChanged,
                                                                     builder:
                                                                         (
                                                                           context,
-                                                                          tabsState,
+                                                                          pluginState,
                                                                         ) {
-                                                                          final activeToolId = _activeToolIdOf(
-                                                                            tabsState,
+                                                                          final settingsState =
+                                                                              context.select<
+                                                                                SettingsBloc,
+                                                                                SettingsState
+                                                                              >(
+                                                                                (
+                                                                                  b,
+                                                                                ) => b.state,
+                                                                              );
+                                                                          final pinnedItems = _resolvePinnedItems(
+                                                                            pluginState:
+                                                                                pluginState,
+                                                                            pinnedBuiltInIds:
+                                                                                settingsState.builtInToolsPinnedToNavRail,
+                                                                            hiddenBuiltInIds:
+                                                                                settingsState.hiddenBuiltInToolIds,
+                                                                            isOfflineMode:
+                                                                                settingsState.isOfflineMode,
+                                                                            builtInToolsOrder:
+                                                                                settingsState.builtInToolsOrder,
                                                                           );
-                                                                          final hideTools = _isAllToolsHidden(
-                                                                            settingsState,
-                                                                            pluginState,
-                                                                          );
-                                                                          final isReaderScreen =
-                                                                              state.currentScreen ==
-                                                                                  Screen.reading ||
-                                                                              state.currentScreen ==
-                                                                                  Screen.search;
-                                                                          final activePinnedIndex =
-                                                                              isReaderScreen &&
-                                                                                  activeToolId !=
-                                                                                      null
-                                                                              ? pinnedItems.indexWhere(
-                                                                                  (
-                                                                                    it,
-                                                                                  ) =>
-                                                                                      it.toolId ==
-                                                                                      activeToolId,
-                                                                                )
-                                                                              : -1;
-                                                                          // "כלים" מודגש כל עוד פאנל המשגר פתוח
-                                                                          final isToolsSelected =
-                                                                              !hideTools &&
-                                                                              _isToolsLauncherOpen;
-                                                                          return LayoutBuilder(
+                                                                          return BlocBuilder<
+                                                                            TabsBloc,
+                                                                            TabsState
+                                                                          >(
+                                                                            buildWhen:
+                                                                                (
+                                                                                  p,
+                                                                                  c,
+                                                                                ) =>
+                                                                                    _activeToolIdOf(
+                                                                                      p,
+                                                                                    ) !=
+                                                                                    _activeToolIdOf(
+                                                                                      c,
+                                                                                    ),
                                                                             builder:
                                                                                 (
                                                                                   context,
-                                                                                  constraints,
+                                                                                  tabsState,
                                                                                 ) {
-                                                                                  const buttonHeight = 60.0;
-                                                                                  const minSpacerHeight = 20.0;
-                                                                                  final totalItems =
-                                                                                      (_navData.length -
-                                                                                          (hideTools
-                                                                                              ? 1
-                                                                                              : 0)) +
-                                                                                      pinnedItems.length;
-                                                                                  final needsScroll =
-                                                                                      totalItems *
-                                                                                              buttonHeight +
-                                                                                          minSpacerHeight >
-                                                                                      constraints.maxHeight;
-
-                                                                                  final topItems =
-                                                                                      <
-                                                                                        Widget
-                                                                                      >[
-                                                                                        for (
-                                                                                          int i = 0;
-                                                                                          i <
-                                                                                              _toolsNavIndex;
-                                                                                          i++
-                                                                                        )
-                                                                                          _buildNavRailItem(
-                                                                                            context,
-                                                                                            i,
-                                                                                            state.currentScreen,
-                                                                                            compact: isCompactRail,
-                                                                                          ),
-                                                                                        if (!hideTools)
-                                                                                          _buildNavRailItem(
-                                                                                            context,
-                                                                                            _toolsNavIndex,
-                                                                                            state.currentScreen,
-                                                                                            selectedOverride: isToolsSelected,
-                                                                                            compact: isCompactRail,
-                                                                                          ),
-                                                                                        for (
-                                                                                          int i = 0;
-                                                                                          i <
-                                                                                              pinnedItems.length;
-                                                                                          i++
-                                                                                        )
-                                                                                          _buildPinnedItemNavRailItem(
-                                                                                            context,
-                                                                                            pinnedItems[i],
-                                                                                            isSelected:
-                                                                                                activePinnedIndex ==
-                                                                                                i,
-                                                                                            compact: isCompactRail,
-                                                                                          ),
-                                                                                      ];
-                                                                                  final settingsItem = _buildNavRailItem(
-                                                                                    context,
-                                                                                    _settingsNavIndex,
-                                                                                    state.currentScreen,
-                                                                                    compact: isCompactRail,
+                                                                                  final activeToolId = _activeToolIdOf(
+                                                                                    tabsState,
                                                                                   );
+                                                                                  final hideTools = _isAllToolsHidden(
+                                                                                    settingsState,
+                                                                                    pluginState,
+                                                                                  );
+                                                                                  final isReaderScreen =
+                                                                                      state.currentScreen ==
+                                                                                          Screen.reading ||
+                                                                                      state.currentScreen ==
+                                                                                          Screen.search;
+                                                                                  final activePinnedIndex =
+                                                                                      isReaderScreen &&
+                                                                                          activeToolId !=
+                                                                                              null
+                                                                                      ? pinnedItems.indexWhere(
+                                                                                          (
+                                                                                            it,
+                                                                                          ) =>
+                                                                                              it.toolId ==
+                                                                                              activeToolId,
+                                                                                        )
+                                                                                      : -1;
+                                                                                  // "כלים" מודגש כל עוד פאנל המשגר פתוח
+                                                                                  final isToolsSelected =
+                                                                                      !hideTools &&
+                                                                                      _isToolsLauncherOpen;
+                                                                                  return LayoutBuilder(
+                                                                                    builder:
+                                                                                        (
+                                                                                          context,
+                                                                                          constraints,
+                                                                                        ) {
+                                                                                          const buttonHeight = 60.0;
+                                                                                          const minSpacerHeight = 20.0;
+                                                                                          final totalItems =
+                                                                                              (_navData.length -
+                                                                                                  (hideTools
+                                                                                                      ? 1
+                                                                                                      : 0)) +
+                                                                                              pinnedItems.length;
+                                                                                          final needsScroll =
+                                                                                              totalItems *
+                                                                                                      buttonHeight +
+                                                                                                  minSpacerHeight >
+                                                                                              constraints.maxHeight;
 
-                                                                                  if (needsScroll) {
-                                                                                    return SingleChildScrollView(
-                                                                                      child: Column(
-                                                                                        children: [
-                                                                                          ...topItems,
-                                                                                          settingsItem,
-                                                                                        ],
-                                                                                      ),
-                                                                                    );
-                                                                                  }
+                                                                                          final topItems =
+                                                                                              <
+                                                                                                Widget
+                                                                                              >[
+                                                                                                for (
+                                                                                                  int i = 0;
+                                                                                                  i <
+                                                                                                      _toolsNavIndex;
+                                                                                                  i++
+                                                                                                )
+                                                                                                  _buildNavRailItem(
+                                                                                                    context,
+                                                                                                    i,
+                                                                                                    state.currentScreen,
+                                                                                                    compact: isCompactRail,
+                                                                                                  ),
+                                                                                                if (!hideTools)
+                                                                                                  _buildNavRailItem(
+                                                                                                    context,
+                                                                                                    _toolsNavIndex,
+                                                                                                    state.currentScreen,
+                                                                                                    selectedOverride: isToolsSelected,
+                                                                                                    compact: isCompactRail,
+                                                                                                  ),
+                                                                                                for (
+                                                                                                  int i = 0;
+                                                                                                  i <
+                                                                                                      pinnedItems.length;
+                                                                                                  i++
+                                                                                                )
+                                                                                                  _buildPinnedItemNavRailItem(
+                                                                                                    context,
+                                                                                                    pinnedItems[i],
+                                                                                                    isSelected:
+                                                                                                        activePinnedIndex ==
+                                                                                                        i,
+                                                                                                    compact: isCompactRail,
+                                                                                                  ),
+                                                                                              ];
+                                                                                          final settingsItem = _buildNavRailItem(
+                                                                                            context,
+                                                                                            _settingsNavIndex,
+                                                                                            state.currentScreen,
+                                                                                            compact: isCompactRail,
+                                                                                          );
 
-                                                                                  return Column(
-                                                                                    children: [
-                                                                                      ...topItems,
-                                                                                      const Spacer(),
-                                                                                      settingsItem,
-                                                                                    ],
+                                                                                          if (needsScroll) {
+                                                                                            return SingleChildScrollView(
+                                                                                              child: Column(
+                                                                                                children: [
+                                                                                                  ...topItems,
+                                                                                                  settingsItem,
+                                                                                                ],
+                                                                                              ),
+                                                                                            );
+                                                                                          }
+
+                                                                                          return Column(
+                                                                                            children: [
+                                                                                              ...topItems,
+                                                                                              const Spacer(),
+                                                                                              settingsItem,
+                                                                                            ],
+                                                                                          );
+                                                                                        },
                                                                                   );
                                                                                 },
                                                                           );
                                                                         },
-                                                                  );
-                                                                },
+                                                                  ),
+                                                            ),
                                                           ),
-                                                    ),
-                                                  ),
-                                                ],
+                                                        ],
+                                                      ),
                                               ),
-                                            ),
+                                              SizedBox(
+                                                width: showRail ? 1 : 0,
+                                                child: !showRail
+                                                    ? null
+                                                    : const VerticalDivider(
+                                                        thickness: 1,
+                                                        width: 1,
+                                                      ),
+                                              ),
+                                              // ילד קבוע ב-Row: הסתרה היא רוחב 0 ולא
+                                              // הוצאה מהעץ, אחרת ה-PageView נבנה
+                                              // מחדש והמסכים מאבדים State.
+                                              ReadingTabsSidePanel(
+                                                show:
+                                                    isLandscape &&
+                                                    !isImmersive &&
+                                                    hasOpenTabs &&
+                                                    (state.currentScreen ==
+                                                            Screen.reading ||
+                                                        state.currentScreen ==
+                                                            Screen.search) &&
+                                                    context.select<
+                                                      SettingsBloc,
+                                                      bool
+                                                    >(
+                                                      (b) => b
+                                                          .state
+                                                          .readingTabsOnSide,
+                                                    ),
+                                              ),
+                                              Expanded(child: pageView),
+                                            ],
                                           ),
-                                        if (!isImmersive)
-                                          const VerticalDivider(
-                                            thickness: 1,
-                                            width: 1,
-                                          ),
-                                        Expanded(child: pageView),
-                                      ],
-                                    );
-                                  } else {
-                                    return Column(
-                                      children: [
-                                        Expanded(child: pageView),
-                                        if (!isImmersive)
+                                        ),
+                                        // ילד עוקב ל-pageView — הוספה/הסרה שלו
+                                        // אינה מזיזה את הסלוטים שלפניו.
+                                        if (!isLandscape && !isImmersive)
                                           BlocBuilder<
                                             PluginSystemBloc,
                                             PluginSystemState
@@ -3290,30 +3461,32 @@ class MainWindowScreenState extends State<MainWindowScreen>
                                           ),
                                       ],
                                     );
-                                  }
-                                },
+                                  },
+                                ),
                               ),
+                            ],
+                          ),
+                          const WorkStatusOverlay(),
+                          // host נסתר לתוספים שביקשו לרוץ ברקע עם עליית
+                          // האפליקציה. הוא חי כל זמן שה-MainWindowScreen קיים,
+                          // ולא תלוי במסך "כלים".
+                          const PluginBackgroundHost(),
+                          ContextOverlayPanel(
+                            isOpen:
+                                _isReadingSettingsPanelOpen &&
+                                (state.currentScreen == Screen.reading ||
+                                    state.currentScreen == Screen.search),
+                            onClose: _toggleReadingSettingsPanel,
+                            deferChildBuildOnOpen: true,
+                            preserveChildStateOnClose: true,
+                            width: 400,
+                            title: 'הגדרות תצוגת הספרים',
+                            child: const Expanded(
+                              child: ReadingSettingsPanel(),
                             ),
-                          ],
-                        ),
-                        const WorkStatusOverlay(),
-                        // host נסתר לתוספים שביקשו לרוץ ברקע עם עליית
-                        // האפליקציה. הוא חי כל זמן שה-MainWindowScreen קיים,
-                        // ולא תלוי במסך "כלים".
-                        const PluginBackgroundHost(),
-                        ContextOverlayPanel(
-                          isOpen:
-                              _isReadingSettingsPanelOpen &&
-                              (state.currentScreen == Screen.reading ||
-                                  state.currentScreen == Screen.search),
-                          onClose: _toggleReadingSettingsPanel,
-                          deferChildBuildOnOpen: true,
-                          preserveChildStateOnClose: true,
-                          width: 400,
-                          title: 'הגדרות תצוגת הספרים',
-                          child: const Expanded(child: ReadingSettingsPanel()),
-                        ),
-                      ],
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -3342,6 +3515,18 @@ class MainWindowScreenState extends State<MainWindowScreen>
   void _openIndexingSettings() {
     _settingsScreenController.openTab(SettingsTab.library);
     context.read<NavigationBloc>().add(const NavigateToScreen(Screen.settings));
+  }
+
+  void _openErrorLogFile() {
+    ErrorLogFile.ensureExists();
+    final path = ErrorLogFile.resolvePath();
+    if (Platform.isWindows) {
+      unawaited(Process.run('explorer', [path]));
+    } else if (Platform.isMacOS) {
+      unawaited(Process.run('open', [path]));
+    } else if (Platform.isLinux) {
+      unawaited(Process.run('xdg-open', [path]));
+    }
   }
 
   int? _pageIndexForScreen(Screen screen) {
@@ -3394,7 +3579,13 @@ class MainWindowScreenState extends State<MainWindowScreen>
     });
   }
 
-  void _handleFindRefOpen(BuildContext context, {bool closeIfOpen = true}) {
+  /// [transparentBarrier] לסיור המודרך בלבד: הצעד מזרקר גם את פריט הניווט
+  /// שמאחורי הדיאלוג, וההאפלה של הדיאלוג הייתה מכהה אותו.
+  void _handleFindRefOpen(
+    BuildContext context, {
+    bool closeIfOpen = true,
+    bool transparentBarrier = false,
+  }) {
     if (_isFindRefOpen) {
       if (closeIfOpen) {
         Navigator.of(context).pop();
@@ -3409,7 +3600,7 @@ class MainWindowScreenState extends State<MainWindowScreen>
     showDialog(
       context: context,
       useRootNavigator: true,
-      barrierColor: Colors.transparent,
+      barrierColor: transparentBarrier ? Colors.transparent : null,
       builder: (context) => FindRefDialog(),
     ).then((_) {
       if (!mounted) return;

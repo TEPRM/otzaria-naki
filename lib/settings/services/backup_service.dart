@@ -20,7 +20,12 @@ import 'package:otzaria/personal_notes/models/personal_note.dart';
 import 'package:otzaria/personal_notes/services/personal_note_draft_service.dart';
 import 'package:otzaria/plugins/storage/plugin_system_database.dart';
 import 'package:otzaria/plugins/models/installed_plugin.dart';
+import 'package:otzaria/plugins/services/plugin_manifest_validator.dart';
+import 'package:otzaria/plugins/services/plugin_report_service.dart';
+import 'package:otzaria/services/direct_error_report_service.dart';
 import 'package:otzaria/core/app_paths.dart';
+import 'package:otzaria/core/messages/settings_messages.dart';
+import 'package:otzaria/core/ui_snack.dart';
 import 'package:otzaria/settings/services/backup/backup_maintenance.dart';
 import 'package:otzaria/settings/services/backup/backup_store.dart';
 
@@ -39,6 +44,15 @@ class BackupStatus {
 class BackupService {
   static final Logger _logger = Logger('BackupService');
   static const String backupFolderName = 'backups';
+
+  /// תקרת סך תוכן התוספים בגיבוי אחד. עם [BackupStore] הבייטים נכתבים כ-blob
+  /// לדיסק ומוסרים מהזיכרון; בגיבוי ידני הם נכנסים כ-base64 (×1.33) למחרוזת
+  /// JSON יחידה (UTF-16 בזיכרון) — ולכן התקרה שם נמוכה בהרבה.
+  static const int maxPluginBytesWithStore = 500 * 1024 * 1024;
+  static const int maxPluginBytesInline = 100 * 1024 * 1024;
+
+  @visibleForTesting
+  static int? debugMaxPluginBytesOverride;
 
   /// Get the backup directory path
   static Future<String> getBackupDirectory() async {
@@ -122,6 +136,7 @@ class BackupService {
         if (perBookSettings.hadFailures) {
           skippedSections.add('perBookSettings');
         }
+        backupData['reportQueues'] = _backupReportQueues(skippedSections);
       }
 
       // Backup bookmarks
@@ -206,6 +221,8 @@ class BackupService {
     'databases',
     'plugins',
     'per_book_settings',
+    'error_reports_queue',
+    'plugin_reports_queue',
   };
 
   /// מקומות שמירה שאינם מגובים במכוון, עם הסיבה לכל אחד.
@@ -214,7 +231,6 @@ class BackupService {
   /// `backup_storage_coverage_test` סורק את הקוד ונכשל על מקום שאינו מוצהר,
   /// כך שתיקייה חדשה לא תישמט מהגיבוי בשקט כפי שקרה ל-`per_book_settings`.
   static const Map<String, String> unbackedStores = {
-    'error_reports_queue': 'תור זמני — הדיווחים נשלחים והתור מתרוקן',
     'pending_external_activations.jsonl':
         'תור זמני של בקשות פתיחה מחוץ לתוכנה, מתרוקן בעיבוד',
     'books': 'תוכן הספרייה, מגיע מההתקנה או מההורדה',
@@ -224,6 +240,8 @@ class BackupService {
     'library_update_cache': 'קאש הורדות זמני',
     'webview2': 'נתוני מנוע הדפדפן המשובץ',
     'backups': 'תיקיית הגיבויים עצמה',
+    'library_loaded.marker':
+        'סימון מקומי שספרייה נטענה במכשיר זה — שחזורו למכשיר אחר מטעה',
   };
 
   /// מפתחות הגדרות שאינם מועברים בין התקנות.
@@ -439,13 +457,34 @@ class BackupService {
     final db = PluginSystemDatabase.instance;
     final plugins = await db.getAllInstalledPlugins();
     final result = <Map<String, dynamic>>[];
+    final budget =
+        debugMaxPluginBytesOverride ??
+        (store != null ? maxPluginBytesWithStore : maxPluginBytesInline);
+    var consumed = 0;
 
     for (final plugin in plugins) {
       if (plugin.isDevelopment) continue;
       try {
+        final dataPath = await AppPaths.getPluginDataPath(plugin.pluginId);
+        final size =
+            await _dirSizeBytes(plugin.installPath) +
+            await _dirSizeBytes(dataPath);
+        if (consumed + size > budget) {
+          _logger.warning(
+            'Skipping plugin ${plugin.pluginId} backup: exceeds archive budget',
+          );
+          UiSnack.showError(
+            SettingsMessages.backupPluginTooLarge(plugin.pluginId),
+          );
+          if (!skippedSections.contains('plugins')) {
+            skippedSections.add('plugins');
+          }
+          continue;
+        }
+        consumed += size;
+
         final aux = await db.exportPluginAuxData(plugin.pluginId);
         final files = await _readDirAsRefs(plugin.installPath, store);
-        final dataPath = await AppPaths.getPluginDataPath(plugin.pluginId);
         final data = await _readDirAsRefs(dataPath, store);
         result.add({
           'installation': plugin.toDbMap(),
@@ -474,6 +513,20 @@ class BackupService {
   ///
   /// כשל בקריאת קובץ אינו נבלע אלא מתפשט לקורא — כך גיבוי תוסף נכשל במלואו
   /// ומסומן כחלקי, במקום ליצור גיבוי עם קבצים חסרים בשתיקה.
+  /// סך הבתים בתיקייה. symlinks מדולגים — הם אינם תוכן של התוסף, ומעקב
+  /// אחריהם היה מזליג לארכיון קבצים מחוץ למרחב.
+  static Future<int> _dirSizeBytes(String dirPath) async {
+    final dir = Directory(dirPath);
+    if (!await dir.exists()) return 0;
+    var total = 0;
+    await for (final entity in dir.list(recursive: true, followLinks: false)) {
+      if (entity is File && !await FileSystemEntity.isLink(entity.path)) {
+        total += await entity.length();
+      }
+    }
+    return total;
+  }
+
   static Future<Map<String, String>> _readDirAsRefs(
     String dirPath,
     BackupStore? store,
@@ -482,7 +535,11 @@ class BackupService {
     if (!await dir.exists()) return {};
 
     final map = <String, String>{};
-    await for (final entity in dir.list(recursive: true)) {
+    await for (final entity in dir.list(
+      recursive: true,
+      followLinks: false,
+    )) {
+      if (await FileSystemEntity.isLink(entity.path)) continue;
       if (entity is File) {
         final relativePath = p.relative(entity.path, from: dir.path);
         final bytes = await entity.readAsBytes();
@@ -516,6 +573,64 @@ class BackupService {
     }
     return TabsRepository().exportRaw();
   }
+
+  /// תורי הדיווחים השמורים. לשני ה-boxes מבנה זהה — רשימת ממתינים ורשימת
+  /// נשלחים — ולכן אותו גיבוי ושחזור משרת את שניהם.
+  static const List<
+    ({String box, String pendingKey, String sentKey, int maxSent})
+  >
+  _reportQueues = [
+    (
+      box: DirectErrorReportService.queueBoxName,
+      pendingKey: DirectErrorReportService.pendingReportsKey,
+      sentKey: DirectErrorReportService.sentReportsKey,
+      maxSent: DirectErrorReportService.maxSentReportsToKeep,
+    ),
+    (
+      box: PluginReportService.queueBoxName,
+      pendingKey: PluginReportService.pendingReportsKey,
+      sentKey: PluginReportService.sentReportsKey,
+      maxSent: PluginReportService.maxSentReportsToKeep,
+    ),
+  ];
+
+  /// גיבוי הדיווחים השמורים — הממתינים לשליחה וההיסטוריה שנשלחה. נכנסים
+  /// לסעיף ההגדרות, שבו נשמרת כבר כתובת המייל שאליה הם משויכים.
+  static Map<String, dynamic> _backupReportQueues(
+    List<String> skippedSections,
+  ) {
+    final queues = <String, dynamic>{};
+    for (final queue in _reportQueues) {
+      if (!Hive.isBoxOpen(queue.box)) {
+        _logger.warning(
+          '_backupReportQueues: ${queue.box} not open — skipping (partial backup)',
+        );
+        if (!skippedSections.contains('reportQueues')) {
+          skippedSections.add('reportQueues');
+        }
+        continue;
+      }
+      final box = Hive.box<dynamic>(queue.box);
+      queues[queue.box] = {
+        'pending': _reportList(box.get(queue.pendingKey)),
+        'sent': _reportList(box.get(queue.sentKey)),
+      };
+    }
+    return queues;
+  }
+
+  /// המרת רשימת דיווחים מ-Hive/JSON לרשימת מפות עם מפתחות מחרוזת.
+  static List<Map<String, dynamic>> _reportList(Object? raw) {
+    if (raw is! List) return const [];
+    return raw
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+  }
+
+  /// מזהה הדיווח, שנקרא `id` בדיווחי הטעות ו-`reportId` בדיווחי התוספים.
+  static String? _reportId(Map<String, dynamic> report) =>
+      (report['id'] ?? report['reportId'])?.toString();
 
   /// Backup Shamor Zachor data - backs up all sz: keys found in Hive
   static Future<Map<String, dynamic>> _backupShamorZachor() async {
@@ -608,6 +723,10 @@ class BackupService {
             const {},
       );
       if (perBookHadFailures) runtimeSkipped.add('perBookSettings');
+      final reportsSkipped = await _restoreReportQueues(
+        (backupData['reportQueues'] as Map?)?.cast<String, dynamic>(),
+      );
+      if (reportsSkipped) runtimeSkipped.add('reportQueues');
     }
 
     // Restore bookmarks
@@ -719,6 +838,64 @@ class BackupService {
       }
     }
     return hadFailures;
+  }
+
+  /// שחזור הדיווחים השמורים (ראה [_backupReportQueues]). ממזג ולא מחליף:
+  /// דיווח שנשלח מאז אינו חוזר לתור, אחרת היה נשלח שוב לצוות אוצריא.
+  static Future<bool> _restoreReportQueues(Map<String, dynamic>? queues) async {
+    if (queues == null || queues.isEmpty) return false;
+
+    // השליחה האוטומטית כותבת לאותם מפתחות אחרי בקשת רשת; בלי עצירה שלה
+    // הכתיבה כאן עלולה לדרוס את רשומת הנשלחים ולהחזיר דיווח שכבר נמסר.
+    await DirectErrorReportService.suspendAutomaticFlush();
+    await PluginReportService.suspendAutomaticFlush();
+
+    var skipped = false;
+    for (final queue in _reportQueues) {
+      final backedUp = (queues[queue.box] as Map?)?.cast<String, dynamic>();
+      if (backedUp == null) continue;
+      if (!Hive.isBoxOpen(queue.box)) {
+        _logger.warning(
+          '_restoreReportQueues: ${queue.box} not open — skipping (partial restore)',
+        );
+        skipped = true;
+        continue;
+      }
+
+      final box = Hive.box<dynamic>(queue.box);
+      final sent = _mergeReports(
+        _reportList(box.get(queue.sentKey)),
+        _reportList(backedUp['sent']),
+      );
+      if (sent.length > queue.maxSent) {
+        sent.removeRange(queue.maxSent, sent.length);
+      }
+      final sentIds = sent.map(_reportId).whereType<String>().toSet();
+      final pending = _mergeReports(
+        _reportList(box.get(queue.pendingKey)),
+        _reportList(backedUp['pending']),
+      ).where((report) => !sentIds.contains(_reportId(report))).toList();
+
+      await box.put(queue.pendingKey, pending);
+      await box.put(queue.sentKey, sent);
+    }
+    return skipped;
+  }
+
+  /// איחוד שתי רשימות דיווחים לפי מזהה — המקומי מנצח, כי הוא העדכני.
+  /// דיווח בלי מזהה נשמר כמות שהוא: אין דרך לזהות אותו ככפול.
+  static List<Map<String, dynamic>> _mergeReports(
+    List<Map<String, dynamic>> local,
+    List<Map<String, dynamic>> backedUp,
+  ) {
+    final merged = [...local];
+    final localIds = local.map(_reportId).whereType<String>().toSet();
+    for (final report in backedUp) {
+      final id = _reportId(report);
+      if (id != null && localIds.contains(id)) continue;
+      merged.add(report);
+    }
+    return merged;
   }
 
   /// האם סעיף ההגדרות נאסף מרשימת מפתחות מוצהרת ולכן חסר את השאר.
@@ -927,6 +1104,11 @@ class BackupService {
         final installation = (entry['installation'] as Map)
             .cast<String, dynamic>();
         final pluginId = installation['plugin_id'] as String;
+        // המזהה מגיע מקובץ הגיבוי ומרכיב נתיב שנמחק ב-recursive; מזהה כמו `..`
+        // היה מוחק תיקייה שרירותית.
+        if (!PluginManifestValidator.isValidPluginId(pluginId)) {
+          throw Exception('מזהה תוסף לא תקין בגיבוי: $pluginId');
+        }
 
         final installPath = await AppPaths.getPluginInstallPath(pluginId);
         installation['install_path'] = installPath;

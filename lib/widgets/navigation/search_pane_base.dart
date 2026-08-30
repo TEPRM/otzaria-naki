@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
+import 'package:otzaria/widgets/navigation/nav_panel_search.dart';
 import 'package:otzaria/widgets/text/otzaria_search_field.dart';
 
 class SearchPaneBase extends StatefulWidget {
@@ -20,6 +21,8 @@ class SearchPaneBase extends StatefulWidget {
     this.additionalActions,
     this.collapsibleOnScroll = false,
     this.onSubmitted,
+    this.onArrowDown,
+    this.onArrowUp,
     super.key,
   });
 
@@ -42,6 +45,10 @@ class SearchPaneBase extends StatefulWidget {
   final List<Widget>? additionalActions;
   final bool collapsibleOnScroll;
   final VoidCallback? onSubmitted;
+
+  /// דפדוף בתוצאות בחיצים כשהפוקוס בשדה החיפוש (ראה [NavPanelSearchDelegate]).
+  final VoidCallback? onArrowDown;
+  final VoidCallback? onArrowUp;
 
   @override
   State<SearchPaneBase> createState() => _SearchPaneBaseState();
@@ -92,39 +99,70 @@ class _SearchPaneBaseState extends State<SearchPaneBase> {
     return false;
   }
 
+  /// פעולת החיפוש שמפורסמת לסרגל שמעל החלונית (במקום שדה מקומי).
+  NavPanelSearchDelegate get _delegate => NavPanelSearchDelegate(
+    controller: widget.searchController,
+    focusNode: widget.focusNode,
+    hintText: widget.hintText ?? '',
+    onChanged: (value) =>
+        _debounce(() => widget.onSearchTextChanged?.call(value)),
+    onSubmitted: (_) {
+      widget.onSubmitted?.call();
+      widget.focusNode.requestFocus();
+    },
+    onClear: () {
+      widget.onSearchTextChanged?.call('');
+      widget.resetSearchCallback();
+      widget.focusNode.requestFocus();
+    },
+    trailingActions: [
+      if (widget.onAdvancedSearch != null)
+        OtzariaSearchAction.settings(onPressed: widget.onAdvancedSearch!),
+    ],
+    onArrowDown: widget.onArrowDown,
+    onArrowUp: widget.onArrowUp,
+  );
+
   @override
   Widget build(BuildContext context) {
+    // בתוך חלונית ניווט השדה מצויר בסרגל שמעליה, ולכן מפרסמים ולא מציירים.
+    final hoisted = NavPanelSearch.isHoisted(context);
+    final delegate = _delegate;
     final searchField = Padding(
       key: const ValueKey('searchField'),
       padding: const EdgeInsets.all(8.0),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          OtzariaSearchField(
-            controller: widget.searchController,
-            focusNode: widget.focusNode,
-            autofocus: true,
-            hintText: widget.hintText ?? '',
-            onChanged: (value) =>
-                _debounce(() => widget.onSearchTextChanged?.call(value)),
-            onSubmitted: (_) {
-              widget.onSubmitted?.call();
-              widget.focusNode.requestFocus();
-            },
-            onClear: () {
-              widget.onSearchTextChanged?.call('');
-              widget.resetSearchCallback();
-              widget.focusNode.requestFocus();
-            },
-            isCompact: _isCompact,
-            onExpand: () => setState(() => _isCompact = false),
-            leading: const Icon(FluentIcons.search_24_regular),
-            trailingActions: [
-              if (widget.onAdvancedSearch != null)
-                OtzariaSearchAction.settings(
-                  onPressed: widget.onAdvancedSearch!,
-                ),
-            ],
+          Focus(
+            canRequestFocus: false,
+            onKeyEvent: (node, event) => delegate.handleArrowKey(event),
+            child: OtzariaSearchField(
+              controller: widget.searchController,
+              focusNode: widget.focusNode,
+              autofocus: true,
+              hintText: widget.hintText ?? '',
+              onChanged: (value) =>
+                  _debounce(() => widget.onSearchTextChanged?.call(value)),
+              onSubmitted: (_) {
+                widget.onSubmitted?.call();
+                widget.focusNode.requestFocus();
+              },
+              onClear: () {
+                widget.onSearchTextChanged?.call('');
+                widget.resetSearchCallback();
+                widget.focusNode.requestFocus();
+              },
+              isCompact: _isCompact,
+              onExpand: () => setState(() => _isCompact = false),
+              leading: const Icon(OtzariaIcons.search_24_regular),
+              trailingActions: [
+                if (widget.onAdvancedSearch != null)
+                  OtzariaSearchAction.settings(
+                    onPressed: widget.onAdvancedSearch!,
+                  ),
+              ],
+            ),
           ),
           if (!_isCompact &&
               widget.additionalActions != null &&
@@ -167,18 +205,19 @@ class _SearchPaneBaseState extends State<SearchPaneBase> {
         widget.resultToolbar != null ||
         (!_isCompact && widget.resultCountString != null);
 
-    return Column(
+    final pane = Column(
       children: [
         if (widget.progressWidget != null) widget.progressWidget!,
-        AnimatedAlign(
-          key: const ValueKey('searchFieldAlign'),
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeInOut,
-          alignment: _isCompact
-              ? AlignmentDirectional.centerEnd
-              : AlignmentDirectional.center,
-          child: searchField,
-        ),
+        if (!hoisted)
+          AnimatedAlign(
+            key: const ValueKey('searchFieldAlign'),
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeInOut,
+            alignment: _isCompact
+                ? AlignmentDirectional.centerEnd
+                : AlignmentDirectional.center,
+            child: searchField,
+          ),
         if (shouldShowToolbarRow)
           Padding(
             padding: const EdgeInsets.symmetric(
@@ -215,5 +254,8 @@ class _SearchPaneBaseState extends State<SearchPaneBase> {
         ),
       ],
     );
+
+    if (!hoisted) return pane;
+    return NavPanelSearchPublisher(delegate: _delegate, child: pane);
   }
 }

@@ -1,3 +1,4 @@
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -19,8 +20,7 @@ import 'package:otzaria/shortcuts/shortcut_validator.dart';
 import 'package:otzaria/widgets/controls/action_buttons.dart';
 import 'package:otzaria/widgets/navigation/app_top_bar.dart';
 import 'package:otzaria/widgets/controls/segmented_control.dart';
-import 'package:otzaria/widgets/layout/adaptive_side_pane.dart';
-import 'package:otzaria/theme/theme_exports.dart';
+import 'package:otzaria/widgets/navigation/nav_side_panel.dart';
 import 'package:otzaria/widgets/text/otzaria_search_field.dart';
 
 /// Main screen for Shamor Zachor with Split View (Sidebar + Content)
@@ -501,38 +501,10 @@ class _ShamorZachorMainScreenState extends State<ShamorZachorMainScreen>
                           AppTopBar(
                             leadingItems: [
                               AppTopBarItem(
-                                widget: IconButton(
-                                  tooltip: _isSidebarVisible
-                                      ? 'הסתר ניווט'
-                                      : 'הצג ניווט',
-                                  onPressed: () =>
+                                widget: NavPanelToggleButton(
+                                  isOpen: _isSidebarVisible,
+                                  onToggle: () =>
                                       _setSidebarVisible(!_isSidebarVisible),
-                                  icon: AnimatedSwitcher(
-                                    duration: AppTokens.animFast,
-                                    transitionBuilder: (child, animation) =>
-                                        RotationTransition(
-                                          turns: Tween<double>(
-                                            begin: 0.5,
-                                            end: 0.0,
-                                          ).animate(animation),
-                                          child: FadeTransition(
-                                            opacity: animation,
-                                            child: child,
-                                          ),
-                                        ),
-                                    child: Icon(
-                                      _isSidebarVisible
-                                          ? FluentIcons
-                                                .panel_right_contract_24_regular
-                                          : FluentIcons.panel_right_24_regular,
-                                      key: ValueKey(_isSidebarVisible),
-                                      size: 24,
-                                    ),
-                                  ),
-                                  visualDensity: VisualDensity.standard,
-                                  color: Theme.of(
-                                    context,
-                                  ).colorScheme.onSecondaryContainer,
                                 ),
                               ),
                             ],
@@ -544,6 +516,8 @@ class _ShamorZachorMainScreenState extends State<ShamorZachorMainScreen>
                                 ],
                                 Expanded(
                                   child: OtzariaSearchField(
+                                    icon: OtzariaIcons
+                                        .search_in_the_library_24_regular,
                                     controller: _searchController,
                                     focusNode: _searchFocusNode,
                                     hintText: 'חפש...',
@@ -570,7 +544,7 @@ class _ShamorZachorMainScreenState extends State<ShamorZachorMainScreen>
                           Expanded(
                             child: PrimaryScrollController(
                               controller: _contentScrollController,
-                              child: AdaptiveSidePane(
+                              child: NavSidePanel(
                                 isOpen: _isSidebarVisible,
                                 alignment: AlignmentDirectional.centerEnd,
                                 paneWidth: _sidebarWidth,
@@ -590,7 +564,6 @@ class _ShamorZachorMainScreenState extends State<ShamorZachorMainScreen>
                                       ? 'all_books_virtual'
                                       : _selectedCategoryName,
                                 ),
-                                wrapPaneInFloatingPanel: true,
                                 mainContent:
                                     _selectedBookName != null &&
                                         _selectedBookDetails != null

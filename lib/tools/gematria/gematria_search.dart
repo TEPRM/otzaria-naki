@@ -8,6 +8,8 @@ import 'package:otzaria/migration/database/daos/database.dart';
 import 'package:otzaria/migration/database/repository/seforim_repository.dart';
 import 'package:otzaria/migration/database/query_loader.dart';
 import 'package:otzaria/migration/models/toc_entry.dart';
+import 'package:otzaria/utils/file/text_encoding.dart';
+import 'package:otzaria/utils/file/document_format.dart';
 
 /// יעד סריקה יחיד עבור ה-isolate: נתיב DB ומזהי הספרים שבתוכו.
 /// מכיל ערכים ניתנים-להעברה בלבד, כדי שיוכל לחצות את גבול ה-isolate.
@@ -577,13 +579,17 @@ class GimatriaSearch {
 
     final files = dir
         .list(recursive: true, followLinks: false)
-        .where((e) => e is File && e.path.toLowerCase().endsWith('.txt'))
+        .where(
+          (e) =>
+              e is File &&
+              documentFormatFromExtension(e.path)?.isPlainText == true,
+        )
         .cast<File>();
 
     await for (final file in files) {
       try {
-        // קריאה בטקסט UTF-8 (עם חלופה לקבצים לא תקינים)
-        final String content = await file.readAsString(encoding: utf8);
+        // זיהוי קידוד: ספר שנשמר ב-ANSI עברית זרק כאן שגיאת פענוח ודולג בשקט.
+        final String content = await readTextFileSmart(file);
         final lines = const LineSplitter().convert(content);
 
         if (debug) {

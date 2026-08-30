@@ -44,6 +44,9 @@ class TextBookTab extends OpenedTab {
   /// טווח הקרבה ומצב התאמת המילים שבהם נמצאה התוצאה — ראו [SearchMatchPolicy].
   final SearchMatchPolicy matchPolicy;
 
+  /// שורות תוצאה ידועות בעת פתיחת הטאב מהחיפוש הגלובלי.
+  final Set<int>? initialSearchResultLines;
+
   /// תת-מחרוזת להדגשה ממוקדת **רק** בסעיף שצוין. נטענת מקישור עומק
   /// (`otzaria://open/book/<id>?index=<n>&highlight=<text>`) ואינה פותחת חלונית
   /// חיפוש. אם null — אין הדגשה ממוקדת.
@@ -113,6 +116,7 @@ class TextBookTab extends OpenedTab {
     this.searchMode = SearchMode.exact,
     this.searchDistance = 0,
     this.matchPolicy = SearchMatchPolicy.standard,
+    this.initialSearchResultLines,
     this.commentators,
     bool openLeftPane = false,
     bool? splitedView,
@@ -124,9 +128,9 @@ class TextBookTab extends OpenedTab {
     @visibleForTesting TextBookBloc? blocOverride,
     // מהדורה חלופית מקבלת כותרת טאב עם שם המהדורה, להבחנה מהנוסח הממוזג.
   }) : super(
-         book.versionTitle == null
+         book.versionDisplayTitle == null
              ? book.title
-             : '${book.title} (${book.versionTitle})',
+             : '${book.title} (${book.versionDisplayTitle})',
          isPinned: isPinned,
          dedupeKey: dedupeKey,
        ) {
@@ -163,6 +167,7 @@ class TextBookTab extends OpenedTab {
             searchMode: searchMode,
             searchDistance: searchDistance,
             matchPolicy: matchPolicy,
+            initialSearchResultLines: initialSearchResultLines,
             splitedView: effectiveSplitedView,
             showPageShapeView: effectiveShowPageShapeView,
             highlightText: highlightText,

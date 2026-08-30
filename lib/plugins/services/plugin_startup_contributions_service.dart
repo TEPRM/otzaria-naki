@@ -5,11 +5,14 @@ import 'package:otzaria/plugins/declarative/compiler/declarative_toolbar_templat
 import 'package:otzaria/plugins/models/installed_plugin.dart';
 import 'package:otzaria/plugins/models/plugin_startup_contributions.dart';
 import 'package:otzaria/plugins/models/plugin_valid_permissions.dart';
+import 'package:otzaria/plugins/models/plugin_when_condition.dart';
+import 'package:otzaria/plugins/services/plugin_condition_evaluator.dart';
 import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
 import 'package:otzaria/plugins/services/context_menu_registry.dart';
 import 'package:otzaria/plugins/services/plugin_external_editions_registry.dart';
 import 'package:otzaria/plugins/services/plugin_lazy_activation_service.dart';
 import 'package:otzaria/plugins/services/plugin_search_dialog_registry.dart';
+import 'package:otzaria/plugins/services/plugin_shortcut_registry.dart';
 import 'package:otzaria/plugins/services/plugin_toolbar_registry.dart';
 import 'package:otzaria/plugins/storage/plugin_system_database.dart';
 
@@ -26,19 +29,25 @@ class PluginStartupContributionsService {
   PluginStartupContributionsService._()
     : _toolbar = PluginToolbarRegistry.instance,
       _contextMenu = ContextMenuRegistry.instance,
+      _shortcuts = PluginShortcutRegistry.instance,
       _searchDialog = PluginSearchDialogRegistry.instance,
       _externalEditions = PluginExternalEditionsRegistry.instance,
-      _lazyActivation = PluginLazyActivationService.instance;
+      _lazyActivation = PluginLazyActivationService.instance,
+      _conditions = PluginConditionEvaluator.instance;
 
   @visibleForTesting
   PluginStartupContributionsService.forTesting({
     required PluginToolbarRegistry toolbarRegistry,
     required ContextMenuRegistry contextMenuRegistry,
     required PluginLazyActivationService activationService,
+    PluginShortcutRegistry? shortcutRegistry,
     PluginSearchDialogRegistry? searchDialogRegistry,
     PluginExternalEditionsRegistry? externalEditionsRegistry,
-  }) : _toolbar = toolbarRegistry,
+    PluginConditionEvaluator? conditionEvaluator,
+  }) : _conditions = conditionEvaluator ?? PluginConditionEvaluator.instance,
+       _toolbar = toolbarRegistry,
        _contextMenu = contextMenuRegistry,
+       _shortcuts = shortcutRegistry ?? PluginShortcutRegistry.instance,
        _searchDialog =
            searchDialogRegistry ?? PluginSearchDialogRegistry.instance,
        _externalEditions =
@@ -47,9 +56,11 @@ class PluginStartupContributionsService {
 
   final PluginToolbarRegistry _toolbar;
   final ContextMenuRegistry _contextMenu;
+  final PluginShortcutRegistry _shortcuts;
   final PluginSearchDialogRegistry _searchDialog;
   final PluginExternalEditionsRegistry _externalEditions;
   final PluginLazyActivationService _lazyActivation;
+  final PluginConditionEvaluator _conditions;
   Future<void> _syncTail = Future<void>.value();
 
   /// קידומת המפתח של רשומות publishedData שנזרעו מהמניפסט — מבדילה אותן
@@ -62,6 +73,7 @@ class PluginStartupContributionsService {
   /// התוסף) ולצורך reapply אחרי reload של תוסף פיתוח.
   final Map<String, List<Map<String, dynamic>>> _appliedToolbar = {};
   final Map<String, List<Map<String, dynamic>>> _appliedContextMenu = {};
+  final Map<String, List<Map<String, dynamic>>> _appliedShortcuts = {};
   final Map<String, List<Map<String, dynamic>>> _appliedSearchDialog = {};
   final Map<String, List<Map<String, dynamic>>> _appliedExternalEditions = {};
 
@@ -111,16 +123,19 @@ class PluginStartupContributionsService {
         }
         continue;
       }
-      final grants = await repository.getPluginPermissions(plugin.pluginId);
-      final granted = grants
-          .where((g) => g.granted)
-          .map((g) => g.permission)
-          .toSet();
+      final granted = (await repository.getGrantedPermissionNames(
+        plugin.pluginId,
+      )).toSet();
       if (!granted.contains(pluginStartupContributionsPermission)) {
         await _removePlugin(plugin.pluginId, repository);
         continue;
       }
       _managedPlugins.add(plugin.pluginId);
+      await _conditions.registerStorageKeys(
+        plugin.pluginId,
+        _collectStorageKeys(startup),
+        repository,
+      );
 
       final legacyToolbarItems = startup.toolbarItems
           .where(
@@ -156,6 +171,19 @@ class PluginStartupContributionsService {
         );
       }
 
+      // קיצורי מקלדת דקלרטיביים — דורשים את הרשאת `app.shortcuts`.
+      if (startup.shortcuts.isNotEmpty && granted.contains('app.shortcuts')) {
+        _applyItems(
+          plugin.pluginId,
+          startup.shortcuts,
+          applied: _appliedShortcuts,
+          register: (id, item) => _shortcuts.registerPayload(id, item),
+          removeItem: _shortcuts.remove,
+        );
+      } else {
+        _removeApplied(plugin.pluginId, _appliedShortcuts, _shortcuts.remove);
+      }
+
       if (startup.searchDialogItems.isNotEmpty &&
           granted.contains('search.dialog')) {
         _applyItems(
@@ -182,10 +210,8 @@ class PluginStartupContributionsService {
           plugin.pluginId,
           startup.externalEditions,
           applied: _appliedExternalEditions,
-          register: (_, item) => _externalEditions.registerPayload(
-            plugin,
-            item,
-          ),
+          register: (_, item) =>
+              _externalEditions.registerPayload(plugin, item),
           removeItem: _externalEditions.remove,
         );
       } else {
@@ -219,10 +245,13 @@ class PluginStartupContributionsService {
         continue;
       }
       final broadcastTopics = <String>{};
+      final activationConditions = <String, PluginWhenCondition>{};
       var scheduleStartup = false;
       for (final topic in startup.activationEvents) {
+        final condition = startup.activationConditions[topic];
         if (topic == PluginStartupContributions.startupActivationTopic) {
           scheduleStartup = true;
+          if (condition != null) activationConditions[topic] = condition;
           continue;
         }
         // נושא שהוגדרה לו הרשאת subscribe מכובד רק אם ההרשאה הוענקה.
@@ -230,12 +259,14 @@ class PluginStartupContributionsService {
         if (!pluginValidPermissions.contains(permission) ||
             granted.contains(permission)) {
           broadcastTopics.add(topic);
+          if (condition != null) activationConditions[topic] = condition;
         }
       }
       _lazyActivation.syncPlugin(
         plugin.pluginId,
         broadcastTopics: broadcastTopics,
         scheduleStartup: scheduleStartup,
+        activationConditions: activationConditions,
         keepAlive:
             startup.keepAlive &&
             granted.contains(pluginBackgroundKeepAlivePermission),
@@ -263,6 +294,13 @@ class PluginStartupContributionsService {
         (id, i) => _contextMenu.registerPayload(id, i),
       );
     }
+    for (final item in _appliedShortcuts[pluginId] ?? const []) {
+      _tryRegister(
+        pluginId,
+        item,
+        (id, i) => _shortcuts.registerPayload(id, i),
+      );
+    }
     for (final item in _appliedSearchDialog[pluginId] ?? const []) {
       _tryRegister(
         pluginId,
@@ -270,6 +308,29 @@ class PluginStartupContributionsService {
         (id, i) => _searchDialog.registerPayload(id, i),
       );
     }
+  }
+
+  /// מפתחות ה-KV שתנאי ה-`when` של התרומות קוראים. תנאי פגום מדולג כאן —
+  /// הפריט עצמו נדחה בפרסינג של ה-registry.
+  Set<String> _collectStorageKeys(PluginStartupContributions startup) {
+    final keys = <String>{};
+    for (final item in [
+      ...startup.toolbarItems,
+      ...startup.contextMenuItems,
+      ...startup.searchDialogItems,
+    ]) {
+      final raw = item['when'];
+      if (raw == null) continue;
+      try {
+        keys.addAll(PluginWhenCondition.fromJson(raw).storageKeys);
+      } on PluginWhenConditionException {
+        continue;
+      }
+    }
+    for (final condition in startup.activationConditions.values) {
+      keys.addAll(condition.storageKeys);
+    }
+    return keys;
   }
 
   void _applyItems(
@@ -487,6 +548,7 @@ class PluginStartupContributionsService {
     _managedPlugins.remove(pluginId);
     _removeApplied(pluginId, _appliedToolbar, _toolbar.remove);
     _removeApplied(pluginId, _appliedContextMenu, _contextMenu.remove);
+    _removeApplied(pluginId, _appliedShortcuts, _shortcuts.remove);
     _removeApplied(pluginId, _appliedSearchDialog, _searchDialog.remove);
     _removeApplied(
       pluginId,
@@ -494,6 +556,7 @@ class PluginStartupContributionsService {
       _externalEditions.remove,
     );
     _lazyActivation.removePlugin(pluginId);
+    _conditions.removePlugin(pluginId);
     await _removeSeededData(pluginId, repository);
   }
 }

@@ -89,27 +89,63 @@ void main() {
       service.removePlugin('owner');
     });
 
-    test('עמוד המשך ועמוד לפי מזהים אינם מזמינים שמות — אין בהם אינדקס', () async {
-      service.register('hebrewbooks', 'owner');
-      final next = service.search(
-        provider: 'hebrewbooks',
-        query: 'שלום',
-        offset: 20,
-      );
-      await Future<void>.delayed(Duration.zero);
-      expect(request.containsKey('indexTitles'), isFalse);
-      expect(next, throwsStateError);
+    test(
+      'אפשרויות מילה פעילות נשלחות באירוע; מפה ריקה משמיטה את השדה',
+      () async {
+        service.register('hebrewbooks', 'owner');
+        final withOptions = service.search(
+          provider: 'hebrewbooks',
+          query: 'ברכת המזון',
+          options: const {'קידומות דקדוקיות': true},
+          wordOptions: const {
+            'ברכת_0': {'קידומות דקדוקיות': true},
+            'המזון_1': {'קידומות דקדוקיות': true},
+          },
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(request['options'], {'קידומות דקדוקיות': true});
+        expect(request['wordOptions'], {
+          'ברכת_0': {'קידומות דקדוקיות': true},
+          'המזון_1': {'קידומות דקדוקיות': true},
+        });
+        expect(withOptions, throwsStateError);
 
-      final byIds = service.search(
-        provider: 'hebrewbooks',
-        query: 'שלום',
-        ids: const [1, 2],
-      );
-      await Future<void>.delayed(Duration.zero);
-      expect(request.containsKey('indexTitles'), isFalse);
-      expect(byIds, throwsStateError);
-      service.removePlugin('owner');
-    });
+        final withoutOptions = service.search(
+          provider: 'hebrewbooks',
+          query: 'ברכת המזון',
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(request.containsKey('options'), isFalse);
+        expect(request.containsKey('wordOptions'), isFalse);
+        expect(withoutOptions, throwsStateError);
+        service.removePlugin('owner');
+      },
+    );
+
+    test(
+      'עמוד המשך ועמוד לפי מזהים אינם מזמינים שמות — אין בהם אינדקס',
+      () async {
+        service.register('hebrewbooks', 'owner');
+        final next = service.search(
+          provider: 'hebrewbooks',
+          query: 'שלום',
+          offset: 20,
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(request.containsKey('indexTitles'), isFalse);
+        expect(next, throwsStateError);
+
+        final byIds = service.search(
+          provider: 'hebrewbooks',
+          query: 'שלום',
+          ids: const [1, 2],
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(request.containsKey('indexTitles'), isFalse);
+        expect(byIds, throwsStateError);
+        service.removePlugin('owner');
+      },
+    );
 
     test('רק בעל הספק יכול לענות לבקשה', () async {
       service.register('hebrewbooks', 'owner');
@@ -153,6 +189,107 @@ void main() {
 
       await expectation;
       expect(service.hasProvider('hebrewbooks'), isFalse);
+    });
+  });
+
+  group('instance binding', () {
+    late PluginExternalSearchService service;
+    late Map<String, dynamic> request;
+
+    setUp(() {
+      service = PluginExternalSearchService.forTesting(
+        (pluginId, topic, payload, {preferBackground = false}) async {
+          request = payload;
+        },
+      );
+      service.register('hebrewbooks', 'owner');
+    });
+
+    tearDown(() => service.removePlugin('owner'));
+
+    test('הבקשה ננעלת למופע העונה הראשון — מופע אחר נדחה בלי כפולים', () async {
+      final updates = <ExternalSearchPage>[];
+      final search = service.search(
+        provider: 'hebrewbooks',
+        query: 'שלום',
+        onUpdate: updates.add,
+      );
+      await Future<void>.delayed(Duration.zero);
+      final requestId = request['requestId'] as String;
+
+      expect(
+        service.respond(
+          'owner',
+          requestId,
+          results: const [
+            {'title': 'ספר א', 'externalId': 1},
+          ],
+          totalBooks: 1,
+          done: false,
+          instanceId: 'tab-1',
+        ),
+        isTrue,
+      );
+      // אותו requestId ממופע אחר — נדחה, גם במסלול הזרימה.
+      expect(
+        service.respond(
+          'owner',
+          requestId,
+          results: const [
+            {'title': 'ספר כפול', 'externalId': 2},
+          ],
+          totalBooks: 2,
+          done: false,
+          instanceId: 'tab-2',
+        ),
+        isFalse,
+      );
+      expect(updates, hasLength(1));
+
+      expect(
+        service.respond(
+          'owner',
+          requestId,
+          results: const [
+            {'title': 'ספר א', 'externalId': 1},
+          ],
+          totalBooks: 1,
+          instanceId: 'tab-1',
+        ),
+        isTrue,
+      );
+      final page = await search;
+      expect(page.results.single.externalId, 1);
+    });
+
+    test('תשובה בלי instanceId מתקבלת גם אחרי נעילה (תאימות לאחור)', () async {
+      final search = service.search(provider: 'hebrewbooks', query: 'שלום');
+      await Future<void>.delayed(Duration.zero);
+      final requestId = request['requestId'] as String;
+
+      expect(
+        service.respond(
+          'owner',
+          requestId,
+          results: const [],
+          done: false,
+          instanceId: 'tab-1',
+        ),
+        isTrue,
+      );
+      expect(
+        service.respond(
+          'owner',
+          requestId,
+          results: const [
+            {'title': 'ספר', 'externalId': 3},
+          ],
+          totalBooks: 1,
+        ),
+        isTrue,
+      );
+      final page = await search;
+      expect(page.results.single.externalId, 3);
     });
   });
 }

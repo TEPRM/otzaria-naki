@@ -2,6 +2,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:otzaria/core/focus_repository.dart';
 import 'package:otzaria/tools/calendar/utils/calendar_cubit.dart';
 import 'package:otzaria/settings/search/settings_search_field.dart';
@@ -257,8 +258,8 @@ class _MySettingsScreenState extends State<MySettingsScreen> {
     ),
     (
       label: 'כתב',
-      icon: FluentIcons.book_24_regular,
-      iconFilled: FluentIcons.book_24_filled,
+      icon: OtzariaIcons.book_24_regular,
+      iconFilled: OtzariaIcons.book_24_filled,
       pageBuilder: () => const TextSettingsTab(),
     ),
     (
@@ -487,19 +488,18 @@ class _MySettingsScreenState extends State<MySettingsScreen> {
             child: Scaffold(
               backgroundColor: bgColor,
               body: Listener(
-                // [תיקון גלילה] גלגל עכבר מכל מקום (כולל sidebar) גולל את התוכן
+                // גלגלת מכל מקום במסך (כולל ה-sidebar) גוללת את התוכן.
+                // הרישום ב-resolver מוותר לגליל שמתחת לסמן, אם יש כזה —
+                // בלעדיו שניהם היו גוללים ובמהירות כפולה.
                 onPointerSignal: (event) {
-                  if (event is PointerScrollEvent &&
-                      _contentScrollController.hasClients) {
-                    final newOffset =
-                        _contentScrollController.offset + event.scrollDelta.dy;
-                    _contentScrollController.jumpTo(
-                      newOffset.clamp(
-                        0.0,
-                        _contentScrollController.position.maxScrollExtent,
-                      ),
-                    );
-                  }
+                  if (event is! PointerScrollEvent) return;
+                  if (!_contentScrollController.hasClients) return;
+                  GestureBinding.instance.pointerSignalResolver.register(
+                    event,
+                    (_) => _contentScrollController.position.pointerScroll(
+                      event.scrollDelta.dy,
+                    ),
+                  );
                 },
                 child: Row(
                   children: [

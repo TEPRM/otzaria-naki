@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/settings/engine/settings_bloc.dart';
 import 'package:otzaria/settings/l10n/settings_l10n_exports.dart';
 import 'package:otzaria/settings/search/settings_search_models.dart';
 import 'package:otzaria/settings/view/settings_screen.dart';
 import 'package:otzaria/core/messages/settings_messages.dart';
+import 'package:otzaria/core/messages/tools_messages.dart';
 import 'package:otzaria/core/ui_snack.dart';
 import 'package:otzaria/settings/widgets/settings_widgets_exports.dart';
 import 'package:otzaria/widgets/text/otzaria_search_field.dart';
@@ -93,6 +95,20 @@ class CalendarSettingsTab extends StatefulWidget {
         'כבוי',
         'מופעל',
         'לא מופעל',
+      ],
+    ),
+    SettingsSearchEntry(
+      id: 'tools.calendar.test_notification',
+      title: 'בדיקת התראות',
+      subtitle: 'שליחת התראת ניסיון למערכת ההפעלה',
+      tab: SettingsTab.tools,
+      cardId: 'tools.calendar',
+      keywords: [
+        'לוח שנה',
+        'התראות',
+        'בדיקה',
+        'התראת בדיקה',
+        'לא עובד',
       ],
     ),
     SettingsSearchEntry(
@@ -279,6 +295,31 @@ class _CalendarSettingsTabState extends State<CalendarSettingsTab> {
                   },
                 ),
 
+                SettingsActionTile.text(
+                  icon: FluentIcons.alert_badge_24_regular,
+                  title: context.settingsText('בדיקת התראות'),
+                  subtitle: context.settingsText(
+                    'שליחת התראת ניסיון כדי לוודא שהתראות המערכת פועלות',
+                  ),
+                  actions: [
+                    ActionButton.neutral(
+                      text: context.settingsText('שלח התראת בדיקה'),
+                      onPressed: () async {
+                        final sent = await context
+                            .read<CalendarCubit>()
+                            .sendTestNotification();
+                        if (sent) {
+                          UiSnack.show(ToolsMessages.testNotificationSent);
+                        } else {
+                          UiSnack.showError(
+                            ToolsMessages.testNotificationFailed,
+                          );
+                        }
+                      },
+                    ),
+                  ],
+                ),
+
                 // ── לוח שנה גוגל ──
                 SettingsActionTile.switchTile(
                   icon: FluentIcons.calendar_sync_24_regular,
@@ -376,7 +417,7 @@ class _CalendarSettingsTabState extends State<CalendarSettingsTab> {
                                           .length,
                                     },
                                   ),
-                                  icon: FluentIcons.calendar_24_regular,
+                                  icon: OtzariaIcons.calendar_24_regular,
                                   onPressed: () async {
                                     final cubit = context.read<CalendarCubit>();
                                     final calendars = await cubit

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
+import 'package:flutter/widgets.dart' show Text;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otzaria/theme/app_fonts.dart';
 
@@ -12,9 +13,9 @@ Uint8List _bundledFont(String name) =>
 // Helpers — build minimal valid OpenType/TrueType byte sequences
 // ---------------------------------------------------------------------------
 
-/// Builds a minimal SFNT with one cmap format-4 subtable, 2 segments.
+/// Builds a 44-byte cmap table with one format-4 subtable, 2 segments.
 /// [hebrewRange]: segment covers U+0590–05FF (Hebrew); otherwise U+0041–005A (Latin).
-Uint8List _buildSfnt({required bool hebrewRange}) {
+ByteData _buildCmapTable({required bool hebrewRange}) {
   final int sc = hebrewRange ? 0x0590 : 0x0041;
   final int ec = hebrewRange ? 0x05FF : 0x005A;
 
@@ -49,6 +50,12 @@ Uint8List _buildSfnt({required bool hebrewRange}) {
   for (int i = 0; i < 32; i++) {
     cmap.setUint8(12 + i, sub.getUint8(i));
   }
+  return cmap;
+}
+
+/// Builds a minimal SFNT with only the cmap table from [_buildCmapTable].
+Uint8List _buildSfnt({required bool hebrewRange}) {
+  final cmap = _buildCmapTable(hebrewRange: hebrewRange);
 
   // SFNT offset table (12) + 1 table record (16) = 28; cmap starts at 28
   const int cmapOffset = 28;
@@ -68,6 +75,68 @@ Uint8List _buildSfnt({required bool hebrewRange}) {
     ..setUint32(24, 44); // length
   for (int i = 0; i < 44; i++) {
     sfnt.setUint8(cmapOffset + i, cmap.getUint8(i));
+  }
+  return sfnt.buffer.asUint8List();
+}
+
+/// SFNT עברי מינימלי עם טבלת name מרשומות (platformId, nameId, value) —
+/// לשחזור גופנים שבהם רשומות הפלטפורמות חלוקות על שם המשפחה.
+Uint8List _buildHebrewSfntWithName(List<(int, int, String)> records) {
+  final cmap = _buildCmapTable(hebrewRange: true);
+
+  final strings = <int>[];
+  final recData = ByteData(records.length * 12);
+  for (int i = 0; i < records.length; i++) {
+    final (pid, nameId, value) = records[i];
+    // platform 1 = בייט בודד לתו; platform 0/3 = UTF-16BE.
+    final bytes = pid == 1
+        ? value.codeUnits
+        : value.codeUnits.expand((u) => [u >> 8, u & 0xFF]).toList();
+    recData
+      ..setUint16(i * 12, pid)
+      ..setUint16(i * 12 + 2, pid == 1 ? 0 : 1) // encodingID
+      ..setUint16(i * 12 + 4, pid == 3 ? 0x409 : 0) // languageID
+      ..setUint16(i * 12 + 6, nameId)
+      ..setUint16(i * 12 + 8, bytes.length)
+      ..setUint16(i * 12 + 10, strings.length);
+    strings.addAll(bytes);
+  }
+  final nameLen = 6 + records.length * 12 + strings.length;
+  final name = ByteData(nameLen)
+    ..setUint16(0, 0) // format
+    ..setUint16(2, records.length) // count
+    ..setUint16(4, 6 + records.length * 12); // stringOffset
+  for (int j = 0; j < records.length * 12; j++) {
+    name.setUint8(6 + j, recData.getUint8(j));
+  }
+  for (int j = 0; j < strings.length; j++) {
+    name.setUint8(6 + records.length * 12 + j, strings[j]);
+  }
+
+  // offset table (12) + 2 table records (32), ואז cmap ו-name ברצף.
+  const int cmapOffset = 12 + 2 * 16;
+  final int nameOffset = cmapOffset + 44;
+  final sfnt = ByteData(nameOffset + nameLen)
+    ..setUint32(0, 0x00010000) // sfVersion
+    ..setUint16(4, 2) // numTables
+    ..setUint16(6, 32)
+    ..setUint16(8, 1)
+    ..setUint16(10, 0);
+  void tableRecord(int at, String tag, int offset, int length) {
+    for (int j = 0; j < 4; j++) {
+      sfnt.setUint8(at + j, tag.codeUnitAt(j));
+    }
+    sfnt.setUint32(at + 8, offset);
+    sfnt.setUint32(at + 12, length);
+  }
+
+  tableRecord(12, 'cmap', cmapOffset, 44);
+  tableRecord(28, 'name', nameOffset, nameLen);
+  for (int j = 0; j < 44; j++) {
+    sfnt.setUint8(cmapOffset + j, cmap.getUint8(j));
+  }
+  for (int j = 0; j < nameLen; j++) {
+    sfnt.setUint8(nameOffset + j, name.getUint8(j));
   }
   return sfnt.buffer.asUint8List();
 }
@@ -440,6 +509,25 @@ void main() {
       );
     });
 
+    // שחזור גופני "תהילה מדיום"/"ספרדי מדיום" מהשטח: רשומת פלטפורמה 0 נושאת
+    // את שם הבסיס בלבד, ורק רשומת Windows מבחינה בין המשפחות.
+    test('nameID 1 של Windows גובר על רשומת פלטפורמה 0 עם שם הבסיס', () {
+      final medium = _buildHebrewSfntWithName([
+        (0, 1, 'Tehila'),
+        (1, 1, 'TehilaMedium'),
+        (3, 1, 'TehilaMedium'),
+      ]);
+      expect(AppFonts.debugFontFamilyName(medium), 'TehilaMedium');
+    });
+
+    test('nameID 16 עדיין גובר על nameID 1, גם כשרק ל-1 יש רשומת Windows', () {
+      final face = _buildHebrewSfntWithName([
+        (0, 16, 'Typographic'),
+        (3, 1, 'Basic'),
+      ]);
+      expect(AppFonts.debugFontFamilyName(face), 'Typographic');
+    });
+
     test('נתונים פגומים → ערכי ברירת מחדל', () {
       final bad = Uint8List(4);
       expect(AppFonts.debugFontFamilyName(bad), '');
@@ -505,6 +593,173 @@ void main() {
       expect(AppFonts.debugIsPlausibleBoldBasename('arial', 'ariblk'), isFalse);
       expect(AppFonts.debugIsPlausibleBoldBasename('arial', 'arial'), isFalse);
       expect(AppFonts.debugIsPlausibleBoldBasename('', 'anything'), isFalse);
+    });
+  });
+
+  group('קיבוץ גופני מערכת לפי משפחה (debugBuildScan)', () {
+    test('face רגיל + בולד מאותה משפחה → כניסה אחת עם boldPath', () {
+      final scan = AppFonts.debugBuildScan([
+        MapEntry(
+          r'C:\fonts\frank-medium.ttf',
+          _bundledFont('FrankRuehlCLM-Medium.ttf'),
+        ),
+        MapEntry(
+          r'C:\fonts\frank-bold.ttf',
+          _bundledFont('FrankRuehlCLM-Bold.ttf'),
+        ),
+      ]);
+
+      expect(scan.fonts, hasLength(1));
+      expect(scan.fonts.single.value, 'Frank Ruehl CLM');
+      expect(scan.fonts.single.label, 'Frank Ruehl CLM');
+      final family = scan.families['Frank Ruehl CLM']!;
+      expect(family.regularPath, contains('medium'));
+      expect(family.boldPath, contains('bold'));
+    });
+
+    test('משפחה שקיימת רק בבולד עדיין מופיעה, בלי boldPath נפרד', () {
+      final scan = AppFonts.debugBuildScan([
+        MapEntry(
+          r'C:\fonts\frank-bold.ttf',
+          _bundledFont('FrankRuehlCLM-Bold.ttf'),
+        ),
+      ]);
+
+      expect(scan.fonts, hasLength(1));
+      final family = scan.families['Frank Ruehl CLM']!;
+      expect(family.regularPath, contains('bold'));
+      expect(family.boldPath, isNull);
+    });
+
+    test('שם קובץ שרירותי: השם ברשימה הוא המשפחה, והכינוי ממופה אליה', () {
+      final scan = AppFonts.debugBuildScan([
+        MapEntry(
+          r'C:\fonts\בדיקה.ttf',
+          _bundledFont('FrankRuehlCLM-Medium.ttf'),
+        ),
+      ]);
+
+      expect(scan.fonts.single.value, 'Frank Ruehl CLM');
+      expect(scan.aliases['בדיקה'], 'Frank Ruehl CLM');
+    });
+
+    test('גופן משתנה מסומן hasWeightAxis ובלי face בולד נפרד', () {
+      final scan = AppFonts.debugBuildScan([
+        MapEntry(
+          r'C:\fonts\rubik.ttf',
+          _bundledFont('Rubik-VariableFont_wght.ttf'),
+        ),
+        MapEntry(
+          r'C:\fonts\frank-bold.ttf',
+          _bundledFont('FrankRuehlCLM-Bold.ttf'),
+        ),
+      ]);
+
+      final rubik = scan.families.values.firstWhere(
+        (f) => f.regularPath.contains('rubik'),
+      );
+      expect(rubik.hasWeightAxis, isTrue);
+      expect(rubik.boldPath, isNull);
+    });
+
+    test('Regular ו-Medium עם שמות Windows שונים → שתי משפחות נפרדות', () {
+      final regular = _buildHebrewSfntWithName([
+        (0, 1, 'Tehila'),
+        (3, 1, 'Tehila'),
+      ]);
+      final medium = _buildHebrewSfntWithName([
+        (0, 1, 'Tehila'),
+        (3, 1, 'TehilaMedium'),
+      ]);
+      // המדיום נסרק ראשון — הסדר שבו הרגיל נעלם לפני התיקון.
+      final scan = AppFonts.debugBuildScan([
+        MapEntry(r'C:\fonts\tehila-medium.ttf', medium),
+        MapEntry(r'C:\fonts\tehila-regular.ttf', regular),
+      ]);
+
+      expect(
+        scan.fonts.map((f) => f.value),
+        unorderedEquals(['Tehila', 'TehilaMedium']),
+      );
+      expect(scan.families['Tehila']!.regularPath, contains('regular'));
+      expect(scan.families['TehilaMedium']!.regularPath, contains('medium'));
+    });
+
+    test('גופן ללא עברית אינו נכלל', () {
+      final scan = AppFonts.debugBuildScan([
+        MapEntry(r'C:\fonts\latin.ttf', _buildSfnt(hebrewRange: false)),
+      ]);
+
+      expect(scan.fonts, isEmpty);
+    });
+
+    test('גופן עברי בלי טבלת name נופל לשם הקובץ', () {
+      final scan = AppFonts.debugBuildScan([
+        MapEntry(r'C:\fonts\noname.ttf', _buildSfnt(hebrewRange: true)),
+      ]);
+
+      expect(scan.fonts.single.value, 'noname');
+    });
+
+    test('הרשימה ממוינת לפי שם', () {
+      final scan = AppFonts.debugBuildScan([
+        MapEntry(
+          r'C:\fonts\zzz.ttf',
+          _bundledFont('ShofarRegular.ttf'),
+        ),
+        MapEntry(
+          r'C:\fonts\aaa.ttf',
+          _bundledFont('FrankRuehlCLM-Medium.ttf'),
+        ),
+      ]);
+
+      final labels = scan.fonts.map((f) => f.label).toList();
+      expect(labels, [...labels]..sort((a, b) => a.compareTo(b)));
+    });
+  });
+
+  group('תאימות לאחור לערך שמור ישן (שם קובץ)', () {
+    tearDown(AppFonts.debugResetSystemFontsCache);
+
+    test('legacySystemFontDisplayName מחזיר את שם המשפחה, ללא תלות רישיות', () {
+      AppFonts.debugStoreScan(
+        AppFonts.debugBuildScan([
+          MapEntry(
+            r'C:\fonts\gfrank.ttf',
+            _bundledFont('FrankRuehlCLM-Medium.ttf'),
+          ),
+        ]),
+      );
+
+      expect(
+        AppFonts.legacySystemFontDisplayName('GFrank'),
+        'Frank Ruehl CLM',
+      );
+      expect(AppFonts.legacySystemFontDisplayName('unknown'), isNull);
+    });
+
+    test('buildDropdownItems מציג ערך ישן בשם המשפחה ולא כ"לא זמין"', () {
+      AppFonts.debugStoreScan(
+        AppFonts.debugBuildScan([
+          MapEntry(
+            r'C:\fonts\gfrank.ttf',
+            _bundledFont('FrankRuehlCLM-Medium.ttf'),
+          ),
+        ]),
+      );
+
+      final items = AppFonts.buildDropdownItems(selectedValue: 'gfrank');
+      final first = items.first.child as Text;
+      expect(items.first.value, 'gfrank');
+      expect(first.data, 'Frank Ruehl CLM');
+    });
+
+    test('ערך לא מוכר עדיין מסומן "לא זמין במחשב זה"', () {
+      AppFonts.debugStoreScan(AppFonts.debugBuildScan(const []));
+
+      final items = AppFonts.buildDropdownItems(selectedValue: 'NoSuchFont');
+      final first = items.first.child as Text;
+      expect(first.data, contains('לא זמין במחשב זה'));
     });
   });
 

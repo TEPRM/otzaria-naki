@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:otzaria/theme/app_tokens.dart';
 
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -279,7 +280,13 @@ class _PersonalNoteEditorBodyState extends State<PersonalNoteEditorBody> {
               ),
               const Divider(height: 1),
               SizedBox(
-                height: 220,
+                // במסך נמוך או עם מקלדת פתוחה 220px קבועים דוחקים את כפתור
+                // השמירה מחוץ לתצוגה — מצמצמים לפי הגובה הפנוי בפועל.
+                height: () {
+                  final media = MediaQuery.of(context);
+                  final available = media.size.height - media.viewInsets.bottom;
+                  return (available * 0.35).clamp(120.0, 220.0);
+                }(),
                 // RawGestureDetector תופס מחוות גרירה אנכית באזור העורך
                 // לפני שה-ListView ההורה (פאנל ההערות) רואה אותן.
                 // אחרת כשהמשתמש גורר אלכסונית כדי לסמן יותר ממילה,
@@ -508,13 +515,13 @@ class _PersonalNoteToolbar extends StatelessWidget {
         ),
         IconButton(
           tooltip: 'רשימה',
-          icon: const Icon(FluentIcons.text_bullet_list_24_regular, size: 18),
+          icon: const Icon(OtzariaIcons.text_bullet_list_24_regular, size: 18),
           onPressed: () => _toggleAttribute(quill.Attribute.ul),
         ),
         IconButton(
           tooltip: 'רשימה ממוספרת',
           icon: const Icon(
-            FluentIcons.text_number_list_rtl_24_regular,
+            OtzariaIcons.text_number_list_24_regular,
             size: 18,
           ),
           onPressed: () => _toggleAttribute(quill.Attribute.ol),

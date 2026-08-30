@@ -170,6 +170,11 @@ void main() {
       );
     });
 
+    test('normalizeShortcut מאחד ctrl ו-meta ל-Cmd יחיד', () {
+      expect(ShortcutHelper.normalizeShortcut('meta+l'), 'ctrl+l');
+      expect(ShortcutHelper.normalizeShortcut('ctrl+meta+l'), 'ctrl+l');
+    });
+
     test('formatKeysToShortcut: לחיצת Meta נשמרת בפורמט הקנוני "ctrl+X"', () {
       final shortcut = ShortcutHelper.formatKeysToShortcut({
         LogicalKeyboardKey.meta,
@@ -326,6 +331,20 @@ void main() {
       expect(ShortcutHelper.isRecognized('ctrl'), isFalse);
       expect(ShortcutHelper.isRecognized('ctrl+shift'), isFalse);
       expect(ShortcutHelper.isRecognized('ctrl+shift+'), isFalse);
+    });
+
+    test('קיצור עם modifier כפול או יותר ממקש ראשי אינו מוכר', () {
+      for (final shortcut in ['ctrl+ctrl+l', 'ctrl+l+x', 'ctrl+control+l']) {
+        expect(ShortcutHelper.isRecognized(shortcut), isFalse);
+      }
+    });
+
+    test('normalizeShortcut מאחד אותיות גדולות וסדר modifiers', () {
+      expect(
+        ShortcutHelper.normalizeShortcut('SHIFT+CTRL+L'),
+        'ctrl+shift+l',
+      );
+      expect(ShortcutHelper.normalizeShortcut('CONTROL+L'), 'ctrl+l');
     });
 
     test('קיצור עם שם מקש שאינו ב-KeyMap אינו מוכר', () {
@@ -893,6 +912,51 @@ void main() {
 
       expect(altActivator.accepts(arrowUp, keyboard), isFalse);
       expect(ctrlAltActivator.accepts(arrowUp, keyboard), isTrue);
+    });
+  });
+
+  group('ShortcutHelper.isPlainCtrlOrCmdPressed', () {
+    testWidgets('Ctrl לבדו נחשב לחוץ', (tester) async {
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      expect(ShortcutHelper.isPlainCtrlOrCmdPressed, isTrue);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      expect(ShortcutHelper.isPlainCtrlOrCmdPressed, isFalse);
+    });
+
+    testWidgets('AltGr של Windows (Ctrl סינתטי + AltRight) נשלל', (
+      tester,
+    ) async {
+      ShortcutHelper.isWindowsForTesting = true;
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(
+        LogicalKeyboardKey.altRight,
+        physicalKey: PhysicalKeyboardKey.altRight,
+      );
+      expect(ShortcutHelper.isPlainCtrlOrCmdPressed, isFalse);
+
+      await tester.sendKeyUpEvent(
+        LogicalKeyboardKey.altRight,
+        physicalKey: PhysicalKeyboardKey.altRight,
+      );
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    });
+
+    testWidgets('Ctrl+Alt שמאלי נשלל אף הוא', (tester) async {
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+      expect(ShortcutHelper.isPlainCtrlOrCmdPressed, isFalse);
+
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    });
+
+    testWidgets('ב-Mac גם Cmd נחשב', (tester) async {
+      ShortcutHelper.isMacForTesting = true;
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+      expect(ShortcutHelper.isPlainCtrlOrCmdPressed, isTrue);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
     });
   });
 }

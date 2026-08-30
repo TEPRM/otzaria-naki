@@ -16,10 +16,7 @@ import 'package:otzaria/search/view/search_navigation_tree.dart';
 import 'package:otzaria/services/commentary_service.dart';
 import 'package:otzaria/settings/settings_exports.dart';
 import 'package:otzaria/tabs/models/searching_tab.dart';
-import 'package:otzaria/widgets/text/otzaria_search_field.dart';
-
-// Constants
-const double _kMinQueryLength = 2;
+import 'package:otzaria/widgets/navigation/nav_panel_search.dart';
 
 class SearchFacetFiltering extends StatefulWidget {
   final SearchingTab tab;
@@ -80,12 +77,11 @@ class _SearchFacetFilteringState extends State<SearchFacetFiltering>
     );
   }
 
+  /// כל שינוי בשדה מפורסם ל-bloc, גם מחיקה לתו בודד: העץ נבנה מחדש רק
+  /// בתגובה ל-emit, ולכן דילוג על אורך שאינו מסנן היה משאיר אותו מסונן
+  /// לפי הטקסט הקודם.
   void _onQueryChanged(String query) {
-    if (query.length >= _kMinQueryLength) {
-      context.read<SearchBloc>().add(UpdateFilterQuery(query));
-    } else if (query.isEmpty) {
-      context.read<SearchBloc>().add(ClearFilter());
-    }
+    context.read<SearchBloc>().add(UpdateFilterQuery(query));
   }
 
   /// ב-Mac המוסכמה לריבוי בחירה היא Cmd+Click, בשאר הפלטפורמות Ctrl+Click.
@@ -216,19 +212,14 @@ class _SearchFacetFilteringState extends State<SearchFacetFiltering>
     );
   }
 
-  Widget _buildSearchField() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-      child: OtzariaSearchField(
-        controller: _filterQuery,
-        hintText: 'איתור ספר…',
-        slim: true,
-        onChanged: _onQueryChanged,
-        onClear: _clearFilter,
-        trailingActions: [_buildDimensionFilterButton()],
-      ),
-    );
-  }
+  /// פעולת החיפוש של החלונית — מצוירת בסרגל שמעליה ולא כאן.
+  NavPanelSearchDelegate _searchDelegate() => NavPanelSearchDelegate(
+    controller: _filterQuery,
+    hintText: 'איתור ספר…',
+    onChanged: _onQueryChanged,
+    onClear: _clearFilter,
+    trailingActions: [_buildDimensionFilterButton()],
+  );
 
   /// כפתור סינון בשדה — פותח תפריט שטוח (בלי תתי-תפריטים) של מאפייני הספר:
   /// ספרי יסוד ותקופות. סימון מרובה נשמר פתוח (closeOnActivate: false).
@@ -403,13 +394,18 @@ class _SearchFacetFilteringState extends State<SearchFacetFiltering>
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    return Column(
-      children: [
-        _buildSearchField(),
-        Expanded(
-          child: _buildFacetTree(),
-        ),
-      ],
+    final delegate = _searchDelegate();
+    return NavPanelSearchPublisher(
+      delegate: delegate,
+      child: Column(
+        children: [
+          if (!NavPanelSearch.isHoisted(context))
+            NavPanelLocalSearchField(delegate: delegate),
+          Expanded(
+            child: _buildFacetTree(),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -4,6 +4,7 @@ abstract class PluginMessages {
 
   // ===== התקנה והסרה =====
   static const String pluginInstalledSuccess = 'התוסף הותקן בהצלחה';
+  static const String pluginUpdatedSuccess = 'התוסף עודכן בהצלחה';
   static const String pluginAlreadyInstalledSameVersion =
       'תוסף זה כבר מותקן אצלך, באותה הגרסה. '
       'להתקנה מחדש השתמש בקישור עם overwrite=true.';
@@ -78,6 +79,7 @@ abstract class PluginMessages {
       'כבר קיים תוסף מותקן (רגיל) עם אותו מזהה. מחק או שנה id.';
   static const String devPluginReloaded = 'תוסף פיתוח נטען מחדש';
   static const String devPluginInstalledSuccess = 'תוסף פיתוח הותקן בהצלחה';
+  static const String devPluginUpdatedSuccess = 'תוסף פיתוח עודכן בהצלחה';
   static const String localhostPluginReloaded = 'תוסף localhost נטען מחדש';
 
   static String loadDevPluginError(Object error) =>
@@ -92,7 +94,21 @@ abstract class PluginMessages {
   static String detachDevPluginError(Object error) =>
       'שגיאה בניתוק התוסף: $error';
 
+  // ===== תרומות דקלרטיביות =====
+  /// הודעה שתוסף דקלרטיבי ביקש להציג (`ui.showSnack`). הייחוס לתוסף חובה —
+  /// בלעדיו הודעת תוסף נראית כהודעת מערכת של אוצריא.
+  static String declarativeSnack(String message, String pluginName) =>
+      pluginName.trim().isEmpty ? message : '$message · מאת $pluginName';
+
   // ===== WebView2 =====
   static const String downloadLinkOpenFailed = 'לא ניתן לפתוח את קישור ההורדה';
   static const String fileDownloadStarted = 'הורדת הקובץ החלה';
+
+  // ===== פעולות תפריט הקשר =====
+  static const String selectTextForContextMenuAction =
+      'סמנו טקסט בספר כדי להפעיל פעולה זו';
+  static const String contextMenuActionUnavailableHere =
+      'הפעולה אינה זמינה במסך הנוכחי';
+  static const String contextMenuActionUnavailableForSelection =
+      'הפעולה אינה זמינה עבור הטקסט המסומן';
 }

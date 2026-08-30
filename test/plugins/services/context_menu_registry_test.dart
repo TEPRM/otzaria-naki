@@ -47,6 +47,99 @@ void main() {
       expect(item.children.single.onColorClickEvent, 'marker.colorSelected');
     });
 
+    test('מקבל את ההקשר reader-highlight (לחיצה על הדגשה ללא בחירה)', () {
+      registry.registerPayload('marker', {
+        'id': 'marker-remove-highlight',
+        'title': 'הסר סימון',
+        'contexts': ['reader-highlight'],
+      });
+
+      final item = registry.getAll().single.$2;
+      expect(item.contexts, ['reader-highlight']);
+    });
+
+    group('action — פעולת host דקלרטיבית', () {
+      Map<String, dynamic> actionItem({
+        Map<String, dynamic> extra = const {},
+      }) => {
+        'id': 'save-book',
+        'title': 'שמור לרשימה',
+        'action': {
+          'type': 'storage.set',
+          'args': {
+            'key': 'savedBooks',
+            'value': {r'$selection': 'id'},
+          },
+        },
+        ...extra,
+      };
+
+      test('פריט עם action תקין נרשם ונשמר ב-toJson', () {
+        registry.registerPayload('marker', actionItem());
+
+        final item = registry.getAll().single.$2;
+        expect(item.action, isNotNull);
+        expect(item.toJson()['action'], item.action);
+      });
+
+      test('action מותר גם על ילד של submenu', () {
+        registry.registerPayload('marker', {
+          'id': 'menu',
+          'type': 'submenu',
+          'title': 'רשימות',
+          'children': [actionItem()],
+        });
+
+        expect(registry.getAll().single.$2.children.single.action, isNotNull);
+      });
+
+      test('action על submenu עצמו נדחה', () {
+        expect(
+          () => registry.registerPayload('marker', {
+            'id': 'menu',
+            'type': 'submenu',
+            'title': 'רשימות',
+            'children': [
+              {'id': 'child', 'title': 'ילד'},
+            ],
+            'action': actionItem()['action'],
+          }),
+          throwsA(isA<PluginContextMenuException>()),
+        );
+      });
+
+      test('שילוב action עם onClickEvent או openPlugin נדחה', () {
+        expect(
+          () => registry.registerPayload(
+            'marker',
+            actionItem(extra: {'onClickEvent': 'my.event'}),
+          ),
+          throwsA(isA<PluginContextMenuException>()),
+        );
+        expect(
+          () => registry.registerPayload(
+            'marker',
+            actionItem(extra: {'openPlugin': true}),
+          ),
+          throwsA(isA<PluginContextMenuException>()),
+        );
+      });
+
+      test('תבנית פגומה נדחית ברישום', () {
+        expect(
+          () => registry.registerPayload('marker', {
+            'id': 'bad',
+            'title': 'פגום',
+            'action': {
+              'type': 'storage.get',
+              'args': {'key': 'k'},
+            },
+          }),
+          throwsA(isA<PluginContextMenuException>()),
+        );
+      });
+    });
+
     test('updates an existing item without changing its id', () {
       registry.registerPayload('marker', {
         'id': 'marker-colors',
@@ -68,6 +161,44 @@ void main() {
       expect(updated.title, 'Choose color');
       expect(updated.colors.single.id, 'green');
       expect(registry.getAll(), hasLength(1));
+    });
+
+    test('findItem מוצא פריט עליון ופריט בתת-תפריט', () {
+      registry.registerPayload('marker', {
+        'id': 'menu',
+        'type': 'submenu',
+        'title': 'Menu',
+        'children': [
+          {'id': 'child-action', 'title': 'Child'},
+        ],
+      });
+      registry.registerPayload('marker', {'id': 'top-action', 'title': 'Top'});
+
+      expect(registry.findItem('marker', 'top-action')?.label, 'Top');
+      expect(registry.findItem('marker', 'child-action')?.label, 'Child');
+      expect(registry.findItem('marker', 'missing'), isNull);
+      expect(registry.findItem('other', 'top-action'), isNull);
+    });
+
+    test('findItem מוצא גם פריט בעומק שני', () {
+      registry.registerPayload('marker', {
+        'id': 'root',
+        'type': 'submenu',
+        'title': 'Root',
+        'children': [
+          {
+            'id': 'nested',
+            'type': 'submenu',
+            'title': 'Nested',
+            'children': [
+              {'id': 'target', 'title': 'Target'},
+            ],
+          },
+        ],
+      });
+
+      expect(registry.findItem('marker', 'target')?.label, 'Target');
+      expect(registry.isItemVisible('marker', 'target'), isTrue);
     });
 
     test('keeps plugin ownership isolated', () {
@@ -170,10 +301,9 @@ void main() {
         ],
       });
 
-      expect(
-        registry.getAll().single.$2.contexts,
-        ['reader-page-shape-selection'],
-      );
+      expect(registry.getAll().single.$2.contexts, [
+        'reader-page-shape-selection',
+      ]);
     });
 
     test('accepts multiple contexts and makes children inherit them', () {
@@ -181,10 +311,7 @@ void main() {
         'id': 'marker-menu',
         'type': 'submenu',
         'title': 'Marker',
-        'contexts': [
-          'reader-selection',
-          'reader-page-shape-selection',
-        ],
+        'contexts': ['reader-selection', 'reader-page-shape-selection'],
         'children': [
           {'id': 'inherited', 'title': 'Inherited'},
           {
@@ -198,10 +325,7 @@ void main() {
       final item = registry.getAll().single.$2;
       expect(item.contexts, hasLength(2));
       expect(item.children.first.contexts, item.contexts);
-      expect(
-        item.children.last.contexts,
-        ['reader-page-shape-selection'],
-      );
+      expect(item.children.last.contexts, ['reader-page-shape-selection']);
     });
 
     test('rejects empty or duplicate contexts', () {
@@ -257,12 +381,9 @@ void main() {
       expect(item.showWhenContainsAny, ['רש"י', 'תוספות']);
       expect(item.isVisibleForSelection('דברי רש"י כאן'), isTrue);
       expect(item.isVisibleForSelection('טקסט אחר'), isFalse);
-      expect(
-        item.toJson()['showWhen'],
-        {
-          'selectionContainsAny': ['רש"י', 'תוספות'],
-        },
-      );
+      expect(item.toJson()['showWhen'], {
+        'selectionContainsAny': ['רש"י', 'תוספות'],
+      });
     });
 
     test('rejects invalid showWhen payloads', () {
@@ -294,9 +415,7 @@ void main() {
         () => registry.registerPayload('dict', {
           'id': 'bad3',
           'title': 'Bad',
-          'showWhen': {
-            'selectionContainsAny': List.filled(51, 'מ'),
-          },
+          'showWhen': {'selectionContainsAny': List.filled(51, 'מ')},
         }),
         throwsInvalidParams(),
       );

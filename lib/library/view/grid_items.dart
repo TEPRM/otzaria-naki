@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:otzaria/library/models/library.dart';
 import 'package:otzaria/models/books.dart';
 import 'package:otzaria/data/data_providers/file_system_data_provider.dart';
@@ -15,6 +17,7 @@ import 'package:otzaria/theme/theme_exports.dart';
 import 'package:otzaria/text_book/view/book_source_dialog.dart';
 import 'package:otzaria/widgets/dialogs/dialogs_exports.dart';
 import 'package:otzaria/widgets/layout/app_card.dart';
+import 'package:otzaria/utils/ui/book_format_icon.dart';
 
 /// מספר התווים המרבי בתיאור קצר המוצג בכרטיס ספר, כולל שלוש הנקודות.
 const kBookCardDescriptionMaxCharacters = 120;
@@ -64,17 +67,8 @@ Widget _buildBookIconChild(Book book, ColorScheme cs, double iconSize) {
       fit: BoxFit.contain,
     );
   }
-  if (book is PdfBook || book.fileType == 'pdf') {
-    return Icon(
-      FluentIcons.document_pdf_24_regular,
-      color: cs.onSecondaryContainer,
-      size: iconSize,
-    );
-  }
   return Icon(
-    book.fileType == 'docx'
-        ? FluentIcons.document_edit_24_regular
-        : FluentIcons.document_text_24_regular,
+    bookFormatIcon(book),
     color: cs.onSecondaryContainer,
     size: iconSize,
   );
@@ -637,33 +631,11 @@ class _BookGridActionColumn extends StatelessWidget {
                   minWidth: 28,
                   minHeight: 28,
                 ),
-                onSelected: (value) {
-                  if (value == 'delete') {
-                    _showDeleteBookDialog(context, book, onBookDeleted);
-                  } else if (value == 'versions') {
-                    showBookVersionsDialog(context, book as TextBook);
-                  }
-                },
-                entries: [
-                  if (showVersions)
-                    const AppMenuEntry<String>(
-                      value: 'versions',
-                      label: 'גרסאות',
-                      icon: FluentIcons.stack_24_regular,
-                    ),
-                  if (canDelete)
-                    const AppMenuEntry<String>(
-                      value: 'delete',
-                      label: 'מחק מהספרייה',
-                      icon: FluentIcons.delete_24_regular,
-                      isDestructive: true,
-                    ),
-                ],
-              ),
-            );
-          },
-        ),
-      ],
+              );
+            },
+          ),
+        ],
+      ),
     );
   }
 }
@@ -677,10 +649,95 @@ class _BookGridActionColumn extends StatelessWidget {
 /// ריווח אחיד בין כרטיסי הרשת — משותף לתצוגת הספרייה ולתוצאות החיפוש.
 const double kLibraryGridSpacing = 14;
 
+/// גובה מינימלי לכרטיס ספר בתצוגה צרה — מספיק לכותרת (עד 2 שורות), למחבר
+/// ולטור האייקונים בלי גלישה.
+const double kNarrowGridCardMinHeight = 112;
+
+/// השוליים האופקיים של רשת הספרייה — משמשים גם בחישוב רוחב התא בפועל.
+const double _kGridHorizontalPadding = 30;
+
+/// ניווט חיצים בין כרטיסי הרשת בלבד — הפוקוס עובר ברצף בין הכרטיסים
+/// ולא בורח לכפתורי הסרגל/הצד (המסלול הכיווני של Flutter אינו תחום לרשת).
+///
+/// חיצי צד נעים ברצף על פני כל הפריטים (גם בין שורות); מעלה/מטה נעים בטור.
+/// [onExitTop] נקרא בחץ-מעלה מהשורה הראשונה (חזרה לשדה החיפוש).
+class LibraryGridKeyNavigator extends StatelessWidget {
+  final int crossAxisCount;
+  final VoidCallback? onExitTop;
+  final Widget child;
+
+  const LibraryGridKeyNavigator({
+    super.key,
+    required this.crossAxisCount,
+    this.onExitTop,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: (node, event) => _handleKey(context, node, event),
+      child: child,
+    );
+  }
+
+  KeyEventResult _handleKey(
+    BuildContext context,
+    FocusNode node,
+    KeyEvent event,
+  ) {
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+    final isRtl = Directionality.of(context) == TextDirection.rtl;
+    final int? delta = switch (event.logicalKey) {
+      LogicalKeyboardKey.arrowLeft => isRtl ? 1 : -1,
+      LogicalKeyboardKey.arrowRight => isRtl ? -1 : 1,
+      LogicalKeyboardKey.arrowDown => crossAxisCount,
+      LogicalKeyboardKey.arrowUp => -crossAxisCount,
+      _ => null,
+    };
+    if (delta == null) return KeyEventResult.ignored;
+
+    final cards = node.traversalDescendants.toList();
+    final primary = FocusManager.instance.primaryFocus;
+    final index = primary == null ? -1 : cards.indexOf(primary);
+    if (index < 0) return KeyEventResult.ignored;
+
+    var target = index + delta;
+    if (delta.abs() == 1) target = target.clamp(0, cards.length - 1);
+    if (target < 0) {
+      onExitTop?.call();
+      return KeyEventResult.handled;
+    }
+    if (target == index || target >= cards.length) {
+      return KeyEventResult.handled;
+    }
+    focusCard(cards[target]);
+    return KeyEventResult.handled;
+  }
+
+  /// ממקד כרטיס וגולל אותו לתצוגה (requestFocus לבדו אינו גולל).
+  static void focusCard(FocusNode target) {
+    target.requestFocus();
+    final targetContext = target.context;
+    if (targetContext == null) return;
+    Scrollable.ensureVisible(
+      targetContext,
+      alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+    );
+    Scrollable.ensureVisible(
+      targetContext,
+      alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtStart,
+    );
+  }
+}
+
 class MyGridView extends StatelessWidget {
   final List<Widget> items;
+  final VoidCallback? onExitTop;
 
-  const MyGridView({super.key, required this.items});
+  const MyGridView({super.key, required this.items, this.onExitTop});
 
   @override
   Widget build(BuildContext context) {
@@ -698,29 +755,48 @@ class MyGridView extends StatelessWidget {
         final textAdjustment = textScale <= 1.0
             ? 1.0
             : (1.0 / (1.0 + ((textScale - 1.0) * 0.65)));
-        final childAspectRatio = (baseRatio * textAdjustment).clamp(1.45, 2.15);
+        final crossAxisCount = max(1, min(width ~/ 250, 5));
 
-        return FocusTraversalGroup(
-          policy: ReadingOrderTraversalPolicy(),
-          child: Padding(
-            // top: 8 או מרווח מתאים; horizontal: 45 או רוחב אף
-            padding: const EdgeInsets.only(
-              top: 8,
-              left: 30,
-              right: 30,
-              bottom: 8,
-            ),
-            child: GridView.builder(
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: max(1, min(constraints.maxWidth ~/ 250, 5)),
-                childAspectRatio: childAspectRatio,
-                crossAxisSpacing: kLibraryGridSpacing,
-                mainAxisSpacing: kLibraryGridSpacing,
+        // בתצוגה צרה (<800) הכרטיסים גבוהים במיוחד: מקטינים את גובהם בחצי,
+        // עם רצפת גובה שמותירה מקום לשם הספר, למחבר ולטור האייקונים.
+        final double childAspectRatio;
+        if (width < 800) {
+          final gridWidth = width - 2 * _kGridHorizontalPadding;
+          final cellWidth =
+              (gridWidth - kLibraryGridSpacing * (crossAxisCount - 1)) /
+              crossAxisCount;
+          final halfHeight = cellWidth / (2 * baseRatio * textAdjustment);
+          final minHeight = kNarrowGridCardMinHeight * textScale;
+          childAspectRatio = cellWidth / max(minHeight, halfHeight);
+        } else {
+          childAspectRatio = (baseRatio * textAdjustment).clamp(1.45, 2.15);
+        }
+
+        return LibraryGridKeyNavigator(
+          crossAxisCount: crossAxisCount,
+          onExitTop: onExitTop,
+          child: FocusTraversalGroup(
+            policy: ReadingOrderTraversalPolicy(),
+            child: Padding(
+              // top: 8 או מרווח מתאים; horizontal: 45 או רוחב אף
+              padding: const EdgeInsets.only(
+                top: 8,
+                left: _kGridHorizontalPadding,
+                right: _kGridHorizontalPadding,
+                bottom: 8,
               ),
-              itemCount: items.length,
-              itemBuilder: (context, index) => items[index],
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
+              child: GridView.builder(
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: crossAxisCount,
+                  childAspectRatio: childAspectRatio,
+                  crossAxisSpacing: kLibraryGridSpacing,
+                  mainAxisSpacing: kLibraryGridSpacing,
+                ),
+                itemCount: items.length,
+                itemBuilder: (context, index) => items[index],
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+              ),
             ),
           ),
         );

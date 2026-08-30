@@ -78,7 +78,9 @@ class _PluginSettingsScreenState extends State<PluginSettingsScreen> {
 
   Future<void> _loadPermissions() async {
     Map<String, bool> map = {};
-    for (final p in widget.plugin.manifest.permissions) {
+    for (final p in effectiveManifestPermissions(
+      widget.plugin.manifest.permissions,
+    )) {
       final granted = await _repo.getPermission(widget.plugin.pluginId, p);
       final defaultValue = pluginPermissionDefaultGrant(
         p,
@@ -115,14 +117,18 @@ class _PluginSettingsScreenState extends State<PluginSettingsScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (currentPlugin.manifest.permissions.isNotEmpty) ...[
+              if (effectiveManifestPermissions(
+                currentPlugin.manifest.permissions,
+              ).isNotEmpty) ...[
                 const SizedBox(height: 16),
                 SettingsCard(
                   title: 'ניהול הרשאות',
                   subtitle: 'אפשר או חסום הרשאות ספציפיות כפי שנדרש במניפסט',
                   children:
                       orderedPluginPermissions(
-                        currentPlugin.manifest.permissions,
+                        effectiveManifestPermissions(
+                          currentPlugin.manifest.permissions,
+                        ),
                         isOfflineMode: false,
                       ).map((p) {
                         final info = getPermissionInfo(
@@ -138,13 +144,11 @@ class _PluginSettingsScreenState extends State<PluginSettingsScreen> {
                         final isCritical =
                             p == pluginBackgroundKeepAlivePermission;
                         final colorScheme = Theme.of(context).colorScheme;
-                        final iconData = isSensitive || isCritical
-                            ? (isGranted
-                                  ? FluentIcons.warning_24_filled
-                                  : FluentIcons.warning_24_regular)
-                            : (isGranted
-                                  ? FluentIcons.shield_checkmark_24_regular
-                                  : FluentIcons.shield_error_24_regular);
+                        final iconData = pluginPermissionIcon(
+                          p,
+                          isGranted: isGranted,
+                          manifest: currentPlugin.manifest,
+                        );
                         final iconColor = isCritical
                             ? colorScheme.error
                             : isSensitive

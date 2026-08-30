@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/core/messages/tools_messages.dart';
@@ -17,6 +18,16 @@ import 'package:otzaria/widgets/navigation/app_top_bar.dart';
 import 'package:otzaria/widgets/text/otzaria_search_field.dart';
 import 'package:otzaria/widgets/feedback/tool_empty_state.dart';
 import 'package:otzaria/widgets/widgets_exports.dart';
+
+String _bookNameWithoutTextExtension(String fileName) {
+  final lower = fileName.toLowerCase();
+  for (final extension in ['.txt', '.text']) {
+    if (lower.endsWith(extension)) {
+      return fileName.substring(0, fileName.length - extension.length).trim();
+    }
+  }
+  return fileName.trim();
+}
 
 class GematriaSearchScreen extends StatefulWidget {
   const GematriaSearchScreen({super.key});
@@ -85,7 +96,7 @@ class GematriaSearchScreenState extends State<GematriaSearchScreen> {
 
   int _getBookOrder(String fileName) {
     // חילוץ שם הספר מהנתיב
-    final bookName = fileName.replaceAll('.txt', '').trim();
+    final bookName = _bookNameWithoutTextExtension(fileName);
     final index = _tanachOrder.indexOf(bookName);
     return index >= 0 ? index : 999; // ספרים לא מוכרים בסוף
   }
@@ -295,7 +306,7 @@ class GematriaSearchScreenState extends State<GematriaSearchScreen> {
           final relativePath = result.file
               .replaceFirst(libraryPath, '')
               .replaceAll('\\', '/');
-          final fileName = relativePath.split('/').last.replaceAll('.txt', '');
+          final fileName = _bookNameWithoutTextExtension(relativePath.split('/').last);
 
           // בניית הנתיב עם מספר הפסוק
           String displayPath = result.path.isNotEmpty ? result.path : fileName;
@@ -368,7 +379,9 @@ class GematriaSearchScreenState extends State<GematriaSearchScreen> {
                 onSubmitted: (_) => _performSearch(),
                 onClear: _clearResults,
                 leading: IconButton(
-                  icon: const Icon(FluentIcons.search_24_regular),
+                  icon: const Icon(
+                    OtzariaIcons.search_in_numbered_list_24_regular,
+                  ),
                   onPressed: _performSearch,
                   color: Theme.of(context).colorScheme.primary,
                 ),
@@ -499,7 +512,7 @@ class GematriaSearchScreenState extends State<GematriaSearchScreen> {
 
     if (_searchResults.isEmpty && _hasSearched) {
       return const ToolEmptyState(
-        icon: FluentIcons.search_24_regular,
+        icon: OtzariaIcons.search_in_numbered_list_24_regular,
         message: 'לא נמצאו תוצאות',
       );
     }

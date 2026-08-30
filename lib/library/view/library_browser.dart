@@ -1,11 +1,13 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/core/focus_repository.dart';
+import 'package:otzaria/search/view/layout_fix_suggestion_banner.dart';
 import 'package:otzaria/empty_library/empty_library_screen.dart';
 import 'package:otzaria/library/bloc/library_bloc.dart';
 import 'package:otzaria/library/bloc/library_event.dart';
@@ -39,6 +41,7 @@ import 'package:otzaria/widgets/text/otzaria_search_field.dart';
 import 'package:otzaria/settings/settings_exports.dart';
 import 'package:otzaria/theme/theme_exports.dart';
 import 'package:otzaria/core/external_uri_router.dart';
+import 'package:otzaria/utils/ui/book_format_icon.dart';
 
 // ── קבועים ────────────────────────────────────────────────────────────────────
 
@@ -67,6 +70,7 @@ IconData libraryUpdateButtonIcon(LibraryUpdateStatus status) =>
     switch (status) {
       LibraryUpdateStatus.completed => FluentIcons.checkmark_circle_24_regular,
       LibraryUpdateStatus.disconnected => FluentIcons.cloud_off_24_regular,
+      LibraryUpdateStatus.error => FluentIcons.error_circle_24_regular,
       _ => FluentIcons.arrow_sync_24_regular,
     };
 
@@ -91,6 +95,31 @@ bool libraryUpdateButtonResets(LibraryUpdateStatus status) =>
     status == LibraryUpdateStatus.completed ||
     status == LibraryUpdateStatus.error ||
     status == LibraryUpdateStatus.blocked;
+
+/// פעולת לחצני "חזור"/"בית" במצב "אין תוצאות".
+enum LibraryEmptyStateAction {
+  /// אין טקסט חיפוש — ניווט רגיל בתיקיות.
+  navigate,
+
+  /// ניווט שמשמר את הטקסט ומריץ אותו מחדש בהיקף הרחב יותר.
+  navigateKeepingSearch,
+
+  /// אין היקף רחב יותר לנסות בו — איפוס החיפוש והחזרת עץ הספרייה.
+  resetSearch,
+}
+
+/// [inSubCategory] — האם החיפוש נעשה בתת-תיקייה, שאז התיקייה שמעליה היא
+/// היקף רחב יותר לאותו טקסט. בתיקייה הראשית אין היקף כזה.
+@visibleForTesting
+LibraryEmptyStateAction libraryEmptyStateAction({
+  required bool hasSearchText,
+  required bool inSubCategory,
+}) {
+  if (!hasSearchText) return LibraryEmptyStateAction.navigate;
+  return inSubCategory
+      ? LibraryEmptyStateAction.navigateKeepingSearch
+      : LibraryEmptyStateAction.resetSearch;
+}
 
 enum FlatLibraryRowKind { categoryHeader, book, rootBook, showMore }
 
@@ -222,6 +251,28 @@ calculateLibraryPreviewPaneWidths({
   );
 }
 
+/// הפעולה שמקש Backspace מבצע בספרייה.
+enum LibraryBackspaceAction { none, navigateUp, clearSearch }
+
+/// מכריע מה Backspace עושה לפי מצב הפוקוס והחיפוש: בשדה טקסט המקש נשאר
+/// מחיקת תו, למעט שדה החיפוש של הספרייה כשהוא ריק — אז עולים תיקייה.
+@visibleForTesting
+LibraryBackspaceAction resolveLibraryBackspaceAction({
+  required bool isEditableTextFocused,
+  required bool isLibrarySearchFocused,
+  required bool isSearchTextEmpty,
+}) {
+  if (isEditableTextFocused) {
+    return isLibrarySearchFocused && isSearchTextEmpty
+        ? LibraryBackspaceAction.navigateUp
+        : LibraryBackspaceAction.none;
+  }
+  // הפוקוס על כרטיס/רכיב אחר: חיפוש פעיל נסגר תחילה, אחרת עולים תיקייה.
+  return isSearchTextEmpty
+      ? LibraryBackspaceAction.navigateUp
+      : LibraryBackspaceAction.clearSearch;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 class LibraryBrowser extends StatefulWidget {
@@ -236,7 +287,7 @@ class _LibraryBrowserState extends State<LibraryBrowser>
   @override
   bool get wantKeepAlive => true;
 
-  final FocusNode _firstSearchResultFocusNode = FocusNode();
+  final FocusNode _firstGridItemFocusNode = FocusNode();
   final GlobalKey _tourLibraryKey = GlobalKey();
   final GlobalKey _tourLibrarySearchKey = GlobalKey();
   final GlobalKey _tourBookCardKey = GlobalKey();
@@ -335,7 +386,7 @@ class _LibraryBrowserState extends State<LibraryBrowser>
 
   @override
   void dispose() {
-    _firstSearchResultFocusNode.dispose();
+    _firstGridItemFocusNode.dispose();
     _scrollDebounce?.cancel();
     _searchDebounce?.cancel();
     _secondaryRowVisible.dispose();
@@ -434,70 +485,80 @@ class _LibraryBrowserState extends State<LibraryBrowser>
               return Stack(
                 key: _tourLibraryKey,
                 children: [
-                  Scaffold(
-                    backgroundColor: AppSurfaces.panelBackground(context),
-                    body: LayoutBuilder(
-                      builder: (ctx, constraints) {
-                        // האם יש מספיק מקום ל-DafYomi בשורה הראשית?
-                        final dafYomiInline =
-                            constraints.maxWidth >= _kDafYomiInlineMinWidth;
-                        final isCompact = settingsState.compactMenuMode;
+                  Focus(
+                    canRequestFocus: false,
+                    skipTraversal: true,
+                    onKeyEvent: (node, event) =>
+                        _handleLibraryKey(event, state, settingsState),
+                    child: Scaffold(
+                      backgroundColor: AppSurfaces.panelBackground(context),
+                      body: LayoutBuilder(
+                        builder: (ctx, constraints) {
+                          // האם יש מספיק מקום ל-DafYomi בשורה הראשית?
+                          final dafYomiInline =
+                              constraints.maxWidth >= _kDafYomiInlineMinWidth;
+                          final isCompact = settingsState.compactMenuMode;
 
-                        // גובה הסרגל הראשי (קבוע) — ממנו נגזר ה-padding התחתון
-                        final primaryBarH = AppTopBar.barHeight(isCompact);
+                          // גובה הסרגל הראשי (קבוע) — ממנו נגזר ה-padding התחתון
+                          final primaryBarH = AppTopBar.barHeight(isCompact);
 
-                        // גובה השורה השניה המקסימלי משמש כ-fallback לפני שיש
-                        // מדידה בפועל מה-AppTopBar.
-                        const double kSecondaryRowMaxH = 52.0;
-                        final hasSecondaryRow = !dafYomiInline;
-                        final topPad = hasSecondaryRow
-                            ? primaryBarH + kSecondaryRowMaxH
-                            : primaryBarH;
+                          // גובה השורה השניה המקסימלי משמש כ-fallback לפני שיש
+                          // מדידה בפועל מה-AppTopBar.
+                          const double kSecondaryRowMaxH = 52.0;
+                          final hasSecondaryRow = !dafYomiInline;
+                          final topPad = hasSecondaryRow
+                              ? primaryBarH + kSecondaryRowMaxH
+                              : primaryBarH;
 
-                        // Stack: תוכן מאחורה עם padding קבוע, סרגל צף מעל
-                        // כך הסרגל לא גורם ל-reflow של ה-ScrollView בגלילה.
-                        return Stack(
-                          children: [
-                            Positioned.fill(
-                              child: ValueListenableBuilder<double>(
-                                valueListenable: _topBarTotalHeight,
-                                builder: (context, topBarHeight, child) {
-                                  final effectiveTopPad = topBarHeight > 0
-                                      ? topBarHeight
-                                      : topPad;
-                                  return AnimatedPadding(
-                                    duration: const Duration(milliseconds: 180),
-                                    curve: Curves.easeOut,
-                                    padding: EdgeInsets.only(
-                                      top: effectiveTopPad,
-                                    ),
-                                    child: child,
-                                  );
-                                },
-                                child: NotificationListener<ScrollNotification>(
-                                  onNotification: _handleScrollNotification,
-                                  child: _buildBodyRow(
-                                    ctx,
-                                    state,
-                                    settingsState,
-                                  ),
+                          // Stack: תוכן מאחורה עם padding קבוע, סרגל צף מעל
+                          // כך הסרגל לא גורם ל-reflow של ה-ScrollView בגלילה.
+                          return Stack(
+                            children: [
+                              Positioned.fill(
+                                child: ValueListenableBuilder<double>(
+                                  valueListenable: _topBarTotalHeight,
+                                  builder: (context, topBarHeight, child) {
+                                    final effectiveTopPad = topBarHeight > 0
+                                        ? topBarHeight
+                                        : topPad;
+                                    return AnimatedPadding(
+                                      duration: const Duration(
+                                        milliseconds: 180,
+                                      ),
+                                      curve: Curves.easeOut,
+                                      padding: EdgeInsets.only(
+                                        top: effectiveTopPad,
+                                      ),
+                                      child: child,
+                                    );
+                                  },
+                                  child:
+                                      NotificationListener<ScrollNotification>(
+                                        onNotification:
+                                            _handleScrollNotification,
+                                        child: _buildBodyRow(
+                                          ctx,
+                                          state,
+                                          settingsState,
+                                        ),
+                                      ),
                                 ),
                               ),
-                            ),
-                            Positioned(
-                              top: 0,
-                              left: 0,
-                              right: 0,
-                              child: _buildAppTopBar(
-                                ctx,
-                                state,
-                                settingsState,
-                                dafYomiInline: dafYomiInline,
+                              Positioned(
+                                top: 0,
+                                left: 0,
+                                right: 0,
+                                child: _buildAppTopBar(
+                                  ctx,
+                                  state,
+                                  settingsState,
+                                  dafYomiInline: dafYomiInline,
+                                ),
                               ),
-                            ),
-                          ],
-                        );
-                      },
+                            ],
+                          );
+                        },
+                      ),
                     ),
                   ),
                   ValueListenableBuilder<double>(
@@ -742,22 +803,56 @@ class _LibraryBrowserState extends State<LibraryBrowser>
 
   // ── Search bar ────────────────────────────────────────────────────────────
 
+  /// מקלדת בשדה החיפוש: Tab/חץ-מטה נכנסים לרשת הספרים תמיד, וימינה/שמאלה
+  /// רק כשהשדה ריק — עם טקסט הם נשארים תזוזת סמן רגילה.
+  KeyEventResult _handleSearchFieldKey(
+    KeyEvent event,
+    LibraryState state,
+    BuildContext fieldContext,
+  ) {
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isControlPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isShiftPressed ||
+        keyboard.isMetaPressed) {
+      return KeyEventResult.ignored;
+    }
+
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.tab) {
+      if (!_focusFirstGridItem(state)) {
+        FocusScope.of(fieldContext).nextFocus();
+      }
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowDown) {
+      _focusFirstGridItem(state);
+      return KeyEventResult.handled;
+    }
+    if ((key == LogicalKeyboardKey.arrowLeft ||
+            key == LogicalKeyboardKey.arrowRight) &&
+        context.read<FocusRepository>().librarySearchController.text.isEmpty) {
+      return _focusFirstGridItem(state)
+          ? KeyEventResult.handled
+          : KeyEventResult.ignored;
+    }
+    return KeyEventResult.ignored;
+  }
+
   Widget _buildSearchBar(LibraryState state, bool isCompact) {
     return BlocBuilder<SettingsBloc, SettingsState>(
       builder: (context, settingsState) {
         final focusRepository = context.read<FocusRepository>();
-        return CallbackShortcuts(
-          bindings: {
-            const SingleActivator(LogicalKeyboardKey.tab): () {
-              final moved = _focusFirstSearchResult(state);
-              if (!moved) {
-                FocusScope.of(context).nextFocus();
-              }
-            },
-          },
+        return Focus(
+          canRequestFocus: false,
+          skipTraversal: true,
+          onKeyEvent: (node, event) =>
+              _handleSearchFieldKey(event, state, context),
           child: KeyedSubtree(
             key: _tourLibrarySearchKey,
             child: OtzariaSearchField(
+              icon: OtzariaIcons.search_in_the_library_24_regular,
               controller: focusRepository.librarySearchController,
               focusNode: focusRepository.librarySearchFocusNode,
               autofocus: true,
@@ -871,7 +966,23 @@ class _LibraryBrowserState extends State<LibraryBrowser>
         );
         final mainContent = isLibraryEmpty
             ? LibrarySetupView(onLibraryLoaded: _handleLibraryLoaded)
-            : _buildContent(state);
+            : Column(
+                children: [
+                  // הצעת תיקון-מקלדת חיה לשדה האיתור (issue #975): לחיצה
+                  // מחליפה את הטקסט בשדה ומריצה את החיפוש החי מחדש.
+                  TypingLayoutFixSuggestion(
+                    controller: context
+                        .read<FocusRepository>()
+                        .librarySearchController,
+                    fieldFocusNode: context
+                        .read<FocusRepository>()
+                        .librarySearchFocusNode,
+                    hint: 'לחיצה תחליף את הטקסט שהוקלד',
+                    onApplied: _applyLibraryLayoutFix,
+                  ),
+                  Expanded(child: _buildContent(state)),
+                ],
+              );
 
         return AdaptiveSidePane(
           // אין ספרייה — התצוגה המקדימה סגורה כפויה (אין ספרים להציג).
@@ -1066,39 +1177,118 @@ class _LibraryBrowserState extends State<LibraryBrowser>
     ];
   }
 
+  /// [keepSearchQuery] — הטקסט בתיבה נשאר לשימוש, ולכן אינו מסומן כולו
+  /// בחזרת הפוקוס (הקלדת תו אחת הייתה מוחקת אותו).
   void _handleNavigateUp(
     BuildContext context,
     LibraryState state,
-    SettingsState settingsState,
-  ) {
-    if (settingsState.libraryViewMode == 'list' &&
+    SettingsState settingsState, {
+    bool keepSearchQuery = false,
+  }) {
+    // כשמוצגות תוצאות חיפוש עץ הקטגוריות אינו על המסך, וכיווץ הרחבה בו היה
+    // נראה כלחיצה שלא עשתה דבר — במצב הזה מנווטים לתיקיית האב.
+    if (state.searchResults == null &&
+        settingsState.libraryViewMode == 'list' &&
         _expandedCategories.isNotEmpty) {
       setState(() => _expandedCategories.remove(_expandedCategories.last));
     } else if (state.currentCategory?.parent != null) {
+      // הניווט משמר את שאילתת החיפוש ב-state, לכן החיפוש רץ מחדש בתיקיית
+      // האב עם אותו טקסט — עם דגלי הספרים החיצוניים שבהגדרות.
       context.read<LibraryBloc>().add(NavigateUp());
-      context.read<LibraryBloc>().add(const SearchBooks());
-      _refocusSearchBar(selectAll: true);
+      _searchWithSettings(context, settingsState);
+      _refocusSearchBar(selectAll: !keepSearchQuery);
     }
   }
 
-  void _handleNavigateHome(
-    BuildContext context,
+  static final _arrowKeys = {
+    LogicalKeyboardKey.arrowLeft,
+    LogicalKeyboardKey.arrowRight,
+    LogicalKeyboardKey.arrowUp,
+    LogicalKeyboardKey.arrowDown,
+  };
+
+  /// קיצורי המקלדת של מסך הספרייה: Backspace = עלייה תיקייה (כמו בסייר של
+  /// Windows), וחץ מחוץ לרשת מחזיר את הפוקוס לספרים במקום לטייל בין לחצנים.
+  ///
+  /// בשדה טקסט Backspace נשאר מחיקת תו; רק בשדה החיפוש של הספרייה, כשהוא
+  /// ריק (ובלחיצה חדשה, לא בחזרת-מקש), הוא עולה תיקייה.
+  KeyEventResult _handleLibraryKey(
+    KeyEvent event,
     LibraryState state,
     SettingsState settingsState,
   ) {
+    if (event is KeyUpEvent || _settingsPanelOpen.value) {
+      return KeyEventResult.ignored;
+    }
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isControlPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isShiftPressed ||
+        keyboard.isMetaPressed) {
+      return KeyEventResult.ignored;
+    }
+
+    final repo = context.read<FocusRepository>();
+    final focusedWidget = FocusManager.instance.primaryFocus?.context?.widget;
+    final isEditableTextFocused =
+        focusedWidget is EditableText || focusedWidget is TextField;
+
+    if (_arrowKeys.contains(event.logicalKey)) {
+      if (isEditableTextFocused) return KeyEventResult.ignored;
+      // כשהפוקוס על כרטיס, LibraryGridKeyNavigator כבר טיפל באירוע לפנינו —
+      // כאן הפוקוס על לחצן אחר במסך, והחץ מחזיר אותו לרשת הספרים.
+      return _focusFirstGridItem(state)
+          ? KeyEventResult.handled
+          : KeyEventResult.ignored;
+    }
+
+    if (event is! KeyDownEvent ||
+        event.logicalKey != LogicalKeyboardKey.backspace) {
+      return KeyEventResult.ignored;
+    }
+
+    final action = resolveLibraryBackspaceAction(
+      isEditableTextFocused: isEditableTextFocused,
+      isLibrarySearchFocused: repo.librarySearchFocusNode.hasFocus,
+      isSearchTextEmpty: repo.librarySearchController.text.isEmpty,
+    );
+    switch (action) {
+      case LibraryBackspaceAction.none:
+        return KeyEventResult.ignored;
+      case LibraryBackspaceAction.navigateUp:
+        _handleNavigateUp(context, state, settingsState);
+      case LibraryBackspaceAction.clearSearch:
+        repo.librarySearchController.clear();
+        context.read<LibraryBloc>().add(const UpdateSearchQuery(''));
+        context.read<LibraryBloc>().add(const SearchBooks());
+        _refocusSearchBar();
+    }
+    return KeyEventResult.handled;
+  }
+
+  /// [keepSearchQuery] משאיר את טקסט החיפוש בתיבה, כך שהחיפוש יורץ מחדש
+  /// בתיקייה הראשית במקום להתאפס.
+  void _handleNavigateHome(
+    BuildContext context,
+    LibraryState state,
+    SettingsState settingsState, {
+    bool keepSearchQuery = false,
+  }) {
     setState(() {
       _expandedCategories.clear();
     });
     if (state.library != null) {
       context.read<LibraryBloc>().add(NavigateToCategory(state.library!));
     }
-    context.read<FocusRepository>().librarySearchController.clear();
+    if (!keepSearchQuery) {
+      context.read<FocusRepository>().librarySearchController.clear();
+    }
     _update(
       context,
       state,
       settingsState,
       restoreSearchFocus: true,
-      selectAllOnRestore: true,
+      selectAllOnRestore: !keepSearchQuery,
     );
   }
 
@@ -1131,26 +1321,39 @@ class _LibraryBrowserState extends State<LibraryBrowser>
         ? 'אין תוצאות עבור "$searchText"'
         : 'אין פריטים להצגה בתיקייה זו';
 
-    void onBack() {
-      if (searchText.isNotEmpty) {
-        repo.librarySearchController.clear();
-        context.read<LibraryBloc>().add(const UpdateSearchQuery(''));
-        context.read<LibraryBloc>().add(const SearchBooks());
-      } else {
-        _handleNavigateUp(context, state, settingsState);
-      }
+    final action = libraryEmptyStateAction(
+      hasSearchText: searchText.isNotEmpty,
+      inSubCategory: state.currentCategory != state.library,
+    );
+    final keepSearch = action == LibraryEmptyStateAction.navigateKeepingSearch;
+
+    // איפוס בלי לכווץ את העץ — בתצוגת רשימה ההרחבות נשמרות, בשונה מ"בית".
+    void resetSearch() {
+      repo.librarySearchController.clear();
+      _update(context, state, settingsState, restoreSearchFocus: true);
     }
 
     return LibraryEmptyStateWidget(
       message: message,
-      onBack: onBack,
-      onHome: () => _handleNavigateHome(context, state, settingsState),
+      onBack: action == LibraryEmptyStateAction.resetSearch
+          ? resetSearch
+          : () => _handleNavigateUp(
+              context,
+              state,
+              settingsState,
+              keepSearchQuery: keepSearch,
+            ),
+      onHome: () => _handleNavigateHome(
+        context,
+        state,
+        settingsState,
+        keepSearchQuery: keepSearch,
+      ),
       onOpenSearch: () => _openSearchDialog(context, searchQuery: searchText),
       onOpenLink: isDeepLink
           ? () => _tryHandleDeepLink(context, searchText)
           : null,
-      showSearchElsewhereHint:
-          searchText.isNotEmpty && state.currentCategory != state.library,
+      showSearchElsewhereHint: keepSearch,
     );
   }
 
@@ -1233,21 +1436,28 @@ class _LibraryBrowserState extends State<LibraryBrowser>
       );
     }
 
+    // הפריט הראשון ברשת מקבל את צומת הפוקוס — כניסה מהחיפוש ב-Tab/חץ-מטה.
     final allItems = <Widget>[
-      ...filteredSubCategories.map(
-        (c) => KeyedSubtree(
-          key: _tourCategoryKeys.putIfAbsent(c.path, GlobalKey.new),
+      ...filteredSubCategories.indexed.map(
+        ((int, Category) entry) => KeyedSubtree(
+          key: _tourCategoryKeys.putIfAbsent(entry.$2.path, GlobalKey.new),
           child: CategoryGridItem(
-            category: c,
-            onCategoryClickCallback: () => _openCategory(c),
+            category: entry.$2,
+            onCategoryClickCallback: () => _openCategory(entry.$2),
+            focusNode: entry.$1 == 0 ? _firstGridItemFocusNode : null,
           ),
         ),
       ),
     ];
 
     var attachedTourKey = false;
-    for (final book in filteredBooks) {
-      final item = _buildBookItem(book);
+    for (final (bookIndex, book) in filteredBooks.indexed) {
+      final item = _buildBookItem(
+        book,
+        focusNode: filteredSubCategories.isEmpty && bookIndex == 0
+            ? _firstGridItemFocusNode
+            : null,
+      );
       final isTourBook =
           _tourPreviewBook != null &&
           !attachedTourKey &&
@@ -1264,7 +1474,12 @@ class _LibraryBrowserState extends State<LibraryBrowser>
         attachedTourKey = true;
       }
     }
-    items.add(MyGridView(items: allItems));
+    items.add(
+      MyGridView(
+        items: allItems,
+        onExitTop: () => _refocusSearchBar(selectAll: true),
+      ),
+    );
     return items;
   }
 
@@ -1333,7 +1548,7 @@ class _LibraryBrowserState extends State<LibraryBrowser>
           books[index],
           0,
           itemStyle: _LibraryListItemStyle.search,
-          focusNode: index == 0 ? _firstSearchResultFocusNode : null,
+          focusNode: index == 0 ? _firstGridItemFocusNode : null,
         );
       },
     );
@@ -1791,11 +2006,7 @@ class _LibraryBrowserState extends State<LibraryBrowser>
       );
     }
     return Icon(
-      book is PdfBook
-          ? FluentIcons.document_pdf_24_regular
-          : book is DocxBook || book.fileType == 'docx'
-          ? FluentIcons.document_edit_24_regular
-          : FluentIcons.document_text_24_regular,
+      bookFormatIcon(book),
       color: cs.onSecondaryContainer,
       size: iconSize,
     );
@@ -2155,9 +2366,9 @@ class _LibraryBrowserState extends State<LibraryBrowser>
         .read<FocusRepository>()
         .librarySearchController
         .text;
-    context.read<LibraryBloc>().add(
-      UpdateSearchQuery(searchText.replaceAll('"', '')),
-    );
+    // אותה שאילתה כמו בהקלדה ישירה — מנוע החיפוש מנרמל מרכאות בעצמו.
+    // הסרתן כאן מפילה שאילתות כמו ש"ס מתחת למינימום 3 התווים ב-SearchBooks.
+    context.read<LibraryBloc>().add(UpdateSearchQuery(searchText));
     _searchWithSettings(context, settingsState);
     setState(() {});
     if (restoreSearchFocus) {
@@ -2171,6 +2382,16 @@ class _LibraryBrowserState extends State<LibraryBrowser>
       if (!mounted) return;
       _searchWithSettings(context, s);
     });
+  }
+
+  /// המשתמש קיבל את הצעת תיקון-המקלדת: הטקסט בשדה כבר הוחלף (בווידג'ט),
+  /// וכאן מריצים את אותו מסלול שהקלדה ידנית מפעילה — עדכון שאילתה, איפוס
+  /// נושאים וחיפוש מיידי (בלי debounce: זו פעולה מפורשת, לא הקלדה).
+  void _applyLibraryLayoutFix(String suggestion) {
+    context.read<LibraryBloc>().add(UpdateSearchQuery(suggestion));
+    context.read<LibraryBloc>().add(const SelectTopics([]));
+    _searchWithSettings(context, context.read<SettingsBloc>().state);
+    _refocusSearchBar();
   }
 
   void _searchWithSettings(BuildContext context, SettingsState s) {
@@ -2190,23 +2411,25 @@ class _LibraryBrowserState extends State<LibraryBrowser>
     );
   }
 
-  bool _focusFirstSearchResult(LibraryState state) {
+  bool _focusFirstGridItem(LibraryState state) {
+    // הצומת מחובר לפריט הראשון גם בעיון בקטגוריות, לא רק בתוצאות חיפוש.
+    if (_firstGridItemFocusNode.context != null &&
+        _firstGridItemFocusNode.canRequestFocus) {
+      LibraryGridKeyNavigator.focusCard(_firstGridItemFocusNode);
+      return true;
+    }
+
     final results = state.searchResults;
     if (results == null || results.isEmpty) {
       return false;
-    }
-
-    if (_firstSearchResultFocusNode.canRequestFocus) {
-      _firstSearchResultFocusNode.requestFocus();
-      return true;
     }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
       }
-      if (_firstSearchResultFocusNode.canRequestFocus) {
-        _firstSearchResultFocusNode.requestFocus();
+      if (_firstGridItemFocusNode.canRequestFocus) {
+        _firstGridItemFocusNode.requestFocus();
       }
     });
     return true;
@@ -2220,34 +2443,36 @@ class _LibraryBrowserState extends State<LibraryBrowser>
             .toInt();
 
         return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 45),
-          child: FocusTraversalGroup(
-            policy: OrderedTraversalPolicy(),
-            child: GridView.builder(
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: crossAxisCount,
-                childAspectRatio: 2,
-                crossAxisSpacing: kLibraryGridSpacing,
-                mainAxisSpacing: kLibraryGridSpacing,
-              ),
-              itemCount: displayLimit,
-              itemBuilder: (context, index) {
-                final orderIndex = index;
-                final focusNode = index == 0
-                    ? _firstSearchResultFocusNode
-                    : null;
+          padding: const EdgeInsets.symmetric(horizontal: 45, vertical: 8),
+          child: LibraryGridKeyNavigator(
+            crossAxisCount: crossAxisCount,
+            onExitTop: () => _refocusSearchBar(selectAll: true),
+            child: FocusTraversalGroup(
+              policy: OrderedTraversalPolicy(),
+              child: GridView.builder(
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: crossAxisCount,
+                  childAspectRatio: 2,
+                  crossAxisSpacing: kLibraryGridSpacing,
+                  mainAxisSpacing: kLibraryGridSpacing,
+                ),
+                itemCount: displayLimit,
+                itemBuilder: (context, index) {
+                  final orderIndex = index;
+                  final focusNode = index == 0 ? _firstGridItemFocusNode : null;
 
-                return FocusTraversalOrder(
-                  order: NumericFocusOrder(orderIndex.toDouble()),
-                  child: _buildBookItem(
-                    books[index],
-                    showTopics: true,
-                    focusNode: focusNode,
-                  ),
-                );
-              },
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
+                  return FocusTraversalOrder(
+                    order: NumericFocusOrder(orderIndex.toDouble()),
+                    child: _buildBookItem(
+                      books[index],
+                      showTopics: true,
+                      focusNode: focusNode,
+                    ),
+                  );
+                },
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+              ),
             ),
           ),
         );
@@ -2270,16 +2495,21 @@ class _LibraryBrowserState extends State<LibraryBrowser>
   }
 
   Widget _buildSettingsOverlay(BuildContext context, bool isOpen) {
-    return ContextOverlayPanel(
-      isOpen: isOpen,
-      onClose: _closeSettingsPanel,
-      width: 400,
-      deferChildBuildOnOpen: true,
-      preserveChildStateOnClose: true,
-      title: 'הגדרות',
-      child: const Expanded(
-        child: SingleChildScrollView(
-          child: LibrarySettingsPanel(hebrewBooksPathWidget: null),
+    // הפאנל מציג תוכן של מסך ההגדרות מחוץ לתת-העץ שלו, ולכן הכיווניות
+    // נקבעת כאן לפי שפת ההגדרות.
+    return Directionality(
+      textDirection: SettingsTextScope.languageOf(context).textDirection,
+      child: ContextOverlayPanel(
+        isOpen: isOpen,
+        onClose: _closeSettingsPanel,
+        width: 400,
+        deferChildBuildOnOpen: true,
+        preserveChildStateOnClose: true,
+        title: context.settingsText('הגדרות'),
+        child: const Expanded(
+          child: SingleChildScrollView(
+            child: LibrarySettingsPanel(hebrewBooksPathWidget: null),
+          ),
         ),
       ),
     );

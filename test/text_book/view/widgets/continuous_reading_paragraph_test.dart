@@ -8,6 +8,7 @@ import 'package:otzaria/plugins/models/text_source_map.dart';
 import 'package:otzaria/plugins/services/plugin_highlight_renderer.dart';
 import 'package:otzaria/plugins/view/plugin_highlight_frame_overlay.dart';
 import 'package:otzaria/text_book/view/widgets/continuous_reading_paragraph.dart';
+import 'package:otzaria/widgets/smart_text/simple_inline_html.dart';
 
 /// טסטים לפיצ'ר ההצגה הרציפה. עיקר הסיכון הוא ב-`_styleForElement` החדש —
 /// פירוש סטיילים inline (color/background-color) של ה-`<span>`-ים שמנוע
@@ -521,6 +522,18 @@ void main() {
     });
   });
 
+  group('טקסט תחתי שהומר ל-span (issue #842)', () {
+    test('span.subscript-text מוקטן ביחס לבסיס', () {
+      final spans = buildInlineHtmlSpans(
+        'לפני <span class="subscript-text">ב</span> אחרי',
+        const TextStyle(fontSize: 24),
+      );
+      final sizes = _flattenStyles(spans).map((s) => s.fontSize).nonNulls;
+      expect(sizes, contains(closeTo(24 * kHtmlSmallerFontScale, 0.01)));
+      expect(_flattenText(spans), contains('ב'));
+    });
+  });
+
   group('עיצוב קישורי inline (<a>)', () {
     test('עם linkStyle — הקישור מקבל את הצבע והקו התחתון שהוזרמו', () {
       final recognizers = <TapGestureRecognizer>[];
@@ -610,12 +623,41 @@ void main() {
           decoration: TextDecoration.underline,
         ),
         recognizerSink: recognizers,
+        // המראה המלא בשורה — לקורא שאינו עוטף ב-RaisedMarkerOverlay.
+        hideRaisedMarkers: false,
       );
       final link = _findLinkSpan(spans);
       expect(link, isNotNull);
       // צבע primary אך בלי קו תחתון — סמן-נקודה נשאר ללא קו.
       expect(link!.style?.color, const Color(0xFF6750A4));
       expect(link.style?.decoration, isNot(TextDecoration.underline));
+      for (final r in recognizers) {
+        r.dispose();
+      }
+    });
+
+    test('עם שכבת הציור (ברירת המחדל) גליף העוגן שקוף ושומר recognizer', () {
+      final recognizers = <TapGestureRecognizer>[];
+      final spans = buildInlineHtmlSpans(
+        'לפני <a class="link-anchor link-anchor-0" '
+        'href="otzaria://anchor?ref=3_0">(א)</a> אחרי',
+        const TextStyle(fontSize: 20, color: Color(0xFF111111)),
+        onTapUrl: (_) async => true,
+        linkStyle: const TextStyle(
+          color: Color(0xFF6750A4),
+          decoration: TextDecoration.underline,
+        ),
+        recognizerSink: recognizers,
+      );
+      final link = _findLinkSpan(spans);
+      expect(link, isNotNull);
+      expect(
+        link!.style?.color?.toARGB32(),
+        isNotNull,
+        reason: 'לגליף חייב להיות צבע מפורש (שקוף) — לא ירושה מהטקסט',
+      );
+      expect(link.style!.color!.toARGB32() >> 24, 0);
+      expect(link.recognizer, isA<TapGestureRecognizer>());
       for (final r in recognizers) {
         r.dispose();
       }
@@ -672,6 +714,15 @@ void main() {
     expect(underlined!.style?.decoration, TextDecoration.underline);
     expect(underlined.style?.decorationColor, const Color(0x800A141E));
     expect(underlined.style?.decorationThickness, 2);
+  });
+
+  test('underline percentage thickness is supported', () {
+    final spans = buildInlineHtmlSpans(
+      '<span style="text-decoration: underline; '
+      'text-decoration-thickness: 200%">marked</span>',
+      const TextStyle(fontSize: 20),
+    );
+    expect(_findUnderlinedSpan(spans)?.style?.decorationThickness, 2);
   });
 
   test('inline colors support CSS alpha without a leading zero', () {
@@ -836,6 +887,7 @@ void main() {
             onTapUrl: (_) async => true,
             linkStyle: linkStyle,
             recognizerSink: sink,
+            hideRaisedMarkers: false,
           ),
       ];
 

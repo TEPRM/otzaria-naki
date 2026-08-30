@@ -9,8 +9,11 @@ import 'package:flutter/foundation.dart'
         kIsWeb,
         visibleForTesting;
 import 'package:flutter/services.dart' show FontLoader;
+import 'package:path/path.dart' as p;
 import 'package:system_fonts/system_fonts.dart' show SystemFonts;
 import 'package:otzaria/utils/file/font_file_reader.dart';
+import 'package:otzaria/utils/file/sfnt_metadata_reader.dart';
+import 'package:otzaria/utils/file/system_font_locator.dart';
 
 /// סיווג גופן לפי סגנון: עם תגיות (serif) או חלק (sans-serif).
 enum FontCategory { serif, sansSerif, unknown }
@@ -128,6 +131,8 @@ class AppFonts {
   ];
 
   static List<FontInfo>? _systemFontsHebrewCache;
+  static Map<String, SystemFontFamilyFaces>? _systemFamiliesCache;
+  static Map<String, String>? _systemFontAliasCache;
   static Future<void>? _warmUpFuture;
 
   /// רשימת כל הגופנים הזמינים לבחירה ב-UI.
@@ -155,8 +160,8 @@ class AppFonts {
 
   static Future<void> _runWarmUp() async {
     try {
-      final result = await compute(_computeSystemFontsHebrewOnly, 0);
-      _systemFontsHebrewCache ??= result;
+      final result = await compute(_computeSystemFontScan, 0);
+      _storeScan(result);
     } catch (_) {
       // אם החימום ב-isolate נכשל מסיבה כלשהי - לא מאתחלים את הקאש,
       // והנתיב הסינכרוני ב-_getSystemFontsHebrewOnly ירוץ בפעם הראשונה.
@@ -165,8 +170,15 @@ class AppFonts {
 
   /// פונקציה שרצה ב-isolate נפרד דרך `compute`.
   /// חייבת להיות סטטית/top-level וללא תלות במצב של isolate הראשי.
-  static List<FontInfo> _computeSystemFontsHebrewOnly(int _) {
-    return _scanSystemFontsHebrewOnly();
+  static SystemFontScanResult _computeSystemFontScan(int _) {
+    return _scanSystemFonts();
+  }
+
+  static void _storeScan(SystemFontScanResult scan) {
+    if (_systemFontsHebrewCache != null) return;
+    _systemFontsHebrewCache = scan.fonts;
+    _systemFamiliesCache = scan.families;
+    _systemFontAliasCache = scan.aliases;
   }
 
   static List<FontInfo> _getSystemFontsHebrewOnly() {
@@ -174,37 +186,81 @@ class AppFonts {
       return _systemFontsHebrewCache!;
     }
 
-    final result = _scanSystemFontsHebrewOnly();
-    _systemFontsHebrewCache = result;
-    return result;
+    _storeScan(_scanSystemFonts());
+    return _systemFontsHebrewCache!;
   }
 
-  static List<FontInfo> _scanSystemFontsHebrewOnly() {
-    final result = <FontInfo>[];
+  static SystemFontScanResult _scanSystemFonts() {
     try {
-      final map = SystemFonts().getFontMap(); // name -> path
-      final names = map.keys.toList()
-        ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
-      for (final name in names) {
-        final path = map[name];
-        if (path == null || path.isEmpty) continue;
-        final bytes = _readFontBytesSync(path);
-        if (bytes == null) continue;
-        if (_sfntSupportsHebrew(bytes)) {
-          result.add(
-            FontInfo(
-              value: name,
-              label: name,
-              category: _sfntCategory(bytes),
-            ),
-          );
-        }
-      }
+      return _buildScan(_installedFacesLazily());
     } catch (_) {
-      // אם אין גישה לגופני מערכת מסיבה כלשהי, נחזיר רשימה ריקה.
+      // אם אין גישה לגופני מערכת מסיבה כלשהי, נחזיר תוצאה ריקה.
+      return const SystemFontScanResult.empty();
     }
-    return result;
   }
+
+  /// עצל בכוונה: הבייטים של כל גופן משתחררים לפני קריאת הבא, במקום להחזיק
+  /// את כל הגופנים המותקנים בזיכרון בבת אחת (מאות MB במחשב עם Office).
+  static Iterable<MapEntry<String, Uint8List>> _installedFacesLazily() sync* {
+    for (final path in SystemFontLocator.installedFontPaths()) {
+      final bytes = SfntMetadataReader.readSync(path);
+      if (bytes == null) continue;
+      yield MapEntry(path, bytes);
+    }
+  }
+
+  /// מקבץ קבצי גופן למשפחות לפי שם המשפחה מטבלת ה-name (לא לפי שם הקובץ —
+  /// התקנה פר-משתמש שומרת שמות קבצים שרירותיים שהמשתמש אינו מזהה).
+  static SystemFontScanResult _buildScan(
+    Iterable<MapEntry<String, Uint8List>> faces,
+  ) {
+    final builders = <String, _FamilyAccumulator>{};
+    final aliases = <String, String>{};
+    for (final face in faces) {
+      final bytes = face.value;
+      if (!_sfntSupportsHebrew(bytes)) continue;
+      final info = _sfntFaceInfo(bytes);
+      if (info == null || info.italic) continue;
+      // p.windows מפרק גם נתיבי \ וגם / — נתיבי ה-registry של Windows מגיעים
+      // עם \ גם כשהקוד (ובדיקותיו) רץ על פלטפורמה אחרת.
+      final family = info.family.trim().isNotEmpty
+          ? info.family.trim()
+          : p.windows.basenameWithoutExtension(face.key);
+      final acc = builders.putIfAbsent(
+        family.toLowerCase(),
+        () => _FamilyAccumulator(family),
+      );
+      acc.addFace(path: face.key, info: info, category: _sfntCategory(bytes));
+      aliases[p.windows.basenameWithoutExtension(face.key).toLowerCase()] =
+          family;
+    }
+
+    final fonts = <FontInfo>[];
+    final families = <String, SystemFontFamilyFaces>{};
+    for (final acc in builders.values) {
+      final familyFaces = acc.build();
+      families[familyFaces.family] = familyFaces;
+      fonts.add(
+        FontInfo(
+          value: familyFaces.family,
+          label: familyFaces.family,
+          category: familyFaces.category,
+        ),
+      );
+    }
+    fonts.sort(
+      (a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()),
+    );
+    return SystemFontScanResult(
+      fonts: fonts,
+      families: families,
+      aliases: aliases,
+    );
+  }
+
+  /// שם המשפחה עבור ערך שמור ישן (שם קובץ מהסריקה הקודמת), או null.
+  static String? legacySystemFontDisplayName(String value) =>
+      _systemFontAliasCache?[value.toLowerCase()];
 
   static Uint8List? _readFontBytesSync(String path) {
     try {
@@ -512,6 +568,20 @@ class AppFonts {
     'Rubik': 'fonts/Rubik-VariableFont_wght.ttf',
   };
 
+  /// קובץ ה-face הבולד של גופן מובנה, למשפחות שנרשמו ב-pubspec עם קובץ נפרד.
+  /// צרכן חיצוני שמקבל רק את ה-regular (WebView של תוסף) מסנתז בולד מרוח.
+  static const Map<String, String> boldFontPaths = {
+    'FrankRuhlCLM': 'fonts/FrankRuehlCLM-Bold.ttf',
+  };
+
+  /// ה-faces של גופן מערכת שאותר בסריקה, או null כשאינו מוכר.
+  /// דורש שהקאש יהיה חם — ראו [warmUpSystemFontsCache].
+  static SystemFontFamilyFaces? systemFamilyFaces(String fontFamily) =>
+      _systemFamiliesCache?[fontFamily];
+
+  /// בייטים של קובץ גופן מהדיסק, או null כשאינו קריא.
+  static Uint8List? readFontBytes(String path) => _readFontBytesSync(path);
+
   /// מיפוי גופנים לשמות בעברית (לשימוש בהדפסה)
   /// מחושב אוטומטית מ-availableFonts, רק עבור גופנים עם קבצים
   static Map<String, String> get fontLabels => {
@@ -531,11 +601,12 @@ class AppFonts {
         fonts.any((font) => font.value == selectedValue);
 
     if (!hasSelectedValue) {
+      final legacyName = legacySystemFontDisplayName(selectedValue);
       fonts.insert(
         0,
         FontInfo(
           value: selectedValue,
-          label: '$selectedValue (לא זמין במחשב זה)',
+          label: legacyName ?? '$selectedValue (לא זמין במחשב זה)',
         ),
       );
     }
@@ -567,6 +638,13 @@ class AppFonts {
 
     return _loadingSystemFonts.putIfAbsent(fontFamily, () async {
       try {
+        if (_systemFamiliesCache == null) await warmUpSystemFontsCache();
+        final family = _systemFamiliesCache?[fontFamily];
+        if (family != null) {
+          await _loadFamilyFaces(fontFamily, family);
+          return;
+        }
+        // תאימות לאחור: ערך שמור מגרסה קודמת הוא שם קובץ במפת system_fonts.
         await SystemFonts().loadFont(fontFamily);
       } catch (_) {
         // אם הטעינה נכשלה, מסירים מהקאש כדי לאפשר ניסיון חוזר בעתיד.
@@ -575,6 +653,31 @@ class AppFonts {
       }
       await _augmentSystemFontWeights(fontFamily);
     });
+  }
+
+  /// טוען את ה-face הרגיל של המשפחה, ואם קיים face בולד — גם אותו תחת אותו
+  /// שם, כך שהמנוע יבחר בו אוטומטית למשקלים מודגשים.
+  static Future<void> _loadFamilyFaces(
+    String name,
+    SystemFontFamilyFaces family,
+  ) async {
+    final regular = _readFontBytesSync(family.regularPath);
+    if (regular == null) {
+      throw StateError('font file unreadable: ${family.regularPath}');
+    }
+    final loader = FontLoader(name)
+      ..addFont(Future.value(ByteData.sublistView(regular)));
+    Uint8List? bold;
+    final boldPath = family.boldPath;
+    if (boldPath != null) {
+      bold = _readFontBytesSync(boldPath);
+      if (bold != null) {
+        loader.addFont(Future.value(ByteData.sublistView(bold)));
+      }
+    }
+    await loader.load();
+    if (family.hasWeightAxis) _variableSystemFonts.add(name);
+    if (bold != null) _separateBoldSystemFonts.add(name);
   }
 
   /// אחרי טעינת ה-face הרגיל של גופן מערכת, מנסה להעשיר את המשפחה בבולד אמיתי:
@@ -586,7 +689,7 @@ class AppFonts {
       final map = SystemFonts().getFontMap();
       final selfPath = map[fontFamily];
       if (selfPath == null) return;
-      final selfBytes = _readFontBytesSync(selfPath);
+      final selfBytes = SfntMetadataReader.readSync(selfPath);
       if (selfBytes == null) return;
       final selfInfo = _sfntFaceInfo(selfBytes);
       if (selfInfo == null) return;
@@ -727,6 +830,8 @@ class AppFonts {
 
   /// שם המשפחה מטבלת ה-name. מעדיף typographic family (nameID 16) על-פני
   /// שם המשפחה הבסיסי (nameID 1), כך ש-Regular ו-Bold מקבלים שם זהה.
+  /// בכל nameID מועדפת רשומת Windows (platform 3) — Windows מקבץ לפיה, ובגופני
+  /// Medium רבים רשומות פלטפורמה 0/1 נושאות את שם הבסיס וממזגות משפחות שונות.
   static String _readSfntFamilyName(
     Uint8List data,
     int nameOffset,
@@ -739,7 +844,9 @@ class AppFonts {
     final recordsBase = nameOffset + 6;
     if (recordsBase + count * 12 > data.length) return '';
 
+    String? typographicWindows;
     String? typographic;
+    String? basicWindows;
     String? basic;
     for (int i = 0; i < count; i++) {
       final rec = recordsBase + i * 12;
@@ -765,12 +872,21 @@ class AppFonts {
       }
       if (decoded.trim().isEmpty) continue;
       if (nameId == 16) {
-        typographic ??= decoded;
+        if (platformId == 3) {
+          typographicWindows ??= decoded;
+        } else {
+          typographic ??= decoded;
+        }
       } else {
-        basic ??= decoded;
+        if (platformId == 3) {
+          basicWindows ??= decoded;
+        } else {
+          basic ??= decoded;
+        }
       }
     }
-    return (typographic ?? basic ?? '').trim();
+    return (typographicWindows ?? typographic ?? basicWindows ?? basic ?? '')
+        .trim();
   }
 
   @visibleForTesting
@@ -801,10 +917,22 @@ class AppFonts {
   @visibleForTesting
   static void debugResetSystemFontsCache() {
     _systemFontsHebrewCache = null;
+    _systemFamiliesCache = null;
+    _systemFontAliasCache = null;
     _warmUpFuture = null;
     _variableSystemFonts.clear();
     _separateBoldSystemFonts.clear();
   }
+
+  /// מריץ את קיבוץ ה-faces על נתונים סינתטיים, בלי תלות בגופנים מותקנים.
+  @visibleForTesting
+  static SystemFontScanResult debugBuildScan(
+    List<MapEntry<String, Uint8List>> faces,
+  ) => _buildScan(faces);
+
+  /// מאחסן תוצאת סריקה כאילו הגיעה מחימום הקאש (לבדיקת מסלולי התצוגה).
+  @visibleForTesting
+  static void debugStoreScan(SystemFontScanResult scan) => _storeScan(scan);
 
   @visibleForTesting
   static int debugFontWeightClass(Uint8List data) =>
@@ -858,6 +986,92 @@ class _FontFaceInfo {
 
   /// בולד לפי דגל מפורש (fsSelection/macStyle) או usWeightClass ≥ 600.
   bool get isBoldStyle => bold || weightClass >= 600;
+}
+
+/// תוצאת סריקת גופני המערכת: הרשימה ל-UI, מפת המשפחות לטעינה,
+/// ומפת כינויים (שם קובץ ← משפחה) לתאימות עם ערכים שמורים ישנים.
+class SystemFontScanResult {
+  final List<FontInfo> fonts;
+  final Map<String, SystemFontFamilyFaces> families;
+  final Map<String, String> aliases;
+
+  const SystemFontScanResult({
+    required this.fonts,
+    required this.families,
+    required this.aliases,
+  });
+
+  const SystemFontScanResult.empty()
+    : fonts = const [],
+      families = const {},
+      aliases = const {};
+}
+
+/// נתיבי ה-faces של משפחת גופן מערכת אחת, כפי שנבחרו בסריקה.
+class SystemFontFamilyFaces {
+  final String family;
+  final String regularPath;
+  final String? boldPath;
+  final bool hasWeightAxis;
+  final FontCategory category;
+
+  const SystemFontFamilyFaces({
+    required this.family,
+    required this.regularPath,
+    this.boldPath,
+    this.hasWeightAxis = false,
+    this.category = FontCategory.unknown,
+  });
+}
+
+/// צובר את ה-faces של משפחה במהלך הסריקה ובוחר את הרגיל והבולד המתאימים.
+class _FamilyAccumulator {
+  final String family;
+  String? _regularPath;
+  int _regularDistance = 1 << 30;
+  bool _regularHasWeightAxis = false;
+  String? _boldPath;
+  int _boldDistance = 1 << 30;
+  FontCategory _category = FontCategory.unknown;
+
+  _FamilyAccumulator(this.family);
+
+  void addFace({
+    required String path,
+    required _FontFaceInfo info,
+    required FontCategory category,
+  }) {
+    final weight = info.weightClass > 0 ? info.weightClass : 400;
+    if (info.isBoldStyle) {
+      final distance = (weight - 700).abs();
+      if (distance < _boldDistance) {
+        _boldDistance = distance;
+        _boldPath = path;
+      }
+    } else {
+      final distance = (weight - 400).abs();
+      if (distance < _regularDistance) {
+        _regularDistance = distance;
+        _regularPath = path;
+        _regularHasWeightAxis = info.hasWeightAxis;
+      }
+    }
+    if (_category == FontCategory.unknown) _category = category;
+  }
+
+  SystemFontFamilyFaces build() {
+    // משפחה שקיימת רק בבולד (כמו רוב גופני גוטמן בהתקנות מסוימות) עדיין מוצגת.
+    final regular = _regularPath ?? _boldPath!;
+    // בגופן משתנה הבולד מגיע מציר ה-wght, לא מקובץ נפרד.
+    final useBoldFace = _regularPath != null && !_regularHasWeightAxis;
+    return SystemFontFamilyFaces(
+      family: family,
+      regularPath: regular,
+      boldPath: useBoldFace ? _boldPath : null,
+      hasWeightAxis: _regularHasWeightAxis,
+      category: _category,
+    );
+  }
 }
 
 /// מידע על גופן

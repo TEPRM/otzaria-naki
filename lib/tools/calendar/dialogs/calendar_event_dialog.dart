@@ -2,10 +2,12 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:otzaria/widgets/misc/rtl_icon.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:kosher_dart/kosher_dart.dart';
+import 'package:otzaria/core/messages/tools_messages.dart';
 import 'package:otzaria/core/ui_snack.dart';
 import 'package:otzaria/tools/calendar/utils/calendar_cubit.dart';
 import 'package:otzaria/tools/calendar/helpers/calendar_date_helpers.dart';
@@ -123,6 +125,8 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
   late final TextEditingController _yearsController;
   late final TextEditingController _dateController;
   late final FocusNode _dateFocusNode;
+  late final TextEditingController _endDateController;
+  late final FocusNode _endDateFocusNode;
 
   // ── State ─────────────────────────────────────────────────────────────────
   late DateTime _selectedDate;
@@ -169,6 +173,12 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
       text: _formatPrimaryDate(_selectedDate),
     );
     _dateFocusNode = FocusNode();
+    _endDateController = TextEditingController(
+      text: _selectedEndDate == null
+          ? ''
+          : _formatPrimaryDate(_selectedEndDate!),
+    );
+    _endDateFocusNode = FocusNode();
 
     _notificationMinutes =
         ev?.notificationMinutes ?? _smartDefaultNotification();
@@ -182,6 +192,8 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
     _yearsController.dispose();
     _dateController.dispose();
     _dateFocusNode.dispose();
+    _endDateController.dispose();
+    _endDateFocusNode.dispose();
     super.dispose();
   }
 
@@ -285,6 +297,13 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
     }
   }
 
+  void _setEndDate(DateTime date) {
+    setState(() => _selectedEndDate = date);
+    if (!_endDateFocusNode.hasFocus) {
+      _endDateController.text = _formatPrimaryDate(date);
+    }
+  }
+
   // הלוח הראשי לפי ההגדרות: משולב/עברי → עברי, לועזי → לועזי.
   bool get _primaryIsHebrew =>
       widget.state.calendarType != CalendarType.gregorian;
@@ -305,17 +324,18 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
     return date.year == now.year ? base : '$base ${date.year}';
   }
 
-  /// תת-כותרת: התאריך בלוח המשני (ההפוך מהראשי) + שעת האירוע.
-  String _startSubtitle() {
-    final String secondary;
+  /// התאריך בלוח המשני (ההפוך מהראשי).
+  String _formatSecondaryDate(DateTime date) {
     if (_primaryIsHebrew) {
-      secondary =
-          '${_selectedDate.day} ${getGregorianMonthName(_selectedDate.month)} ${_selectedDate.year}';
-    } else {
-      final jd = _selectedJewishDate;
-      secondary =
-          '${formatHebrewDay(jd.getJewishDayOfMonth())} ${getHebrewMonthNameFor(jd)} ${formatHebrewYear(jd.getJewishYear())}';
+      return '${date.day} ${getGregorianMonthName(date.month)} ${date.year}';
     }
+    final jd = JewishDate.fromDateTime(date);
+    return '${formatHebrewDay(jd.getJewishDayOfMonth())} ${getHebrewMonthNameFor(jd)} ${formatHebrewYear(jd.getJewishYear())}';
+  }
+
+  /// תת-כותרת: התאריך בלוח המשני + שעת האירוע.
+  String _startSubtitle() {
+    final secondary = _formatSecondaryDate(_selectedDate);
     final t = _selectedTime;
     if (t == null) return secondary;
     return '$secondary · '
@@ -328,17 +348,26 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
   // ── תאריך ────────────────────────────────────────────────────────────────
 
   /// מעדכן חי את התאריך לפי טקסט שהוקלד בשדה החיפוש (בלי לעצב מחדש את השדה).
-  void _onDateSearchChanged(String value) {
+  void _onDateSearchChanged(
+    String value, {
+    required ValueChanged<DateTime> onLiveChange,
+    DateTime? minDate,
+  }) {
     final parsed = parseCalendarDate(
       value.trim(),
       currentJewishYear: _selectedJewishDate.getJewishYear(),
     );
     if (parsed == null || !isJumpToDateInRange(parsed)) return;
-    _onDateChanged(parsed);
+    if (minDate != null && parsed.isBefore(minDate)) return;
+    onLiveChange(parsed);
   }
 
   /// מאשר תאריך שהוקלד. מחזיר true אם הפירוש הצליח (לסגירת התפריט).
-  bool _applyTypedDate(String value) {
+  bool _applyTypedDate(
+    String value, {
+    required ValueChanged<DateTime> onPicked,
+    DateTime? minDate,
+  }) {
     final parsed = parseCalendarDate(
       value.trim(),
       currentJewishYear: _selectedJewishDate.getJewishYear(),
@@ -351,7 +380,11 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
       UiSnack.showError('התאריך מחוץ לטווח הנתמך.');
       return false;
     }
-    _onDatePicked(parsed);
+    if (minDate != null && parsed.isBefore(minDate)) {
+      UiSnack.showError(ToolsMessages.eventEndBeforeStart);
+      return false;
+    }
+    onPicked(parsed);
     return true;
   }
 
@@ -360,9 +393,18 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
     _dateController.text = _formatPrimaryDate(date);
   }
 
+  void _onEndDatePicked(DateTime date) {
+    _setEndDate(date);
+    _endDateController.text = _formatPrimaryDate(date);
+  }
+
   /// מובייל: דיאלוג בורר התאריך.
-  Future<void> _pickDateWithDialog() async {
-    DateTime tempDate = _selectedDate;
+  Future<void> _pickDateWithDialog({
+    required DateTime initialDate,
+    required ValueChanged<DateTime> onPicked,
+    DateTime? firstDate,
+  }) async {
+    DateTime tempDate = initialDate;
     bool showHebrew = calendarDefaultShowHebrew(widget.state.calendarType);
     final confirmed = await showDialog<bool>(
       context: context,
@@ -386,7 +428,7 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
             child: CalendarDatePickerPanel(
               selectedDate: tempDate,
               currentDate: DateTime.now(),
-              firstDate: kJumpToDateFirstDate,
+              firstDate: firstDate ?? kJumpToDateFirstDate,
               lastDate: kJumpToDateLastDate,
               showHebrew: showHebrew,
               bodyHeight: 290,
@@ -396,7 +438,7 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
         ),
       ),
     );
-    if (confirmed == true && mounted) _onDatePicked(tempDate);
+    if (confirmed == true && mounted) onPicked(tempDate);
   }
 
   // ── שעה ──────────────────────────────────────────────────────────────────
@@ -586,7 +628,7 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
     }
 
     final isRecurring = _selectedRecurrenceType != RecurrenceType.none;
-    // באירוע חוזר התאריך מגביל את החזרה; באירוע בודד הוא סוף הטווח.
+    // תאריך הסיום הוא תמיד סוף טווח הימים של האירוע (המופע הראשון כשחוזר).
     DateTime? endDate;
     if (_selectedEndDate != null) {
       final start = DateTime(
@@ -600,10 +642,16 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
         _selectedEndDate!.day,
       );
       if (end.isBefore(start)) {
-        UiSnack.showError('תאריך הסיום חייב להיות אחרי תאריך ההתחלה.');
+        UiSnack.showError(ToolsMessages.eventEndBeforeStart);
         return;
       }
-      endDate = isRecurring || end.isAfter(start) ? end : null;
+      if (isRecurring &&
+          end.difference(start).inDays >=
+              minRecurrencePeriodDays(_selectedRecurrenceType)) {
+        UiSnack.showError(ToolsMessages.eventRangeLongerThanRecurrence);
+        return;
+      }
+      endDate = end.isAfter(start) ? end : null;
     }
 
     if (_selectedTime != null && _selectedEndTime != null) {
@@ -632,23 +680,6 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
         colorChanged: _colorChanged,
       ),
     );
-  }
-
-  Future<void> _pickEndDate() async {
-    final start = DateTime(
-      _selectedDate.year,
-      _selectedDate.month,
-      _selectedDate.day,
-    );
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: _selectedEndDate ?? start,
-      firstDate: start,
-      lastDate: DateTime(start.year + 10),
-    );
-    if (picked != null) {
-      setState(() => _selectedEndDate = picked);
-    }
   }
 
   String _colorSubtitle() => CalendarEventColors.labelOf(_selectedColorIndex);
@@ -771,34 +802,94 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
   }
 
   Widget _buildDateField() {
+    return _buildDatePickerField(
+      selectedDate: _selectedDate,
+      label: _formatPrimaryDate(_selectedDate),
+      controller: _dateController,
+      focusNode: _dateFocusNode,
+      onLiveChange: _onDateChanged,
+      onPicked: _onDatePicked,
+    );
+  }
+
+  Widget _buildEndDateField() {
+    final start = DateTime(
+      _selectedDate.year,
+      _selectedDate.month,
+      _selectedDate.day,
+    );
+    final end = _selectedEndDate;
+    return _buildDatePickerField(
+      selectedDate: end ?? start,
+      label: end == null ? 'בחר' : _formatPrimaryDate(end),
+      controller: _endDateController,
+      focusNode: _endDateFocusNode,
+      firstDate: start,
+      onLiveChange: _setEndDate,
+      onPicked: _onEndDatePicked,
+    );
+  }
+
+  /// כפתור בחירת תאריך משותף להתחלה ולסיום — לוח עברי/לועזי + הקלדה חופשית.
+  Widget _buildDatePickerField({
+    required DateTime selectedDate,
+    required String label,
+    required TextEditingController controller,
+    required FocusNode focusNode,
+    required ValueChanged<DateTime> onLiveChange,
+    required ValueChanged<DateTime> onPicked,
+    DateTime? firstDate,
+  }) {
     if (!_isDesktop) {
       return _pickerButton(
-        icon: FluentIcons.calendar_24_regular,
-        label: _formatPrimaryDate(_selectedDate),
-        onTap: _pickDateWithDialog,
+        icon: OtzariaIcons.calendar_24_regular,
+        label: label,
+        onTap: () => _pickDateWithDialog(
+          initialDate: selectedDate,
+          firstDate: firstDate,
+          onPicked: onPicked,
+        ),
       );
     }
     return _AnchoredMenu(
       popupWidth: 320,
-      onEnter: () => _applyTypedDate(_dateController.text),
+      onEnter: () => _applyTypedDate(
+        controller.text,
+        onPicked: onPicked,
+        minDate: firstDate,
+      ),
       onOpened: () {
-        _dateController.text = _formatPrimaryDate(_selectedDate);
-        _dateFocusNode.requestFocus();
-        _dateController.selection = TextSelection(
+        controller.text = _formatPrimaryDate(selectedDate);
+        focusNode.requestFocus();
+        controller.selection = TextSelection(
           baseOffset: 0,
-          extentOffset: _dateController.text.length,
+          extentOffset: controller.text.length,
         );
       },
       buttonBuilder: (ctx, open) => _pickerButton(
-        icon: FluentIcons.calendar_24_regular,
-        label: _formatPrimaryDate(_selectedDate),
+        icon: OtzariaIcons.calendar_24_regular,
+        label: label,
         onTap: open,
       ),
-      popupBuilder: (ctx, close) => _buildDatePopup(close),
+      popupBuilder: (ctx, close) => _buildDatePopup(
+        selectedDate: selectedDate,
+        controller: controller,
+        focusNode: focusNode,
+        firstDate: firstDate,
+        onLiveChange: onLiveChange,
+        onPicked: onPicked,
+      ),
     );
   }
 
-  Widget _buildDatePopup(VoidCallback close) {
+  Widget _buildDatePopup({
+    required DateTime selectedDate,
+    required TextEditingController controller,
+    required FocusNode focusNode,
+    required ValueChanged<DateTime> onLiveChange,
+    required ValueChanged<DateTime> onPicked,
+    DateTime? firstDate,
+  }) {
     return Padding(
       padding: const EdgeInsets.all(12),
       child: Column(
@@ -822,24 +913,28 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
           ),
           const SizedBox(height: 8),
           RtlTextField(
-            controller: _dateController,
-            focusNode: _dateFocusNode,
+            controller: controller,
+            focusNode: focusNode,
             decoration: const InputDecoration(
               labelText: 'חיפוש תאריך',
               isDense: true,
               border: OutlineInputBorder(),
             ),
-            onChanged: _onDateSearchChanged,
+            onChanged: (value) => _onDateSearchChanged(
+              value,
+              onLiveChange: onLiveChange,
+              minDate: firstDate,
+            ),
           ),
           const SizedBox(height: 8),
           CalendarDatePickerPanel(
-            selectedDate: _selectedDate,
+            selectedDate: selectedDate,
             currentDate: DateTime.now(),
-            firstDate: kJumpToDateFirstDate,
+            firstDate: firstDate ?? kJumpToDateFirstDate,
             lastDate: kJumpToDateLastDate,
             showHebrew: _dateShowHebrew,
             bodyHeight: 270,
-            onDateChanged: _onDatePicked,
+            onDateChanged: onPicked,
           ),
         ],
       ),
@@ -975,7 +1070,7 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
               // תחילת האירוע — תאריך + שעה מאוחדים.
               // מיקום הכפתורים והגלישה שלהם מנוהלים ע"י SettingsActionTile.
               SettingsActionTile.text(
-                rtlIcon: FluentIcons.calendar_24_regular,
+                rtlIcon: OtzariaIcons.calendar_24_regular,
                 title: 'תחילת האירוע',
                 subtitle: _startSubtitle(),
                 actions: [
@@ -996,11 +1091,9 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
 
               SettingsActionTile.text(
                 icon: FluentIcons.calendar_arrow_right_24_regular,
-                title: isRecurring ? 'החזרה מסתיימת' : 'תאריך סיום',
+                title: 'תאריך סיום',
                 subtitle: _selectedEndDate != null
-                    ? 'סיום: ${_selectedEndDate!.day}/${_selectedEndDate!.month}/${_selectedEndDate!.year}'
-                    : isRecurring
-                    ? 'חזרה ללא תאריך סיום'
+                    ? 'סיום: ${_formatSecondaryDate(_selectedEndDate!)}'
                     : 'אירוע של יום אחד',
                 actions: [
                   if (_selectedEndDate != null)
@@ -1009,11 +1102,7 @@ class _CalendarEventDialogState extends State<CalendarEventDialog> {
                       label: 'נקה',
                       onTap: () => setState(() => _selectedEndDate = null),
                     ),
-                  _pickerButton(
-                    icon: FluentIcons.calendar_24_regular,
-                    label: 'בחר',
-                    onTap: _pickEndDate,
-                  ),
+                  _buildEndDateField(),
                 ],
               ),
 

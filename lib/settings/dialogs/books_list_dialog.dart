@@ -1,8 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -10,6 +10,7 @@ import 'package:otzaria/core/messages/settings_messages.dart';
 import 'package:otzaria/settings/l10n/settings_l10n_exports.dart';
 import 'package:otzaria/core/ui_snack.dart';
 import 'package:otzaria/models/books.dart';
+import 'package:otzaria/utils/file/save_file_with_extension.dart';
 import 'package:otzaria/widgets/text/rtl_text_field.dart';
 import 'package:otzaria/widgets/widgets_exports.dart';
 
@@ -76,14 +77,12 @@ class _BooksListDialogState extends State<_BooksListDialog> {
 
     final csv = _buildCsv(_rows);
     final bytes = Uint8List.fromList(utf8.encode('\uFEFF$csv'));
-    final path = await FilePicker.saveFile(
+    final path = await saveFileWithExtension(
       dialogTitle: context.settingsText('בחר מיקום לשמירת רשימת הספרים'),
       fileName: 'otzaria_books.csv',
       initialDirectory: downloadsDirectory?.path,
-      allowedExtensions: ['csv'],
-      type: FileType.custom,
+      extension: 'csv',
       bytes: bytes,
-      lockParentWindow: true,
     );
     if (path == null || !mounted) return;
 
@@ -120,7 +119,7 @@ class _BooksListDialogState extends State<_BooksListDialog> {
             children: [
               Row(
                 children: [
-                  Icon(FluentIcons.book_24_regular, color: cs.primary),
+                  Icon(OtzariaIcons.book_24_regular, color: cs.primary),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
@@ -141,7 +140,7 @@ class _BooksListDialogState extends State<_BooksListDialog> {
                 controller: _searchController,
                 autofocus: true,
                 decoration: InputDecoration(
-                  prefixIcon: const Icon(FluentIcons.search_24_regular),
+                  prefixIcon: const Icon(OtzariaIcons.search_24_regular),
                   hintText: context.settingsText(
                     'חיפוש לפי שם, מחבר או קטגוריה',
                   ),

@@ -8,7 +8,7 @@ import 'package:otzaria/plugins/bloc/plugin_system_bloc.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_event.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_state.dart';
 import 'package:otzaria/plugins/models/installed_plugin.dart';
-import 'package:otzaria/plugins/utils/fluent_icon_resolver.dart';
+import 'package:otzaria/plugins/utils/plugin_icon_resolver.dart';
 import 'package:otzaria/plugins/view/plugin_actions.dart';
 import 'package:otzaria/plugins/view/plugin_settings_screen.dart';
 import 'package:otzaria/plugins/view/widgets/plugin_drop_zone.dart';
@@ -300,7 +300,7 @@ class _PluginListTile extends StatelessWidget {
         clipBehavior: Clip.none,
         children: [
           Icon(
-            fluentIconFromName(plugin.manifest.toolTabIconName) ??
+            pluginIconFromName(plugin.manifest.toolTabIconName) ??
                 FluentIcons.puzzle_piece_24_regular,
           ),
           if (plugin.isDevelopment)
@@ -504,7 +504,7 @@ class _DragFeedback extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              fluentIconFromName(plugin.manifest.toolTabIconName) ??
+              pluginIconFromName(plugin.manifest.toolTabIconName) ??
                   FluentIcons.puzzle_piece_24_regular,
             ),
             const SizedBox(width: 8),

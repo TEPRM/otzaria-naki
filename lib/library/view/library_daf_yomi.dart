@@ -1,4 +1,4 @@
-import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:kosher_dart/kosher_dart.dart';
@@ -42,11 +42,16 @@ class _LibraryDafYomiState extends State<LibraryDafYomi> {
 
   @override
   Widget build(BuildContext context) {
-    final Daf dafYomi = getDafYomi(DateTime.now());
+    // היום הלוחי בא מלוח השנה, שמעביר יום בשקיעה/צאת/ר"ת לפי העיר.
+    // DateTime.now() מתחלף בחצות, ולכן הציג כל הערב יום ודף אחרים מהלוח.
+    final calendarDay = context.select<CalendarCubit, DateTime>(
+      (cubit) => cubit.state.todayGregorianDate,
+    );
+    final Daf dafYomi = getDafYomi(calendarDay);
     final tractate = dafYomi.getMasechta();
     final dafAmud = dafYomi.getDaf();
     final dafText = '$tractate ${formatAmud(dafAmud)}';
-    final dateText = getHebrewDateFormattedAsString(DateTime.now());
+    final dateText = getHebrewDateFormattedAsString(calendarDay);
 
     final content = Row(
       mainAxisSize: MainAxisSize.min,
@@ -55,7 +60,7 @@ class _LibraryDafYomiState extends State<LibraryDafYomi> {
           message: 'פתח לוח שנה',
           child: BarButton.text(
             text: dateText,
-            icon: FluentIcons.calendar_24_regular,
+            icon: OtzariaIcons.calendar_24_regular,
             onPressed: _openCalendar,
           ),
         ),
@@ -63,7 +68,7 @@ class _LibraryDafYomiState extends State<LibraryDafYomi> {
           message: 'פתח דף יומי: $dafText',
           child: BarButton.text(
             text: dafText,
-            icon: FluentIcons.book_24_regular,
+            icon: OtzariaIcons.book_24_regular,
             onPressed: widget.dafEnabled
                 ? () => widget.onDafYomiTap(tractate, formatAmud(dafAmud))
                 : null,

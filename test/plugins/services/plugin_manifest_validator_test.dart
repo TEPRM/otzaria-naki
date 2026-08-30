@@ -323,5 +323,164 @@ void main() {
         throwsA(predicate((error) => error.toString().contains('path'))),
       );
     });
+
+    test('דוחה ערך stability לא תקין', () async {
+      final manifest = PluginManifest(
+        schemaVersion: 1,
+        id: 'test.validator.stability',
+        name: 'Validator',
+        version: '1.0.0',
+        description: '',
+        author: '',
+        homepage: '',
+        entrypoint: 'index.html',
+        minAppVersion: '1.0.0',
+        sdkVersion: '1.x',
+        stability: 'alpha',
+        permissions: const [],
+        networkEnabled: false,
+        networkAllowlist: const [],
+        toolTabTitle: 'Validator',
+        toolTabOrder: 900,
+        defaultPinned: false,
+        publishedDataTypes: const [],
+      );
+
+      await expectLater(
+        PluginManifestValidator.validateManifest(
+          manifest: manifest,
+          directoryPath: '/',
+          skipAppVersionValidation: true,
+          skipFileValidation: true,
+        ),
+        throwsA(predicate((e) => e.toString().contains('stability'))),
+      );
+    });
+
+    test('collectManifestErrors אוסף את כל השגיאות בבת אחת', () async {
+      final manifest = PluginManifest(
+        schemaVersion: 2,
+        id: 'INVALID ID',
+        name: 'Validator',
+        version: 'not-a-version',
+        description: '',
+        author: '',
+        homepage: '',
+        entrypoint: 'index.html',
+        minAppVersion: '1.0.0',
+        sdkVersion: '1.x',
+        stability: 'alpha',
+        permissions: const [],
+        networkEnabled: false,
+        networkAllowlist: const [],
+        toolTabTitle: 'Validator',
+        toolTabOrder: 900,
+        defaultPinned: false,
+        publishedDataTypes: const [],
+      );
+
+      final errors = await PluginManifestValidator.collectManifestErrors(
+        manifest: manifest,
+        directoryPath: '/',
+        skipAppVersionValidation: true,
+        skipFileValidation: true,
+      );
+
+      // schemaVersion + id + version + stability — כולן מדווחות יחד.
+      expect(errors.length, greaterThanOrEqualTo(4));
+      expect(errors.any((e) => e.contains('סכמה')), isTrue);
+      expect(errors.any((e) => e.contains('מזהה התוסף')), isTrue);
+      expect(errors.any((e) => e.contains('SemVer')), isTrue);
+      expect(errors.any((e) => e.contains('stability')), isTrue);
+    });
+
+    // המזהה מרכיב את נתיב תיקיית הנתונים, ו-`..` היה מוציא את המרחב הפרטי
+    // מתיקיית התוסף — ובשחזור גיבוי גם מוחק תיקייה שרירותית.
+    test('isValidPluginId דוחה רצף נקודות ותווים אסורים', () {
+      for (final bad in [
+        '..',
+        '.',
+        '...',
+        'INVALID ID',
+        'a/b',
+        r'a\b',
+        'Upper',
+        '',
+        'a b',
+      ]) {
+        expect(
+          PluginManifestValidator.isValidPluginId(bad),
+          isFalse,
+          reason: 'צריך להידחות: "$bad"',
+        );
+      }
+      for (final good in [
+        'my.plugin',
+        'a-b_c.1',
+        'x',
+        '.hidden',
+        'a..b',
+      ]) {
+        expect(
+          PluginManifestValidator.isValidPluginId(good),
+          isTrue,
+          reason: 'צריך לעבור: "$good"',
+        );
+      }
+    });
+
+    test('קריאת API ללא הרשאה מקבלת הודעה שמכוונת להסרה', () async {
+      final errors = await PluginManifestValidator.collectManifestErrors(
+        manifest: _manifest(const ['feedback.report']),
+        directoryPath: '/',
+        skipAppVersionValidation: true,
+        skipFileValidation: true,
+      );
+      expect(errors, hasLength(1));
+      expect(errors.single, contains('אינה דורשת הרשאה'));
+      expect(errors.single, contains('הסירו אותה מ-permissions'));
+    });
+
+    test('קריאת API עם הרשאה ידועה מקבלת רמז לשם ההרשאה', () async {
+      final errors = await PluginManifestValidator.collectManifestErrors(
+        manifest: _manifest(const ['network.fetch']),
+        directoryPath: '/',
+        skipAppVersionValidation: true,
+        skipFileValidation: true,
+      );
+      expect(errors, hasLength(1));
+      expect(errors.single, contains('האם התכוונת ל-"network.access"?'));
+    });
+
+    test('הרשאה שאינה קיימת כלל נשארת עם ההודעה הגנרית', () async {
+      final errors = await PluginManifestValidator.collectManifestErrors(
+        manifest: _manifest(const ['made.up.permission']),
+        directoryPath: '/',
+        skipAppVersionValidation: true,
+        skipFileValidation: true,
+      );
+      expect(errors, hasLength(1));
+      expect(errors.single, contains('הרשאה לא חוקית שנדרשת על ידי התוסף'));
+    });
   });
 }
+
+PluginManifest _manifest(List<String> permissions) => PluginManifest(
+  schemaVersion: 1,
+  id: 'test.validator.permissions',
+  name: 'Validator',
+  version: '1.0.0',
+  description: '',
+  author: '',
+  homepage: '',
+  entrypoint: 'index.html',
+  minAppVersion: '1.0.0',
+  sdkVersion: '1.x',
+  permissions: permissions,
+  networkEnabled: false,
+  networkAllowlist: const [],
+  toolTabTitle: 'Validator',
+  toolTabOrder: 900,
+  defaultPinned: false,
+  publishedDataTypes: const [],
+);

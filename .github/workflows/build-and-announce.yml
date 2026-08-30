@@ -5,6 +5,35 @@ permissions:
 
 on:
   workflow_dispatch:
+    inputs:
+      build_windows:
+        description: Build Windows artifacts
+        type: boolean
+        default: true
+      build_windows_arm64:
+        description: Build Windows ARM64 artifacts
+        type: boolean
+        default: true
+      build_linux:
+        description: Build Linux artifacts
+        type: boolean
+        default: true
+      build_android:
+        description: Build Android artifacts
+        type: boolean
+        default: true
+      build_macos:
+        description: Build macOS artifacts
+        type: boolean
+        default: true
+      create_release:
+        description: Create a GitHub release
+        type: boolean
+        default: true
+      announce_release:
+        description: Publish the forum post and Yemot notification
+        type: boolean
+        default: true
 
   # טריגר לפרסום בלבד. published נשלח גם על prerelease —
   # הוספת prereleased לרשימה גורמת להרצה כפולה (שני פוסטים בפורום)
@@ -18,7 +47,7 @@ jobs:
     outputs:
       is_version: ${{ steps.check.outputs.is_version }}
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v7.0.1
       - name: Check if commit message is a version tag
         id: check
         run: |
@@ -35,7 +64,7 @@ jobs:
           fi
 
   build_windows:
-    if: github.event_name != 'release' && github.event_name != 'pull_request'
+    if: github.event_name != 'release' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.build_windows)
     runs-on: windows-2022
     env:
       # VC++ Redistributable מקובע ב-URL ישיר של מיקרוסופט (לא aka.ms שזז),
@@ -53,7 +82,7 @@ jobs:
     #   CARGO_HOME:  ${{ github.workspace }}\.cargo
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -83,7 +112,7 @@ jobs:
       #   uses: dtolnay/rust-toolchain@stable
 
       # - name: Cache cargo registry and git
-      #   uses: actions/cache@v4.2.3
+      #   uses: actions/cache@v6.1.0
       #   with:
       #     path: |
       #       ${{ env.CARGO_HOME }}\registry
@@ -470,56 +499,215 @@ jobs:
           }
 
       - name: Upload Windows installer (regular)
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-windows-installer
           path: installer/otzaria-*-windows.exe
 
       - name: Upload Windows installer (full)
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-windows-installer-full
           path: installer/otzaria-*-windows-full.exe
 
       - name: Upload Windows indexed installer tools
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-windows-indexed-installer-tools
           path: indexed-installer-tools/*
 
       - name: Upload Windows ZIP
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-windows-zip
           path: otzaria-windows.zip
 
+  # בניית Windows ARM64 נייטיבית — הפתרון לתוספים המתים באמולציית x64 על
+  # מכשירי Snapdragon (issue #1014): WebView2 מסרב ליצור controller במסלול
+  # הקומפוזיציה תחת אמולציה. חייבת לרוץ על רץ ARM — ל-Flutter אין
+  # קרוס-קומפילציה של Windows. בכוונה רזה מה-job של x64: מתקין רגיל ו-ZIP
+  # נייד בלבד, בלי מתקין FULL (יתווסף בהמשך לפי ביקוש).
+  build_windows_arm64:
+    if: github.event_name != 'release' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.build_windows_arm64)
+    runs-on: windows-11-arm
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v7.0.1
+
+      # אין חבילת SDK רשמית של Flutter ל-Windows-ARM במניפסט של flutter-action —
+      # מתקינים מ-git באותו תג, כמו בלינוקס-ARM. ה-bootstrap מוריד Dart SDK
+      # נייטיבי ל-arm64, וזה קריטי: הכלי קובע את ארכיטקטורת היעד לפי
+      # Abi.current() של תהליך ה-Dart, כך ש-SDK של x64 באמולציה בונה x64.
+      - name: Set up Flutter (arm64, from git)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git clone --depth 1 --branch 3.44.0 https://github.com/flutter/flutter.git "$env:RUNNER_TEMP\flutter"
+          "$env:RUNNER_TEMP\flutter\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & "$env:RUNNER_TEMP\flutter\bin\flutter.bat" --version
+          $dartVersion = & "$env:RUNNER_TEMP\flutter\bin\cache\dart-sdk\bin\dart.exe" --version 2>&1
+          Write-Host "Dart: $dartVersion"
+          if ("$dartVersion" -notmatch 'arm64') {
+            throw "Expected a native arm64 Dart SDK — got: $dartVersion"
+          }
+
+      - name: Create Google Calendar Credentials
+        shell: pwsh
+        run: |
+          $clientId = '${{ secrets.GOOGLE_CALENDAR_CLIENT_ID }}'
+          $clientSecret = '${{ secrets.GOOGLE_CALENDAR_CLIENT_SECRET }}'
+          if ([string]::IsNullOrWhiteSpace($clientId) -or [string]::IsNullOrWhiteSpace($clientSecret)) {
+            throw "Google Calendar secrets are missing. Please set GOOGLE_CALENDAR_CLIENT_ID and GOOGLE_CALENDAR_CLIENT_SECRET."
+          }
+          $credentialsContent = @"
+          class GoogleCalendarCredentials {
+            static const String clientId = '$clientId';
+            static const String clientSecret = '$clientSecret';
+          }
+          "@
+          $credentialsContent | Out-File -FilePath "lib/tools/calendar/services/google_calendar_credentials.dart" -Encoding UTF8
+          Write-Host "Google Calendar credentials file created"
+
+      - name: Install Inno Setup (project script + fallback)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path .\installer\install_inno_setup.ps1) {
+            Write-Host "Running local installer script..."
+            .\installer\install_inno_setup.ps1
+          } else {
+            Write-Host "Local installer script not found, skipping."
+          }
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            if (Get-Command winget -ErrorAction SilentlyContinue) {
+              Write-Host "Installing Inno Setup via winget..."
+              winget install -e --id JRSoftware.InnoSetup --silent --accept-package-agreements --accept-source-agreements
+            } else {
+              Write-Host "winget not found, installing via Chocolatey..."
+              choco install innosetup -y --no-progress
+            }
+          }
+          # הסקריפט של הפרויקט מתקין לעיתים per-user — מחפשים גם שם.
+          $iscc = (Get-ChildItem "C:\Program Files*\Inno Setup*\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup*\ISCC.exe" -Recurse -ErrorAction SilentlyContinue |
+                   Select-Object -First 1 -ExpandProperty FullName)
+          if (-not $iscc) { throw "ISCC.exe not found after installation" }
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "ISCC resolved to: $iscc"
+
+      - name: Prepare Flutter dependencies for Windows release
+        shell: pwsh
+        run: |
+          flutter pub get
+          dart run tool/generate_search_index.dart
+          dart run tool/generate_settings_l10n.dart
+
+      - name: Bundle VC++ Redistributable runtime DLLs (app-local, ARM64)
+        shell: pwsh
+        run: |
+          # מקביל לשלב ה-x64, בהבדל אחד: אין redist ציבורי מוצמד ל-ARM64 עם
+          # SHA ידוע, ואין שם גרסה ידועה-כפגומה להתגונן מפניה (באג 14.36 היה
+          # x64). לכן מעתיקים את ה-DLLs הנייטיביים של רץ ה-ARM מ-System32 —
+          # תמיד עדכניים ב-runner image — ורושמים את גרסאותיהם ללוג.
+          $ErrorActionPreference = 'Stop'
+          $destDir = "installer\vcredist\arm64"
+          New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+          $dlls = @(
+            'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
+            'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll',
+            'vcruntime140.dll', 'vcruntime140_1.dll', 'vcruntime140_threads.dll',
+            'concrt140.dll', 'vccorlib140.dll'
+          )
+          $copied = 0
+          foreach ($d in $dlls) {
+            $src = Join-Path $env:SystemRoot "System32\$d"
+            if (Test-Path $src) {
+              Copy-Item -Path $src -Destination (Join-Path $destDir $d) -Force
+              $ver = (Get-Item $src).VersionInfo.FileVersion
+              Write-Host "  copied $d (v$ver)"
+              $copied++
+            } else {
+              Write-Host "::warning::$d not found in System32 — skipping"
+            }
+          }
+          if ($copied -eq 0) { throw "No VC++ runtime DLLs found in System32" }
+          Write-Host "VC++ runtime DLLs staged in $destDir"
+
+      - name: Build Flutter Windows app (ARM64)
+        shell: pwsh
+        env:
+          UseMultiToolTask: 'true'
+          EnforceProcessCountAcrossBuilds: 'true'
+          CMAKE_BUILD_PARALLEL_LEVEL: '4'
+        run: |
+          flutter build windows --release --verbose
+          if (-not (Test-Path 'build\windows\arm64\runner\Release\otzaria.exe')) {
+            throw 'Expected an arm64 build output — the tool built a different architecture'
+          }
+
+      - name: Zip Windows ARM64 build
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "build\windows\arm64\runner\Release\*" -DestinationPath otzaria-windows-arm64.zip
+          # portable.marker — ראה ההסבר בשלב המקביל ב-build_windows.
+          $marker = Join-Path $env:RUNNER_TEMP 'portable.marker'
+          New-Item -ItemType File -Path $marker -Force | Out-Null
+          Compress-Archive -Path $marker -Update -DestinationPath otzaria-windows-arm64.zip
+
+      - name: Build Inno Setup installer (ARM64)
+        shell: pwsh
+        run: |
+          & "$env:ISCC" /DAppArch=arm64 installer\otzaria.iss
+          if ($LASTEXITCODE -ne 0) {
+            throw "ARM64 installer build failed"
+          }
+
+      - name: Upload Windows ARM64 installer
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: otzaria-windows-arm64-installer
+          path: installer/otzaria-*-windows-arm64.exe
+
+      - name: Upload Windows ARM64 ZIP
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: otzaria-windows-arm64-zip
+          path: otzaria-windows-arm64.zip
+
   build_linux:
+    name: Linux ${{ matrix.target }} ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [deb, rpm, raw, full]
+        arch: [x86_64, aarch64]
     # רץ בקונטיינר debian:bookworm — רצפת התאימות של ההפצה: glibc 2.36. רקע:
     # noble (Ubuntu 24.04) הסירה את wpewebkit מהארכיון, וה-WPE החבילתי (גם ב-trixie)
     # נבנה בלי DEVELOPER_MODE ולכן מתעלם מ-WEBKIT_EXEC_PATH — לא ניתן ל-self-contained.
     # לכן מורידים SDK של WPE 2.48.7 שנבנה מהמקור (Otzaria/otzaria-wpe-runtime על
     # bookworm, DEVELOPER_MODE=ON) ל-/opt/wpe-sdk ובונים מולו.
-    if: github.event_name != 'release' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    if: github.event_name != 'release' && (github.event_name != 'workflow_dispatch' || inputs.build_linux)
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     container:
       image: debian:bookworm-slim
     env:
       RUSTUP_HOME: ${{ github.workspace }}/.rustup
       CARGO_HOME:  ${{ github.workspace }}/.cargo
       DEBIAN_FRONTEND: noninteractive
+      # תיקיית הפלט של flutter נגזרת מארכיטקטורת המארח (x64 / arm64).
+      FLUTTER_BUILD_DIR: build/linux/${{ matrix.arch == 'aarch64' && 'arm64' || 'x64' }}/release
       # ה-SDK של WPE נפרס ל-/opt/wpe-sdk; pkg-config וה-loader מוצאים אותו דרך אלה.
       PKG_CONFIG_PATH: /opt/wpe-sdk/lib/pkgconfig
       LD_LIBRARY_PATH: /opt/wpe-sdk/lib
       # ה-try_compile של התוסף מלנקק בלי -L; בלי זה בדיקת WPEPlatform נכשלת ונופלים ל-FDO
       LIBRARY_PATH: /opt/wpe-sdk/lib
       # הפלאגין jni דורש כותרות JDK בזמן CMake (ב-runner הרגיל JDK מותקן מראש)
-      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-${{ matrix.arch == 'aarch64' && 'arm64' || 'amd64' }}
     steps:
-      # חובה לפני actions/checkout: הקונטיינר מינימלי וחסרים בו git/curl/unzip/zstd.
+      # חובה לפני actions/checkout.0.1: הקונטיינר מינימלי וחסרים בו git/curl/unzip/zstd.
       # בלי git ה-checkout מוריד tarball בלי היסטוריה ושלב בדיקת הגרסה (git log) נשבר;
       # zstd נדרש ל-cache של actions וגם לחילוץ ה-SDK (tar.zst).
       - name: Prepare container base tools
@@ -533,7 +721,7 @@ jobs:
           # בלי wildcard כל פקודת git (כולל flutter עצמו) נופלת על dubious ownership.
           git config --global --add safe.directory '*'
       - name: Clone repository
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
 
       - name: Check if commit message is a version tag
         id: check_version
@@ -554,11 +742,26 @@ jobs:
           fi
 
       - name: Set up Flutter
+        if: matrix.arch != 'aarch64'
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: 3.44.0
           cache: true
+
+      # אין חבילת SDK רשמית של Flutter ללינוקס-ARM (המניפסט של flutter-action
+      # מכיל רק x64) — מתקינים מ-git באותו תג; ה-Dart SDK ל-arm64 יורד אוטומטית.
+      - name: Set up Flutter (aarch64, from git)
+        if: matrix.arch == 'aarch64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch 3.44.0 https://github.com/flutter/flutter.git /opt/flutter
+          echo "/opt/flutter/bin" >> "$GITHUB_PATH"
+          # flutter-action מוסיף את bin של מטמון pub ל-PATH; במסלול ה-git זה עלינו —
+          # בלעדיו flutter_distributor מותקן אך לא נמצא בהרצה.
+          echo "${PUB_CACHE:-$HOME/.pub-cache}/bin" >> "$GITHUB_PATH"
+          /opt/flutter/bin/flutter --version
 
       - name: Create Google Calendar Credentials
         shell: bash
@@ -588,7 +791,7 @@ jobs:
           rustup show
 
       - name: Cache cargo registry and git
-        uses: actions/cache@v4.2.3
+        uses: actions/cache@v6.1.0
         with:
           path: |
             ${{ env.CARGO_HOME }}/registry
@@ -624,17 +827,17 @@ jobs:
       - name: Download prebuilt WPE runtime SDK
         shell: bash
         env:
-          # גרסת ה-SDK; שם ה-asset נגזר ממנה (ראה Otzaria/otzaria-wpe-runtime).
+          # גרסת ה-SDK; שם ה-asset נגזר ממנה ומהארכיטקטורה (ראה Otzaria/otzaria-wpe-runtime).
           WPE_RUNTIME_VERSION: "2.48.7"
-          # digest שמפרסם GitHub לנכס של tag זה. עדכון גרסה מחייב עדכון מפורש
-          # של ה-hash, כדי שנכס שהוחלף ב-release לא ייכנס לבנייה בשקט.
-          WPE_RUNTIME_SHA256: "d89fa37074898afe3fb6087628f3c8b983f962c53651c393efafbed8556de49d"
+          # digest שמפרסם GitHub לנכס של tag זה, לפי ארכיטקטורה. עדכון גרסה מחייב
+          # עדכון מפורש של ה-hash, כדי שנכס שהוחלף ב-release לא ייכנס לבנייה בשקט.
+          WPE_RUNTIME_SHA256: ${{ matrix.arch == 'aarch64' && '71b24f245d982fc1e7054d8d00a1c64dcce755675f98f0c6103d1f05843e9b72' || '6890a2fe09735440316f4418fdc56b746d4b3f1a1d5a2d6a1dc608f8fa05d3b8' }}
         run: |
           set -euo pipefail
           # pin ל-tag מפורש (לא latest) — גרסת ה-SDK נגזרת רק מ-WPE_RUNTIME_VERSION.
           # מוסכמת ה-tag בריפו otzaria-wpe-runtime: wpe-<version>.
-          tag="wpe-${WPE_RUNTIME_VERSION}"
-          asset="wpe-runtime-${WPE_RUNTIME_VERSION}-linux-x86_64.tar.zst"
+          tag="candidate-wpe-2.48.7-dmabuf-20260821"
+          asset="wpe-runtime-${WPE_RUNTIME_VERSION}-linux-${{ matrix.arch }}.tar.zst"
           base="https://github.com/Otzaria/otzaria-wpe-runtime/releases/download/${tag}"
           echo "Downloading ${asset} ..."
           curl -fSL --retry 3 --retry-delay 5 -o "/tmp/${asset}" "${base}/${asset}"
@@ -694,7 +897,7 @@ jobs:
               libglib-2.0.so*|libgobject-2.0.so*|libgio-2.0.so*|libgmodule-2.0.so*|libgthread-2.0.so*|\
               libgtk-3.so*|libgdk-3.so*|libatk*.so*|\
               libcairo*.so*|libpango*.so*|libharfbuzz*.so*|libgdk_pixbuf*.so*|libfreetype.so*|libfontconfig.so*|\
-              libdbus-1.so*|libsystemd.so*|libudev.so*|libselinux.so*) return 0;;
+              libdbus-1.so*|libsystemd.so*|libudev.so*|libselinux.so*|libexpat.so*) return 0;;
             esac
             return 1
           }
@@ -729,12 +932,26 @@ jobs:
               rm -v "$f"
             fi
           done
+          APPDIR="$(dirname "$LIBDIR")"
+          if [ -x "$APPDIR/otzaria" ] && [ ! -e "$APPDIR/otzaria.bin" ]; then
+            mv "$APPDIR/otzaria" "$APPDIR/otzaria.bin"
+            cat > "$APPDIR/otzaria" <<'LAUNCHER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          APP_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+          export LD_LIBRARY_PATH="$APP_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export WEBKIT_EXEC_PATH="$APP_DIR/lib"
+          export WEBKIT_INJECTED_BUNDLE_PATH="$APP_DIR/lib"
+          exec "$APP_DIR/otzaria.bin" "$@"
+          LAUNCHER
+            chmod 755 "$APPDIR/otzaria"
+          fi
           echo "bundle_wpe: injected helper processes + $copied transitive libs into $LIBDIR"
           SCRIPT
           chmod +x /tmp/bundle_wpe.sh
 
       - name: Download library assets for Linux FULL bundle
-        if: true
+        if: matrix.target == 'full'
         shell: bash
         run: |
           set -euo pipefail
@@ -745,6 +962,7 @@ jobs:
           curl -L --fail https://github.com/Otzaria/SeforimMagicIndexer/releases/latest/download/lexical.db -o full_installer/library_db/lexical.db
       
       - name: Install flutter_distributor
+        if: matrix.target == 'deb' || matrix.target == 'rpm'
         run: dart pub global activate flutter_distributor
 
       - name: Prepare Flutter dependencies for Linux release
@@ -755,6 +973,15 @@ jobs:
           # Generate the settings .g.dart files: search index + translation catalog.
           dart run tool/generate_search_index.dart
           dart run tool/generate_settings_l10n.dart
+
+      - name: Build the search engine inside the compatibility container
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            'use_precompiled_binaries: false' \
+            'verbose_logging: true' \
+            > cargokit_options.yaml
 
       # התוסף קורא ל-webkit_web_view_get_theme_color (קיים רק מ-WebKit 2.50) בלי guard גרסה;
       # ה-SDK הוא 2.48 — עוטפים ב-WEBKIT_CHECK_VERSION עד שיתוקן בחבילה.
@@ -818,14 +1045,31 @@ jobs:
             exit 1
           fi
 
+      - name: Verify search engine glibc compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          search_lib="${FLUTTER_BUILD_DIR}/bundle/lib/libsearch_engine.so"
+          test -f "$search_lib"
+          incompatible=$(strings "$search_lib" \
+            | grep -Eo 'GLIBC_2\.(3[7-9]|[4-9][0-9])' \
+            | sort -Vu || true)
+          if [ -n "$incompatible" ]; then
+            echo "::error::libsearch_engine.so requires a glibc newer than Bookworm"
+            printf '%s\n' "$incompatible"
+            exit 1
+          fi
+          strings "$search_lib" | grep -Eo 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -n 1
+
       - name: Dump CMake error log on failure
         if: failure()
         shell: bash
         run: |
-          tail -n 120 build/linux/x64/release/CMakeFiles/CMakeError.log 2>/dev/null || true
-          tail -n 40 build/linux/x64/release/CMakeFiles/CMakeConfigureLog.yaml 2>/dev/null || true
+          tail -n 120 "${FLUTTER_BUILD_DIR}/CMakeFiles/CMakeError.log" 2>/dev/null || true
+          tail -n 40 "${FLUTTER_BUILD_DIR}/CMakeFiles/CMakeConfigureLog.yaml" 2>/dev/null || true
 
       - name: Build and Patch Linux DEB package
+        if: matrix.target == 'deb'
         shell: bash
         env:
           CC: clang
@@ -871,6 +1115,11 @@ jobs:
             echo >> "$CONTROL_FILE"
           fi
 
+          # ה-distributor עלול להטביע ארכיטקטורה שגויה בבנייה צולבת-שם — מיישרים למארח.
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            sed -i 's/^Architecture:.*/Architecture: arm64/' "$CONTROL_FILE"
+          fi
+
           echo "--- Control file AFTER fix ---"
           cat "$CONTROL_FILE"
 
@@ -893,12 +1142,18 @@ jobs:
           mkdir -p "$DEB_DIR/usr/share/metainfo"
           cp linux/packaging/otzaria.metainfo.xml "$DEB_DIR/usr/share/metainfo/otzaria.metainfo.xml"
 
+          # שם קובץ מובחן ל-arm64 — אחרת שני ה-deb מתנגשים באותו שם ב-release.
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            DEB_OUTPUT_FILE="${DEB_OUTPUT_FILE%.deb}-arm64.deb"
+          fi
+
           echo "Re-packaging from directory: $DEB_DIR into $DEB_OUTPUT_FILE"
           dpkg-deb --build --root-owner-group "$DEB_DIR" "$DEB_OUTPUT_FILE"
 
           echo "Successfully patched and rebuilt the .deb package."
         
       - name: Build and Patch Linux RPM package
+        if: matrix.target == 'rpm'
         shell: bash
         env:
           CC: clang
@@ -927,6 +1182,11 @@ jobs:
           # 3. תקן את הקובץ: מחק את שורת ה-Requires הריקה
           sed -i '/^Requires:\s*$/d' "$SPEC_FILE"
 
+          # make_config של ה-rpm מקבע build_arch: x86_64 — מיישרים לארכיטקטורת המארח.
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            sed -i 's/^BuildArch:.*/BuildArch: aarch64/' "$SPEC_FILE"
+          fi
+
           echo "--- Spec file AFTER fix ---"
           cat "$SPEC_FILE"
 
@@ -954,7 +1214,7 @@ jobs:
           # רץ אחרי בניות ה-deb/rpm של flutter_distributor (שבונות מחדש את ה-bundle
           # ולכן דורסות הזרקה מוקדמת) כדי שחבילות ה-raw וה-FULL, המועתקות מ-bundle
           # זה בשלב הבא, יהיו self-contained.
-          bash /tmp/bundle_wpe.sh "build/linux/x64/release/bundle/lib"
+          bash /tmp/bundle_wpe.sh "${FLUTTER_BUILD_DIR}/bundle/lib"
 
       - name: Verify WPE runtime in packaged artifacts
         shell: bash
@@ -977,26 +1237,27 @@ jobs:
             echo "$label: WPE runtime תקין ($libdir)"
           }
 
-          DEB_FILE=$(find dist -name '*.deb' -print -quit)
+          # ב-raw/full אין תיקיית dist — find נכשל תחת bash -e בלי ההגנה הזו.
+          DEB_FILE=$(find dist -name '*.deb' -print -quit 2>/dev/null || true)
           if [ -n "$DEB_FILE" ]; then
             rm -rf /tmp/verify-deb && mkdir -p /tmp/verify-deb
             dpkg-deb -x "$DEB_FILE" /tmp/verify-deb
             verify_tree "deb" /tmp/verify-deb
           fi
 
-          RPM_FILE=$(find dist -name '*.rpm' -print -quit)
+          RPM_FILE=$(find dist -name '*.rpm' -print -quit 2>/dev/null || true)
           if [ -n "$RPM_FILE" ]; then
             rm -rf /tmp/verify-rpm && mkdir -p /tmp/verify-rpm
             (cd /tmp/verify-rpm && rpm2cpio "$GITHUB_WORKSPACE/$RPM_FILE" | cpio -idm --quiet)
             verify_tree "rpm" /tmp/verify-rpm
           fi
 
-          verify_tree "raw-bundle" "build/linux/x64/release/bundle"
+          verify_tree "raw-bundle" "${FLUTTER_BUILD_DIR}/bundle"
 
       - name: Find and prepare Linux packages
         id: find_packages
         run: |
-          DEB_FILE=$(find dist -maxdepth 1 -name "*-linux.deb" | head -n 1)
+          DEB_FILE=$(find dist -maxdepth 1 -name "*-linux*.deb" | head -n 1)
           if [ -n "$DEB_FILE" ]; then
             echo "deb_file=$DEB_FILE" >> $GITHUB_OUTPUT
             echo "deb_name=$(basename $DEB_FILE)" >> $GITHUB_OUTPUT
@@ -1007,7 +1268,7 @@ jobs:
             echo "rpm_name=$(basename $RPM_FILE)" >> $GITHUB_OUTPUT
           fi
           mkdir -p linux-build
-          cp -r build/linux/x64/release/bundle/* linux-build/
+          cp -r "${FLUTTER_BUILD_DIR}"/bundle/* linux-build/
           # portable.marker הופך את חבילת ה-raw לניידת באמת: כל הנתונים
           # נשמרים בתיקיית otzaria_data ליד ה-executable (ראה
           # lib/core/app_paths.dart → isPortable). חבילת ה-FULL מעתיקה את
@@ -1015,30 +1276,31 @@ jobs:
           touch linux-build/portable.marker
       
       - name: Upload Linux DEB package
-        if: steps.find_packages.outputs.deb_file != ''
-        uses: actions/upload-artifact@v4.6.2
+        if: matrix.target == 'deb' && steps.find_packages.outputs.deb_file != ''
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-linux-deb
           path: ${{ steps.find_packages.outputs.deb_file }}
           
       - name: Upload Linux RPM package
-        if: steps.find_packages.outputs.rpm_file != ''
-        uses: actions/upload-artifact@v4.6.2
+        if: github.event_name != 'pull_request' && matrix.target == 'rpm' && steps.find_packages.outputs.rpm_file != ''
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-linux-rpm
           path: ${{ steps.find_packages.outputs.rpm_file }}
        
       - name: Upload linux build (raw)
-        uses: actions/upload-artifact@v4.6.2
+        if: matrix.target == 'raw'
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-linux-raw
           path: linux-build/*
 
       - name: Create Linux FULL portable bundle
-        if: true
+        if: matrix.target == 'full'
         shell: bash
         run: |
           set -euo pipefail
@@ -1081,6 +1343,11 @@ jobs:
           Start the app using ./run-otzaria.sh so the app can detect the bundled library folder.
           EOF
 
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            tar -czf otzaria-linux-full-arm64.tar.gz -C full_installer otzaria-linux-full
+            # הספרייה המאונדקסת חוצת-פלטפורמות — עותק אחד נבנה ב-x86_64 בלבד.
+            exit 0
+          fi
           tar -czf otzaria-linux-full.tar.gz -C full_installer otzaria-linux-full
 
           # חבילת ספרייה נוספת עם אינדקס טקסט מוכן מאותו מנוע של האפליקציה.
@@ -1132,38 +1399,41 @@ jobs:
           rm -f -- "$INDEXED_ARCHIVE"
 
       - name: Upload Linux FULL bundle
-        if: true
-        uses: actions/upload-artifact@v4.6.2
+        if: matrix.target == 'full'
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-linux-full
           path: otzaria-linux-full.tar.gz
 
       - name: Upload indexed FULL library parts
-        if: true
-        uses: actions/upload-artifact@v4.6.2
+        if: matrix.target == 'full' && matrix.arch == 'x86_64'
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-library-full-indexed
           path: indexed-release-parts/*
           compression-level: 0
+          if-no-files-found: error
 
       - name: Upload indexed FULL manifest for installer build
-        uses: actions/upload-artifact@v4.6.2
+        if: matrix.target == 'full' && matrix.arch == 'x86_64'
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-library-full-indexed-manifest
           path: indexed-release-parts/*.manifest.json
+          if-no-files-found: error
 
   build_android:
-    if: github.event_name != 'release' && github.event_name != 'pull_request'
+    if: github.event_name != 'release' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.build_android)
     runs-on: ubuntu-latest
     env:
       RUSTUP_HOME: ${{ github.workspace }}/.rustup
       CARGO_HOME: ${{ github.workspace }}/.cargo
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
 
       - name: Check if commit message is a version tag
         id: check_version
@@ -1213,7 +1483,7 @@ jobs:
           rustup show
 
       - name: Cache Rust
-        uses: actions/cache@v4.2.3
+        uses: actions/cache@v6.1.0
         with:
           path: |
             ${{ env.CARGO_HOME }}/registry
@@ -1264,7 +1534,7 @@ jobs:
           echo "All Android Rust targets installed successfully"
 
       - name: Cache Gradle
-        uses: actions/cache@v4.2.3
+        uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.gradle/caches
@@ -1274,7 +1544,7 @@ jobs:
             ${{ runner.os }}-gradle-
 
       - name: Cache Pub
-        uses: actions/cache@v4.2.3
+        uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.pub-cache
@@ -1377,7 +1647,7 @@ jobs:
           df -h
       
       - name: Upload apk
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-android.apk
@@ -1405,7 +1675,7 @@ jobs:
 
       - name: Upload Android FULL bundle
         if: true
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-android-full
@@ -1420,7 +1690,7 @@ jobs:
           df -h
 
   build_macos:
-    if: github.event_name != 'release' && github.event_name != 'pull_request'
+    if: github.event_name != 'release' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.build_macos)
     runs-on: macos-latest
     env:
       # אחסון יציב בתוך ה-workspace כדי למנוע תקלות rename של rustup
@@ -1428,7 +1698,7 @@ jobs:
       CARGO_HOME:  ${{ github.workspace }}/.cargo
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
 
       - name: Check if commit message is a version tag
         id: check_version
@@ -1486,7 +1756,7 @@ jobs:
 
       # (רשות אבל מומלץ) קאשינג לספריות cargo כדי לזרז בניות
       - name: Cache cargo registry and git
-        uses: actions/cache@v4.2.3
+        uses: actions/cache@v6.1.0
         with:
           path: |
             ${{ env.CARGO_HOME }}/registry
@@ -1652,7 +1922,7 @@ jobs:
 
       - name: Upload macOS DMG
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-macos.dmg
@@ -1660,7 +1930,7 @@ jobs:
 
       - name: Upload macOS update zip
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-macos-update
@@ -1668,7 +1938,7 @@ jobs:
 
       - name: Upload macOS FULL bundle
         if: true
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-macos-full
@@ -1681,22 +1951,22 @@ jobs:
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
 
       - name: Download Windows app bundle
-        uses: actions/download-artifact@v4.3.0
+        uses: actions/download-artifact@v8.0.1
         with:
           name: otzaria-windows-zip
           path: indexed-inputs/windows
 
       - name: Download indexed installer tools
-        uses: actions/download-artifact@v4.3.0
+        uses: actions/download-artifact@v8.0.1
         with:
           name: otzaria-windows-indexed-installer-tools
           path: indexed-inputs/tools
 
       - name: Download indexed library manifest
-        uses: actions/download-artifact@v4.3.0
+        uses: actions/download-artifact@v8.0.1
         with:
           name: otzaria-library-full-indexed-manifest
           path: indexed-inputs/library
@@ -1749,23 +2019,39 @@ jobs:
           }
 
       - name: Upload Windows indexed FULL bootstrap installer
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           retention-days: 3
           name: otzaria-windows-installer-full-indexed
           path: installer/otzaria-*-windows-full-indexed.exe
 
   create_release:
-    if: "!cancelled() && github.event_name != 'release' && github.event_name != 'pull_request'"
-    needs: [build_windows, build_linux, build_android, build_macos, build_windows_indexed_full]
+    if: >-
+      !cancelled() &&
+      github.event_name != 'release' &&
+      github.event_name != 'pull_request' &&
+      (github.event_name != 'workflow_dispatch' || inputs.create_release) &&
+      inputs.build_windows && inputs.build_linux &&
+      inputs.build_android && inputs.build_macos &&
+      needs.build_windows.result == 'success' &&
+      needs.build_linux.result == 'success' &&
+      needs.build_android.result == 'success' &&
+      needs.build_macos.result == 'success' &&
+      needs.build_windows_indexed_full.result == 'success' &&
+      (needs.build_windows_arm64.result == 'success' || needs.build_windows_arm64.result == 'skipped')
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      title: ${{ steps.version.outputs.title }}
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}
+    needs: [build_windows, build_windows_arm64, build_linux, build_android, build_macos, build_windows_indexed_full]
     runs-on: ubuntu-latest
 
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
       
       - name: Download all artifacts
-        uses: actions/download-artifact@v4.3.0
+        uses: actions/download-artifact@v8.0.1
         with:
           path: artifacts
       
@@ -1841,6 +2127,14 @@ jobs:
             cp artifacts/otzaria-windows-zip/*.zip release-files/ || true
           fi
 
+          # Windows ARM64 installer + ZIP
+          if [ -d "artifacts/otzaria-windows-arm64-installer" ]; then
+            cp artifacts/otzaria-windows-arm64-installer/*.exe release-files/ || true
+          fi
+          if [ -d "artifacts/otzaria-windows-arm64-zip" ]; then
+            cp artifacts/otzaria-windows-arm64-zip/*.zip release-files/ || true
+          fi
+
           # Linux DEB package
           if [ -d "artifacts/otzaria-linux-deb" ]; then
             cp artifacts/otzaria-linux-deb/*.deb release-files/ || true
@@ -1856,6 +2150,28 @@ jobs:
             cd artifacts/otzaria-linux-raw
             zip -r ../../release-files/otzaria-linux-raw.zip *
             cd ../..
+          fi
+
+          # Linux DEB (arm64)
+          if [ -d "artifacts/otzaria-linux-deb-arm64" ]; then
+            cp artifacts/otzaria-linux-deb-arm64/*.deb release-files/ || true
+          fi
+
+          # Linux raw build arm64 (fallback, כמו ב-x86_64)
+          if [ -d "artifacts/otzaria-linux-raw-arm64" ] && ! ls release-files/*arm64.deb >/dev/null 2>&1; then
+            cd artifacts/otzaria-linux-raw-arm64
+            zip -r ../../release-files/otzaria-linux-raw-arm64.zip *
+            cd ../..
+          fi
+
+          # Linux RPM (arm64)
+          if [ -d "artifacts/otzaria-linux-rpm-arm64" ]; then
+            cp artifacts/otzaria-linux-rpm-arm64/*.rpm release-files/ || true
+          fi
+
+          # Linux FULL bundle (arm64)
+          if [ -d "artifacts/otzaria-linux-full-arm64" ]; then
+            cp artifacts/otzaria-linux-full-arm64/*.tar.gz release-files/ || true
           fi
 
           # Linux FULL bundle
@@ -1909,6 +2225,7 @@ jobs:
           RELEASE_URL="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}"
 
           windows_installers=()
+          windows_arm64_installers=()
           windows_full=()
           windows_indexed_full=()
           android_apk=()
@@ -1951,6 +2268,9 @@ jobs:
                 ;;
               *windows-full*.exe)
                 windows_full+=("$file")
+                ;;
+              *windows-arm64*.exe)
+                windows_arm64_installers+=("$file")
                 ;;
               *windows*.exe)
                 windows_installers+=("$file")
@@ -2003,6 +2323,8 @@ jobs:
                 -e 's/\]/\\]/g')
 
           cat > release-body.md <<EOF
+          <div dir="rtl">
+
           # ${RELEASE_TITLE}
 
           > **מה להוריד?**
@@ -2038,12 +2360,13 @@ jobs:
           EOF
           fi
 
-          if [ ${#windows_installers[@]} -gt 0 ] || [ ${#windows_full[@]} -gt 0 ] || [ ${#windows_indexed_full[@]} -gt 0 ]; then
+          if [ ${#windows_installers[@]} -gt 0 ] || [ ${#windows_arm64_installers[@]} -gt 0 ] || [ ${#windows_full[@]} -gt 0 ] || [ ${#windows_indexed_full[@]} -gt 0 ]; then
             printf "## ווינדוס\n\n" >> release-body.md
 
             if [ ${#windows_installers[@]} -gt 0 ]; then
               printf "### גרסת תוכנה בלבד\n\n" >> release-body.md
               emit_link_group "מתקין לווינדוס (שדרוג מגרסה קיימת מותקן אוטומטית ברקע; כולל אפשרות התקנה ניידת)" "${windows_installers[@]}"
+              emit_link_group "מתקין למחשבי ARM (מעבדי Snapdragon; במחשב רגיל הורידו את המתקין שמעל)" "${windows_arm64_installers[@]}"
               printf "\n" >> release-body.md
             fi
 
@@ -2117,6 +2440,8 @@ jobs:
           - ענף: ${{ github.ref_name }}
 
           </details>
+
+          </div>
           EOF
 
           echo "Generated release notes:"
@@ -2124,7 +2449,7 @@ jobs:
       
       - name: Create Release
         if: github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3.0.3
         with:
           # שינוי מקומי ב-fork: בריפו המקורי משתמשים ב-GH_RELEASE_TOKEN;
           # ב-fork נופלים חזרה ל-GITHUB_TOKEN הרגיל כדי שה-release ייווצר
@@ -2183,10 +2508,10 @@ jobs:
       TOKEN_YEMOT: ${{ secrets.TOKEN_YEMOT }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: '3.13'
 
@@ -2194,14 +2519,23 @@ jobs:
         if: env.TOKEN_YEMOT != ''
         run: pip install bs4 requests pyluach yemot-api
 
+      - name: Load release assets for a manual run
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.create_release.outputs.tag }}
+        run: |
+          gh api "repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}" \
+            | jq '{release: .}' > "$RUNNER_TEMP/release-event.json"
+
       - name: Run announcement script (Forum + Yemot)
         if: env.TOKEN_YEMOT != ''
         env:
           # פרטי ה-Release נלקחים מאירוע ה-Webhook של GitHub
-          RELEASE_TAG:  ${{ github.event.release.tag_name }}
-          RELEASE_NAME: ${{ github.event.release.name }}
-          RELEASE_URL:  ${{ github.event.release.html_url }}
-          GITHUB_EVENT_PATH: ${{ github.event_path }} # חיוני כדי שהסקריפט ימצא את קבצי ההורדה
+          RELEASE_TAG: ${{ github.event.release.tag_name || needs.create_release.outputs.tag }}
+          RELEASE_NAME: ${{ github.event.release.name || needs.create_release.outputs.title }}
+          RELEASE_URL: ${{ github.event.release.html_url || needs.create_release.outputs.url }}
+          GITHUB_EVENT_PATH: ${{ github.event_name == 'workflow_dispatch' && format('{0}/release-event.json', runner.temp) || github.event_path }}
 
           # סודות להתחברות לשירותים החיצוניים
           USER_NAME:  ${{ secrets.USER_NAME }}

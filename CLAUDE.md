@@ -436,6 +436,75 @@ Strings outside `lib/settings/` are Hebrew-only by design — do **not** wrap th
 - **`lib/navigation/`** — the fixed navigation rail and the title-bar screen names, because the settings screen is reached from them.
 - **`lib/tour/`** — the guided tour and the live tips. **Every new tour step title/body and every live-tip title/description needs an ARB entry**, same as a settings string; see `docs/guided_tour_developer_guide.md`. Two rules specific to the tour: a step's `body` must stay a plain string literal (a variable value goes in as a placeholder — a keyboard shortcut via `shortcut:` filling `{shortcut}`), and coverage is guarded by `test/settings/l10n/settings_variable_labels_test.dart`, which builds the steps for real, so a step with no translation fails there rather than rendering Hebrew.
 
+### 10. Navigation Side Panel — ONLY `NavSidePanel`
+
+Every navigation panel in the app (search facets, notes, Shamor Zachor, text/PDF book, commentators tabs) uses the **same** widgets from `lib/widgets/navigation/nav_side_panel.dart`. It is the single source of truth for that panel's look — attachment to the top bar, background color, and the concave corner where it meets the content.
+
+```dart
+import 'package:otzaria/widgets/navigation/nav_side_panel.dart';
+
+NavSidePanel(                      // wraps AdaptiveSidePane; never pass
+  isOpen: _isNavVisible,           // attachToTopEdge / paneColor / scrollbarTopMargin yourself
+  onClose: () => setState(() => _isNavVisible = false),
+  paneContent: _buildTree(),
+  mainContent: _buildContent(),
+)
+
+NavPanelToggleButton(              // the ONE icon that opens/closes it
+  isOpen: _isNavVisible,
+  onToggle: () => setState(() => _isNavVisible = !_isNavVisible),
+)
+
+NavPanelTabHeader(                 // tabs only — the pin is NOT here
+  controller: _tabController,
+  tabs: const [(icon: ..., iconFilled: ..., label: 'ניווט')],
+)
+```
+
+**Search inside a panel** lives in ONE bar above the panel, not in the tabs (`lib/widgets/navigation/nav_panel_search.dart`):
+- the screen owns a `NavPanelSearchHost`, keeps `activeTab` in sync with its `TabController`, renders `NavPanelSearchBar` as the **first** `leadingItems` entry of `AppTopBar` (so it opens from the toggle icon and pushes it inward), and wraps `paneContent` in `NavPanelSearchScope`
+- each `TabBarView` child is wrapped in `NavPanelSearchSlot(index: i, …)`
+- a tab publishes its own action with `NavPanelSearchPublisher(delegate: NavPanelSearchDelegate(...))` and draws a local field only when `!NavPanelSearch.isHoisted(context)` (i.e. outside a panel — dialog, other screen), via `NavPanelLocalSearchField`
+- the bar stays mounted for as long as the panel is open: only the field's *content* swaps per tab. A tab with no search action leaves it visible but disabled — do NOT key or rebuild the bar per tab
+- the **pin** lives in this bar (`isPinned` / `onTogglePin`), not in the tab row — it is a panel-level action. The bar spans exactly the panel's width (minus `AppTopBar.horizontalPadding`) with `kNavTreeSideInset` insets, so it sits over the panel only; the open/close icon stays outside it as the next `leadingItems` entry
+- never build a bare `OtzariaSearchField` inside a nav-panel tab
+- keyboard: Left/Right stay in the text; Up/Down move focus into the panel's rows (`NavPanelSearchHost.paneFocusScope`), and from there Flutter's directional traversal walks the rows and Enter activates — same behavior as the bookmarks/history dialogs. A tab whose delegate supplies `onArrowDown`/`onArrowUp` overrides this: the arrows browse a highlight through its results while focus stays in the field (find_ref model — the user keeps typing mid-browse), and Enter opens the highlighted result via `onSubmitted`
+
+**Panel content** is built from `lib/widgets/lists/nav_tree_tile.dart`:
+- `NavTreeHeader` — the main title above the list (primary color, bold) and any sub-tree root
+- `NavTreeTile.category` / `NavTreeTile.book` — tree rows; `NavTreeContentRow` for free-form rows (search snippets)
+- `NavTreeGroupCard` — a continuous run of rows shares one card (`isGroupStart` / `isGroupEnd` at its edges); a heading that owns sub-rows is its own standalone card
+- `NavTreeFocusGroup` — wrap the list so Tab lands on the **selected** row, not the first; it also sorts before the tab row, so Arrow-Down from the search bar enters the rows
+- Horizontal inset comes from `kNavTreeSideInset` inside the card/header; lists pass only `kNavTreeListPadding`
+
+**Never:**
+- `AdaptiveSidePane` directly for a *navigation* panel — it is the mechanism (responsive layout, drag, overlay) and stays for other panel kinds
+- A hand-rolled `TabBar` + `AnimatedPinButton` row as a panel header
+- A per-screen open icon (`text_continuous`, `line_horizontal_3`, …) — the toggle is `NavPanelToggleButton`
+- Hand-built tree rows with `Border(bottom:)`, explicit `fontSize`, or `primary`-colored icons
+- Passing `paneColor` / `attachToTopEdge` to a nav panel — `NavSidePanel` owns them
+- Adding a per-panel list `padding` for the tree — the inset lives in `NavTreeGroupCard` / `NavTreeHeader` (`kNavTreeSideInset`), and lists use `kNavTreeListPadding`
+- A per-panel search field built from `RtlTextField` + `InputDecoration` — every field inside a nav panel is `OtzariaSearchField`
+
+### 11. Middle-click autoscroll — already global, never re-implement
+
+`MiddleClickAutoScroll` wraps the whole app once in `lib/app.dart`, so **every** scrollable area already supports middle-click autoscroll: lists, reading screens, the library, settings, dialogs, and the PDF viewer. It works by dispatching synthetic wheel events down the hit-test path captured on click, so anything that reacts to the mouse wheel reacts to it too — no per-screen wiring.
+
+**Never:**
+- Add a per-screen middle-click scroll handler, an anchor overlay, or an autoscroll timer — the global widget already covers it
+- Wrap a screen in a second `MiddleClickAutoScroll`
+
+**Do** wrap a region in `AutoScrollBarrier` when middle-click there is reserved for something else (a tab that closes on middle-click):
+```dart
+import 'package:otzaria/widgets/misc/middle_click_autoscroll.dart';
+
+Listener(
+  onPointerDown: (e) { if (e.buttons == kMiddleMouseButton) closeTab(tab); },
+  child: AutoScrollBarrier(child: tabContent),
+)
+```
+A barrier anywhere in the hit-test path suppresses autoscroll for that click.
+
 ## Code Guidelines
 
 ### RTL Support (Critical!)
@@ -728,6 +797,7 @@ dart format lib/file.dart    # Format ONLY files you modified
 | רוחב עמודת הטקסט (בסיס אזור הקריאה, יציב בפתיחת חלונית) | `test/widgets/layout/reading_area_width_test.dart` |
 | Scrollable list scrollbar | `test/widgets/scrollable_positioned_list_scrollbar_test.dart` |
 | Smooth mouse-wheel scrolling | `test/widgets/smooth_wheel_scroll_test.dart` |
+| גלילה אוטומטית בלחיצת גלגל העכבר | `test/widgets/middle_click_autoscroll_test.dart` |
 | Smart text render settings | `test/widgets/smart_text/render_settings_test.dart` |
 | Smart text ↔ plugin section sync gate | `test/widgets/smart_text/smart_text_section_sync_gate_test.dart` |
 | קיבוע מדויק של גובה השורה (סימוני הערות, `<big>`) בשלושת מסלולי הרינדור | `test/widgets/smart_text/exact_line_height_test.dart` |
@@ -747,11 +817,15 @@ dart format lib/file.dart    # Format ONLY files you modified
 | Area | Test File |
 |------|-----------|
 | Bookmarks BLoC | `test/bookmarks/bookmark_bloc_test.dart` |
+| דיאלוג איתור מקורות (פריסה, הצעות, ניווט מקלדת, גדלי מסך) | `test/find_ref/find_ref_dialog_view_test.dart` |
+| האיתורים האחרונים (שמירה, מכסה, ערך פגום) | `test/find_ref/find_ref_recent_store_test.dart` |
+| סימניה מרוכזת (מודל + bloc) | `test/bookmarks/bookmark_group_test.dart` |
 | Workspaces BLoC | `test/workspaces/bloc/workspace_bloc_test.dart` |
 | מחוות החלקה בין טאבים (סינון התקנים, כיוון) | `test/tabs/reading_screen_move_tab_state_test.dart`, `…tab_swipe_direction_test.dart` |
 | Windows installer scripts (`.iss` invariants) | `test/installer/installer_scripts_test.dart` |
 | App paths / install-mode detection | `test/core/app_paths_test.dart` |
 | Library browser | `test/library/view/library_browser_preview_width_test.dart`, `…grid_items_test.dart`, `…library_browser_flat_tree_test.dart` |
+| שמירת טקסט החיפוש בניווט בספרייה ("חזור"/"בית") | `test/library/bloc/library_navigation_keeps_search_test.dart`, `test/library/view/library_empty_state_navigation_test.dart` |
 | Empty library screen | `test/empty_library/empty_library_screen_test.dart` |
 | PDF isolate / rasterizer | `test/printing/pdf_isolate_test.dart`, `…pdf_text_rasterizer_test.dart` |
 | PDF in-book search highlight pattern | `test/pdf_book/pdf_search_highlight_pattern_test.dart` |
@@ -762,8 +836,12 @@ dart format lib/file.dart    # Format ONLY files you modified
 | Indexing repository | `test/indexing/repository/indexing_repository_test.dart` |
 | External catalog | `test/external_catalog/external_catalog_repository_test.dart`, `…settings_helper_test.dart` |
 | Plugins | `test/plugins/utils/reader_location_resolver_test.dart`, `…plugin_store_link_parser_test.dart`, `…plugin_bridge_adapter_test.dart` |
+| Plugin links API (`getLinks`, `getRawLinks`, `getCommentators`, `getLinkContent`) | `test/plugins/bridge/plugin_bridge_links_api_test.dart` |
+| Plugin permission enforcement / rate limiting | `test/plugins/bridge/plugin_bridge_handler_test.dart` |
 | Plugin highlights / reader section tracking | `test/plugins/services/plugin_highlight_registry_test.dart`, `…reader_section_content_tracker_test.dart`, `…reader_section_sync_gate_test.dart` |
 | Plugin foreground suspend/resume | `test/plugins/services/plugin_runtime_dispatcher_test.dart` |
+| פוקוס מקלדת ל-WebView של תוסף (הקלדה מיד בפתיחה) | `test/plugins/services/plugin_webview_focus_test.dart`, `…plugin_keyboard_focus_test.dart` |
+| בדיקת עדכוני תוספים מהחנות (שירות batch, קוביט, צ'יפ "עדכון זמין") | `test/plugins/services/plugin_update_check_service_test.dart`, `test/plugins/bloc/plugin_updates_cubit_test.dart`, `test/plugins/view/plugin_update_chip_test.dart` |
 
 **Tools & plugins as reading tabs**
 | Area | Test File |

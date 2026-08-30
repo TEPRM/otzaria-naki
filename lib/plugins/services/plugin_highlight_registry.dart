@@ -5,7 +5,9 @@ import 'package:flutter/foundation.dart';
 import 'package:otzaria/plugins/models/plugin_highlight.dart';
 import 'package:otzaria/plugins/models/plugin_reader_selection.dart';
 import 'package:otzaria/plugins/models/text_source_map.dart';
+import 'package:otzaria/plugins/plugin_constants.dart';
 import 'package:otzaria/plugins/services/plugin_highlight_anchor_service.dart';
+import 'package:otzaria/plugins/services/plugin_runtime_dispatcher.dart';
 
 class PluginHighlightException implements Exception {
   final String code;
@@ -18,18 +20,32 @@ class PluginHighlightException implements Exception {
 }
 
 /// מאגר זמני ברמת ה-Host. התוסף אחראי להתמדה ולשחזור לאחר reload.
+///
+/// המפתוח הפנימי הוא per-instance — שני טאבים של אותו תוסף אינם מוחקים זה
+/// את הסימונים של זה; שכבת הציור ([getAllHighlights]) מאחדת עותקים זהים.
 class PluginHighlightRegistry extends ChangeNotifier {
   static final PluginHighlightRegistry instance = PluginHighlightRegistry._();
   PluginHighlightRegistry._()
-    : _anchorService = const PluginHighlightAnchorService();
+    : _anchorService = const PluginHighlightAnchorService(),
+      _isInstanceVisible = _dispatcherVisibility;
 
   @visibleForTesting
   PluginHighlightRegistry.forTesting({
     this._anchorService = const PluginHighlightAnchorService(),
-  });
+    bool Function(PluginInstanceKey key)? isInstanceVisible,
+  }) : _isInstanceVisible = isInstanceVisible ?? _neverVisible;
+
+  static bool _dispatcherVisibility(PluginInstanceKey key) =>
+      PluginRuntimeDispatcher.instance.isInstanceVisible(key);
+
+  static bool _neverVisible(PluginInstanceKey key) => false;
 
   final PluginHighlightAnchorService _anchorService;
-  final Map<String, Map<String, PluginHighlight>> _recordsByPlugin = {};
+
+  /// העדפת עותק של מופע גלוי בציור — נשאל מהדיספצ'ר (מקור המצב היחיד).
+  final bool Function(PluginInstanceKey key) _isInstanceVisible;
+  final Map<PluginInstanceKey, Map<String, PluginHighlight>> _recordsByOwner =
+      {};
   final Map<
     _PluginHighlightSectionKey,
     Map<_PluginHighlightRecordKey, PluginHighlight>
@@ -51,6 +67,7 @@ class PluginHighlightRegistry extends ChangeNotifier {
   PluginHighlight setHighlight({
     required String ownerPluginId,
     required Map<String, dynamic> payload,
+    String ownerInstanceId = PluginInstanceIds.defaultForeground,
     DateTime? now,
   }) {
     if (payload.containsKey('pluginId') ||
@@ -65,6 +82,7 @@ class PluginHighlightRegistry extends ChangeNotifier {
       const {
         'highlightId',
         'bookId',
+        'bookUid',
         'sectionIndex',
         'currentRef',
         'range',
@@ -74,6 +92,7 @@ class PluginHighlightRegistry extends ChangeNotifier {
       'setHighlight',
     );
     final bookId = _requiredString(payload, 'bookId', maxLength: 500);
+    final bookUid = _optionalText(payload['bookUid'], maxLength: 500);
     final sectionIndex = payload['sectionIndex'];
     if (sectionIndex is! int || sectionIndex < 0) {
       throw const PluginHighlightException(
@@ -106,13 +125,14 @@ class PluginHighlightRegistry extends ChangeNotifier {
     final highlightId = requestedId == null
         ? _generateId(ownerPluginId, timestamp)
         : _validateId(requestedId);
-    final ownRecords = _recordsByPlugin.putIfAbsent(ownerPluginId, () => {});
-    final existing = ownRecords[highlightId];
+    final ownerKey = (pluginId: ownerPluginId, instanceId: ownerInstanceId);
+    final existing = _recordsByOwner[ownerKey]?[highlightId];
 
     final record = PluginHighlight(
       highlightId: highlightId,
       ownerPluginId: ownerPluginId,
       bookId: bookId,
+      bookUid: bookUid == null || bookUid.isEmpty ? null : bookUid,
       sectionIndex: sectionIndex,
       currentRef: _optionalText(payload['currentRef'], maxLength: 500),
       range: range,
@@ -122,7 +142,7 @@ class PluginHighlightRegistry extends ChangeNotifier {
       createdAt: existing?.createdAt ?? timestamp,
       updatedAt: timestamp,
     );
-    _store(record);
+    _store(ownerKey, record);
     notifyListeners();
     return record;
   }
@@ -131,6 +151,8 @@ class PluginHighlightRegistry extends ChangeNotifier {
     required String ownerPluginId,
     required String bookId,
     required int sectionIndex,
+    String? bookUid,
+    String ownerInstanceId = PluginInstanceIds.defaultForeground,
     String? color,
     String? label,
     DateTime? now,
@@ -163,7 +185,8 @@ class PluginHighlightRegistry extends ChangeNotifier {
       'markerMode': 'line-marker',
     });
     final metadata = _parseMetadata({'note': ?label});
-    final records = _recordsByPlugin.putIfAbsent(ownerPluginId, () => {});
+    final ownerKey = (pluginId: ownerPluginId, instanceId: ownerInstanceId);
+    final records = _recordsByOwner.putIfAbsent(ownerKey, () => {});
     PluginHighlight? existing;
     for (final record in records.values) {
       if (record.bookId == bookId &&
@@ -179,6 +202,9 @@ class PluginHighlightRegistry extends ChangeNotifier {
           existing?.highlightId ?? _generateId(ownerPluginId, timestamp),
       ownerPluginId: ownerPluginId,
       bookId: bookId,
+      bookUid: (bookUid != null && bookUid.isNotEmpty)
+          ? bookUid
+          : existing?.bookUid,
       sectionIndex: sectionIndex,
       range: legacyRange,
       style: style,
@@ -187,7 +213,7 @@ class PluginHighlightRegistry extends ChangeNotifier {
       createdAt: existing?.createdAt ?? timestamp,
       updatedAt: timestamp,
     );
-    _store(record);
+    _store(ownerKey, record);
     notifyListeners();
     return record;
   }
@@ -195,6 +221,7 @@ class PluginHighlightRegistry extends ChangeNotifier {
   PluginHighlight updateHighlight({
     required String ownerPluginId,
     required Map<String, dynamic> payload,
+    String ownerInstanceId = PluginInstanceIds.defaultForeground,
     DateTime? now,
   }) {
     if (payload.containsKey('pluginId') ||
@@ -213,7 +240,8 @@ class PluginHighlightRegistry extends ChangeNotifier {
     };
     _rejectUnknownFields(payload, allowedFields, 'updateHighlight');
     final highlightId = _validateId(payload['highlightId']);
-    final existing = _recordsByPlugin[ownerPluginId]?[highlightId];
+    final ownerKey = (pluginId: ownerPluginId, instanceId: ownerInstanceId);
+    final existing = _recordsByOwner[ownerKey]?[highlightId];
     if (existing == null) {
       throw const PluginHighlightException(
         'error.highlight_not_found',
@@ -260,6 +288,7 @@ class PluginHighlightRegistry extends ChangeNotifier {
       highlightId: existing.highlightId,
       ownerPluginId: existing.ownerPluginId,
       bookId: existing.bookId,
+      bookUid: existing.bookUid,
       sectionIndex: existing.sectionIndex,
       currentRef: existing.currentRef,
       range: existing.range,
@@ -270,18 +299,25 @@ class PluginHighlightRegistry extends ChangeNotifier {
       createdAt: existing.createdAt,
       updatedAt: (now ?? DateTime.now()).toUtc(),
     );
-    _store(updated);
+    _store(ownerKey, updated);
     notifyListeners();
     return updated;
   }
 
   List<PluginHighlight> getHighlights({
     required String ownerPluginId,
+    String ownerInstanceId = PluginInstanceIds.defaultForeground,
     String? bookId,
     int? sectionIndex,
     bool includeStale = false,
   }) {
-    final records = _recordsByPlugin[ownerPluginId]?.values ?? const [];
+    final records =
+        _recordsByOwner[(
+              pluginId: ownerPluginId,
+              instanceId: ownerInstanceId,
+            )]
+            ?.values ??
+        const [];
     final result = records.where((record) {
       if (bookId != null && record.bookId != bookId) return false;
       if (sectionIndex != null && record.sectionIndex != sectionIndex) {
@@ -299,22 +335,52 @@ class PluginHighlightRegistry extends ChangeNotifier {
   }
 
   /// לשימוש פנימי של מנוע הציור בלבד; אינו חשוף ל-Plugin Bridge.
+  ///
+  /// שני מופעים של אותו תוסף טוענים את אותן הדגשות מהאחסון המשותף —
+  /// עותקים זהים ב-(pluginId, highlightId) מצוירים פעם אחת, בעדיפות
+  /// לעותק של מופע גלוי.
   List<PluginHighlight> getAllHighlights({
     required String bookId,
     required int sectionIndex,
+    String? bookUid,
   }) {
-    final result =
-        (_recordsBySection[(bookId: bookId, sectionIndex: sectionIndex)]
-                    ?.values ??
-                const <PluginHighlight>[])
-            .where((record) => record.status == 'active')
-            .toList()
-          ..sort((a, b) {
-            final priority = b.style.priority.compareTo(a.style.priority);
-            return priority != 0
-                ? priority
-                : a.createdAt.compareTo(b.createdAt);
-          });
+    // נשאלים שני המפתחות: הכותרת (הדגשות ישנות) והמזהה היציב (הדגשות חדשות).
+    // עותק זהה שנרשם תחת שניהם מסונן ב-dedup לפי (ownerPluginId, highlightId).
+    final uid = (bookUid != null && bookUid.isNotEmpty) ? bookUid : null;
+    final bookKeys = <String>{bookId, ?uid};
+    final records = <_PluginHighlightRecordKey, PluginHighlight>{
+      for (final key in bookKeys)
+        ...?_recordsBySection[(bookId: key, sectionIndex: sectionIndex)],
+    };
+    if (records.isEmpty) return const [];
+    final deduped = <(String, String), PluginHighlight>{};
+    final fromVisibleOwner = <(String, String)>{};
+    for (final entry in records.entries) {
+      final record = entry.value;
+      if (record.status != 'active') continue;
+      // כשנמסר bookUid — הדגשה של ספר אחר (uid שונה) שהגיעה דרך מפתח הכותרת
+      // המשותף מסוננת החוצה; הדגשה ישנה ללא uid נשמרת (best-effort, לא ניתן
+      // לפתור את הכותרת הדו-משמעית שלה).
+      if (uid != null && record.bookUid != null && record.bookUid != uid) {
+        continue;
+      }
+      final dedupeKey = (record.ownerPluginId, record.highlightId);
+      final visible = _isInstanceVisible((
+        pluginId: entry.key.ownerPluginId,
+        instanceId: entry.key.ownerInstanceId,
+      ));
+      if (deduped.containsKey(dedupeKey) &&
+          (fromVisibleOwner.contains(dedupeKey) || !visible)) {
+        continue;
+      }
+      deduped[dedupeKey] = record;
+      if (visible) fromVisibleOwner.add(dedupeKey);
+    }
+    final result = deduped.values.toList()
+      ..sort((a, b) {
+        final priority = b.style.priority.compareTo(a.style.priority);
+        return priority != 0 ? priority : a.createdAt.compareTo(b.createdAt);
+      });
     return List.unmodifiable(result);
   }
 
@@ -322,14 +388,25 @@ class PluginHighlightRegistry extends ChangeNotifier {
     required String bookId,
     required int sectionIndex,
     required String sourceText,
+    String? bookUid,
     DateTime? now,
   }) {
     final changed = <PluginHighlight>[];
     final timestamp = (now ?? DateTime.now()).toUtc();
-    for (final records in _recordsByPlugin.values) {
+    final uid = (bookUid != null && bookUid.isNotEmpty) ? bookUid : null;
+    for (final ownerEntry in _recordsByOwner.entries.toList(growable: false)) {
+      final records = ownerEntry.value;
       for (final entry in records.entries.toList(growable: false)) {
         final existing = entry.value;
-        if (existing.bookId != bookId ||
+        // הדגשה של ספר אחר בעל אותה כותרת נפסלת לפי ה-uid, אחרת היא הייתה
+        // מעוגנת מחדש מול טקסט זר ומסומנת ככושלת.
+        final bookMatches =
+            (existing.bookId == bookId ||
+                (uid != null && existing.bookUid == uid)) &&
+            !(uid != null &&
+                existing.bookUid != null &&
+                existing.bookUid != uid);
+        if (!bookMatches ||
             existing.sectionIndex != sectionIndex ||
             existing.range.exactText.isEmpty) {
           continue;
@@ -358,6 +435,7 @@ class PluginHighlightRegistry extends ChangeNotifier {
           highlightId: existing.highlightId,
           ownerPluginId: existing.ownerPluginId,
           bookId: existing.bookId,
+          bookUid: existing.bookUid,
           sectionIndex: existing.sectionIndex,
           currentRef: existing.currentRef,
           range: nextRange,
@@ -368,7 +446,7 @@ class PluginHighlightRegistry extends ChangeNotifier {
           createdAt: existing.createdAt,
           updatedAt: timestamp,
         );
-        _store(updated);
+        _store(ownerEntry.key, updated);
         changed.add(updated);
       }
     }
@@ -379,28 +457,31 @@ class PluginHighlightRegistry extends ChangeNotifier {
   bool clearHighlight({
     required String ownerPluginId,
     required String highlightId,
+    String ownerInstanceId = PluginInstanceIds.defaultForeground,
     Object? expectedVersion,
     Object? expectedEtag,
   }) {
-    final records = _recordsByPlugin[ownerPluginId];
-    final existing = records?[highlightId];
+    final ownerKey = (pluginId: ownerPluginId, instanceId: ownerInstanceId);
+    final existing = _recordsByOwner[ownerKey]?[highlightId];
     if (existing == null) return false;
     _validateExpected(
       existing,
       expectedVersion: expectedVersion,
       expectedEtag: expectedEtag,
     );
-    final removed = _remove(ownerPluginId, highlightId) != null;
+    final removed = _remove(ownerKey, highlightId) != null;
     if (removed) notifyListeners();
     return removed;
   }
 
   int clearAll({
     required String ownerPluginId,
+    String ownerInstanceId = PluginInstanceIds.defaultForeground,
     String? bookId,
     int? sectionIndex,
   }) {
-    final records = _recordsByPlugin[ownerPluginId];
+    final ownerKey = (pluginId: ownerPluginId, instanceId: ownerInstanceId);
+    final records = _recordsByOwner[ownerKey];
     if (records == null) return 0;
     final ids = records.values
         .where(
@@ -411,60 +492,90 @@ class PluginHighlightRegistry extends ChangeNotifier {
         .map((record) => record.highlightId)
         .toList();
     for (final id in ids) {
-      _remove(ownerPluginId, id);
+      _remove(ownerKey, id);
     }
     if (ids.isNotEmpty) notifyListeners();
     return ids.length;
   }
 
+  /// ניקוי מלא ברמת התוסף (הסרה/טעינה מחדש) — כל המופעים.
   void removePlugin(String pluginId) {
-    final records = _recordsByPlugin.remove(pluginId);
-    if (records == null) return;
-    for (final record in records.values) {
-      _removeFromSection(record);
+    final ownerKeys = _recordsByOwner.keys
+        .where((key) => key.pluginId == pluginId)
+        .toList(growable: false);
+    if (ownerKeys.isEmpty) return;
+    for (final ownerKey in ownerKeys) {
+      _removeOwner(ownerKey);
     }
     notifyListeners();
   }
 
-  void _store(PluginHighlight record) {
-    final records = _recordsByPlugin.putIfAbsent(
-      record.ownerPluginId,
-      () => {},
-    );
-    final previous = records[record.highlightId];
-    if (previous != null) _removeFromSection(previous);
-    records[record.highlightId] = record;
-    final sectionKey = (
-      bookId: record.bookId,
-      sectionIndex: record.sectionIndex,
-    );
-    _recordsBySection.putIfAbsent(sectionKey, () => {})[(
-          ownerPluginId: record.ownerPluginId,
-          highlightId: record.highlightId,
-        )] =
-        record;
+  /// מסיר רק את רישומי המופע [key] (סגירת טאב אחד) — עותק של מופע אחר
+  /// לאותה הדגשה נחשף אוטומטית בציור דרך ה-dedup.
+  void removeInstance(PluginInstanceKey key) {
+    if (!_recordsByOwner.containsKey(key)) return;
+    _removeOwner(key);
+    notifyListeners();
   }
 
-  PluginHighlight? _remove(String ownerPluginId, String highlightId) {
-    final records = _recordsByPlugin[ownerPluginId];
+  void _removeOwner(PluginInstanceKey ownerKey) {
+    final records = _recordsByOwner.remove(ownerKey);
+    if (records == null) return;
+    for (final record in records.values) {
+      _removeFromSection(ownerKey, record);
+    }
+  }
+
+  /// מפתחות הספר שתחתם הרשומה נרשמת במפת הסקציות: תמיד הכותרת ([bookId]),
+  /// ובנוסף ה-[bookUid] כשקיים. כך הדגשה חדשה נמצאת גם דרך המזהה היציב
+  /// וגם דרך הכותרת (migrate-on-read), והדגשה ישנה נמצאת דרך הכותרת כמקודם.
+  List<String> _sectionBookKeys(PluginHighlight record) {
+    final uid = record.bookUid;
+    if (uid != null && uid.isNotEmpty && uid != record.bookId) {
+      return [record.bookId, uid];
+    }
+    return [record.bookId];
+  }
+
+  void _store(PluginInstanceKey ownerKey, PluginHighlight record) {
+    final records = _recordsByOwner.putIfAbsent(ownerKey, () => {});
+    final previous = records[record.highlightId];
+    if (previous != null) _removeFromSection(ownerKey, previous);
+    records[record.highlightId] = record;
+    final recordKey = (
+      ownerPluginId: ownerKey.pluginId,
+      ownerInstanceId: ownerKey.instanceId,
+      highlightId: record.highlightId,
+    );
+    for (final bookKey in _sectionBookKeys(record)) {
+      _recordsBySection.putIfAbsent(
+        (bookId: bookKey, sectionIndex: record.sectionIndex),
+        () => {},
+      )[recordKey] = record;
+    }
+  }
+
+  PluginHighlight? _remove(PluginInstanceKey ownerKey, String highlightId) {
+    final records = _recordsByOwner[ownerKey];
     final removed = records?.remove(highlightId);
     if (removed == null) return null;
-    if (records!.isEmpty) _recordsByPlugin.remove(ownerPluginId);
-    _removeFromSection(removed);
+    if (records!.isEmpty) _recordsByOwner.remove(ownerKey);
+    _removeFromSection(ownerKey, removed);
     return removed;
   }
 
-  void _removeFromSection(PluginHighlight record) {
-    final sectionKey = (
-      bookId: record.bookId,
-      sectionIndex: record.sectionIndex,
-    );
-    final records = _recordsBySection[sectionKey];
-    records?.remove((
-      ownerPluginId: record.ownerPluginId,
+  void _removeFromSection(PluginInstanceKey ownerKey, PluginHighlight record) {
+    final recordKey = (
+      ownerPluginId: ownerKey.pluginId,
+      ownerInstanceId: ownerKey.instanceId,
       highlightId: record.highlightId,
-    ));
-    if (records?.isEmpty ?? false) _recordsBySection.remove(sectionKey);
+    );
+    for (final bookKey in _sectionBookKeys(record)) {
+      final sectionKey = (bookId: bookKey, sectionIndex: record.sectionIndex);
+      final records = _recordsBySection[sectionKey];
+      records?.remove(recordKey);
+      if (records?.isEmpty ?? false) _recordsBySection.remove(sectionKey);
+    }
   }
 
   String _generateId(String pluginId, DateTime timestamp) {
@@ -691,5 +802,6 @@ class PluginHighlightRegistry extends ChangeNotifier {
 typedef _PluginHighlightSectionKey = ({String bookId, int sectionIndex});
 typedef _PluginHighlightRecordKey = ({
   String ownerPluginId,
+  String ownerInstanceId,
   String highlightId,
 });

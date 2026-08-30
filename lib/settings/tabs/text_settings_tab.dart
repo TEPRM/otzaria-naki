@@ -258,7 +258,7 @@ class TextSettingsTab extends StatelessWidget {
                 },
               ),
               _FontDropdown(
-                icon: OtzariaIcons.alef_near_alef_24_regular,
+                icon: OtzariaIcons.tet_near_tet_24_regular,
                 label: context.settingsText('גופן טקסט'),
                 value: state.fontFamily,
                 onChanged: (value) {
@@ -294,7 +294,7 @@ class TextSettingsTab extends StatelessWidget {
                   },
                 ),
               _FontDropdown(
-                icon: OtzariaIcons.beit_near_alef_24_regular,
+                icon: OtzariaIcons.beit_behind_alef_24_regular,
                 label: context.settingsText('גופן מפרשים'),
                 value: state.commentatorsFontFamily,
                 onChanged: (value) {
@@ -595,7 +595,7 @@ class TextSettingsTab extends StatelessWidget {
       title: context.settingsText('הגדרות לפי ספר'),
       children: [
         SettingsActionTile.switchTile(
-          icon: FluentIcons.book_open_24_regular,
+          icon: OtzariaIcons.otzaria_icon_2_page_24_regular,
           title: context.settingsText('שמירת התאמות לכל ספר בנפרד'),
           subtitle: context.settingsText(
             state.enablePerBookSettings
@@ -816,14 +816,18 @@ class _FontDropdown extends StatelessWidget {
     final hasSelectedFont =
         value.isEmpty || fontEntries.any((entry) => entry.value == value);
     if (!hasSelectedFont) {
+      // ערך שמור מגרסה ישנה (שם קובץ) מוצג בשם המשפחה שלו, לא כ"לא זמין".
+      final legacyName = AppFonts.legacySystemFontDisplayName(value);
       fontEntries.insert(
         0,
         AppMenuEntry(
           value: value,
-          label: context.settingsText(
-            '{font} (לא זמין במחשב זה)',
-            args: {'font': value},
-          ),
+          label:
+              legacyName ??
+              context.settingsText(
+                '{font} (לא זמין במחשב זה)',
+                args: {'font': value},
+              ),
         ),
       );
     }

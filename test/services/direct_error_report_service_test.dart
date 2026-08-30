@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -263,6 +264,47 @@ void main() {
     );
   });
 
+  group('DirectErrorReportService.suspendAutomaticFlush', () {
+    test('ממתינה לשליחה שבאמצע, כדי שכתיבה חיצונית לא תדרוס אותה', () async {
+      final repository = InMemoryDirectErrorReportRepository();
+      final sentRepository = InMemoryDirectErrorReportRepository();
+      await repository.save([
+        _buildReport(
+          id: 'r-1',
+          queueType: DirectErrorReportQueueType.automaticRetry,
+        ),
+      ]);
+
+      final networkGate = Completer<http.Response>();
+      final service = DirectErrorReportService(
+        client: MockClient((_) => networkGate.future),
+        queueRepository: repository,
+        sentRepository: sentRepository,
+      );
+
+      final flush = service.flushPendingReports(onlyAutomaticRetry: true);
+      var suspended = false;
+      final suspend = DirectErrorReportService.suspendAutomaticFlush().then(
+        (_) => suspended = true,
+      );
+
+      await pumpEventQueue();
+      expect(
+        suspended,
+        isFalse,
+        reason: 'השחזור אינו יכול לכתוב לתור בזמן שהשליחה באוויר',
+      );
+
+      networkGate.complete(http.Response('', 200));
+      await flush;
+      await suspend;
+
+      expect(suspended, isTrue);
+      expect((await sentRepository.load()).single.id, 'r-1');
+      expect(await repository.load(), isEmpty);
+    });
+  });
+
   group('DirectErrorReportService.submitReport', () {
     test(
       'success message uses sefaria label for sefaria sourced books',
@@ -288,6 +330,58 @@ void main() {
           (await sentRepository.load()).single.id,
           'sefaria-success-report',
         );
+      },
+    );
+
+    test(
+      '200 with duplicate:true is sent-as-duplicate with a dedicated message',
+      () async {
+        final repository = InMemoryDirectErrorReportRepository();
+        final sentRepository = InMemoryDirectErrorReportRepository();
+        final service = DirectErrorReportService(
+          client: MockClient(
+            (request) async => http.Response(
+              jsonEncode({'success': true, 'duplicate': true}),
+              200,
+            ),
+          ),
+          queueRepository: repository,
+          sentRepository: sentRepository,
+        );
+
+        final result = await service.submitReport(
+          _buildReport(id: 'duplicate-report', sourceFolder: 'sefaria'),
+        );
+
+        expect(result.status, DirectReportDeliveryStatus.sent);
+        expect(result.isDuplicate, isTrue);
+        expect(result.message, contains('כבר נשלח'));
+        expect(result.message, contains('לספריא'));
+        expect((await sentRepository.load()).single.id, 'duplicate-report');
+      },
+    );
+
+    test(
+      '200 with non-json or duplicate:false body is a regular send',
+      () async {
+        for (final body in [
+          '',
+          'ok',
+          jsonEncode({'duplicate': false}),
+        ]) {
+          final service = DirectErrorReportService(
+            client: MockClient((request) async => http.Response(body, 200)),
+            queueRepository: InMemoryDirectErrorReportRepository(),
+            sentRepository: InMemoryDirectErrorReportRepository(),
+          );
+
+          final result = await service.submitReport(
+            _buildReport(id: 'regular-report'),
+          );
+
+          expect(result.status, DirectReportDeliveryStatus.sent);
+          expect(result.isDuplicate, isFalse);
+        }
       },
     );
 

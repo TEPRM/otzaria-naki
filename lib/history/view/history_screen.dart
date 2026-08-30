@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:otzaria/search/search_query_builder.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/bookmarks/models/bookmark.dart';
@@ -26,6 +26,7 @@ import 'package:otzaria/search/models/search_configuration.dart';
 import 'package:otzaria_search_engine/otzaria_search_engine.dart';
 import 'package:otzaria/utils/ui/reading_left_pane_policy.dart';
 import 'package:otzaria/widgets/lists/items_list_view.dart';
+import 'package:otzaria/utils/ui/book_format_icon.dart';
 
 /// משחזר אפשרויות חיפוש שההיסטוריה שומרת תמיד פר-מילה. אפשרויות אחידות
 /// מוחזרות למצב הגלובלי — אחרת הצ'יפים בדיאלוג העריכה מוצגים כבויים למרות
@@ -213,18 +214,10 @@ class _HistoryViewState extends State<HistoryView> {
 
   Widget? _getLeadingIcon(Book book, bool isSearch) {
     if (isSearch) {
-      return const Icon(FluentIcons.search_24_regular);
+      return const Icon(OtzariaIcons.search_24_regular);
     }
-    if (book is PdfBook) {
-      if (book.path.toLowerCase().endsWith('.docx')) {
-        return const Icon(FluentIcons.document_text_24_regular);
-      }
-      return const Icon(FluentIcons.document_pdf_24_regular);
-    }
-    if (book is TextBook) {
-      return const Icon(FluentIcons.document_text_24_regular);
-    }
-    return null;
+    if (book is! PdfBook && book is! TextBook) return null;
+    return Icon(bookFormatIcon(book));
   }
 
   @override

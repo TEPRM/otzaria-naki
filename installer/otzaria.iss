@@ -12,10 +12,17 @@
 ; בשקט ללא אשף).
 
 #define MyAppName "אוצריא"
-#define MyAppVersion "0.9.96"
+#define MyAppVersion "0.9.97"
 #define MyAppPublisher "sivan22"
 #define MyAppURL "https://github.com/otzaria/otzaria"
 #define MyAppExeName "otzaria.exe"
+
+; ארכיטקטורת היעד: "x64" (ברירת מחדל) או "arm64", נקבעת מבחוץ עם
+; ‎ISCC /DAppArch=arm64‎. קובעת את תיקיית ה-build, את שם הקובץ ואת
+; הגבלת הארכיטקטורה של המתקין.
+#ifndef AppArch
+  #define AppArch "x64"
+#endif
 
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
@@ -27,8 +34,13 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
+#if AppArch == "arm64"
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+#else
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+#endif
 ; lowest = לא מבקש UAC כשמפעילים רגיל; אם המשתמש בחר "Run as administrator"
 ; התהליך כבר מורם, IsAdmin=True, ואז משגרים מחדש עם /ALLUSERS.
 PrivilegesRequired=lowest
@@ -37,7 +49,11 @@ DefaultDirName={code:GetDefaultInstallDir}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=.\
+#if AppArch == "arm64"
+OutputBaseFilename=otzaria-{#MyAppVersion}-windows-arm64
+#else
 OutputBaseFilename=otzaria-{#MyAppVersion}-windows
+#endif
 SetupIconFile=white_sketch128x128.ico
 ; תמונת האשף בעמודי "ברוכים הבאים" ו"סיום" (אנכית, 164x314 + רזולוציות @2x/@3x ל-HiDPI)
 WizardImageFile=wizard_large.bmp,wizard_large@2x.bmp,wizard_large@3x.bmp
@@ -58,6 +74,9 @@ CreateUninstallRegKey=not IsPortableInstall
 ChangesEnvironment=yes
 ; לוג אוטומטי ל-%TEMP% של המשתמש המריץ — חיוני לאבחון עדכונים שקטים שנכשלים בשטח.
 SetupLogging=yes
+; בלי זה בחירת המשימות נשמרת ברישום — "איפוס הגדרות" שסומן פעם היה
+; רץ שוב בכל שדרוג שקט ומוחק את נתוני המשתמש (issue #941).
+UsePreviousTasks=no
 
 [InstallDelete]
 ; ניקוי מסד הנתונים הישן של Isar שהוחלף על ידי hive_ce — מחיקה מכוונת בעת שדרוג.
@@ -75,7 +94,7 @@ Name: "{code:GetDataDir}\index"; Permissions: users-modify; Check: not IsPortabl
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "calendaricon"; Description: "צור קיצור דרך ישירות ללוח שנה"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "resetsettings"; Description: "איפוס הגדרות משתמש והסרת התקנות קודמות (מומלץ למעדכנים מגרסה < 0.9.80, שים לב: זה ימחק הערות אישיות, סימניות, היסטוריה ונתוני תוספים! תיקיות הספרים והגיבויים נשמרות)"; Flags: unchecked
+Name: "resetsettings"; Description: "איפוס הגדרות משתמש — אזהרה: ימחק הערות אישיות, סימניות, היסטוריה ונתוני תוספים! (תיקיות הספרים והגיבויים נשמרות. נדרש רק בשדרוג מגרסה ישנה מ-0.9.80 או לפתרון תקלות)"; Flags: unchecked
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; AppUserModelID: "Otzaria.Otzaria"; Check: not IsPortableInstall
@@ -109,7 +128,7 @@ Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: Shoul
 Name: "hebrew"; MessagesFile: "compiler:Languages\Hebrew.isl"
 
 [Files]
-Source: "..\build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\build\windows\{#AppArch}\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; קבצי הצגה לדף "תכונות עיקריות" - dontcopy = נארזים בתוך המתקין אבל לא מותקנים אצל המשתמש
 Source: "feature1.bmp"; Flags: dontcopy
 Source: "feature2.bmp"; Flags: dontcopy
@@ -148,6 +167,8 @@ var
   // קבצי האפליקציה. ברירת המחדל False — נשמר כדי לא לאבד נתונים בעדכון
   // שקט (Inno Setup מריץ את ה-uninstaller הישן עם /SILENT).
   DeleteUserDataOnUninstall: Boolean;
+  // נתיב ספרייה מותאם מה-prefs; איפוס הגדרות מדלג עליו כדי לא למחוק ספרים.
+  ProtectedLibraryPath: String;
 
 // משמש גם את Uninstallable/CreateUninstallRegKey וגם רשומות Check.
 function IsPortableInstall(): Boolean;
@@ -343,7 +364,12 @@ begin
   InitializeSlideshow();
 
   RegularInstallDirDefault := WizardForm.DirEdit.Text;
-  PortableInstallDirDefault := ExpandConstant('{userdocs}\OtzariaPortable');
+  // {userdocs} זורק כשלחשבון המנהל שאישר את ה-UAC אין פרופיל/Documents מלא.
+  try
+    PortableInstallDirDefault := ExpandConstant('{userdocs}\OtzariaPortable');
+  except
+    PortableInstallDirDefault := ExpandConstant('{sd}\OtzariaPortable');
+  end;
 
   // בחירה מוקדמת בעמוד סוג ההתקנה: ‎/PORTABLE — מצב נייד; ריצה במצב מנהל
   // (שיגור-מחדש עם /ALLUSERS) או תהליך מורם — לכל המשתמשים.
@@ -796,6 +822,11 @@ var
   FindRec: TFindRec;
   ChildPath: String;
 begin
+  // הספרייה המוגנת עשויה להיות הנתיב הנמחק עצמו, לא רק תת-תיקייה שלו.
+  if (ProtectedLibraryPath <> '') and
+     (Lowercase(Path) = Lowercase(ProtectedLibraryPath)) then
+    exit;
+
   if not DirExists(Path) then
     exit;
 
@@ -810,7 +841,9 @@ begin
           if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
           begin
             if (Lowercase(FindRec.Name) <> 'books') and
-               (Lowercase(FindRec.Name) <> 'backups') then
+               (Lowercase(FindRec.Name) <> 'backups') and
+               ((ProtectedLibraryPath = '') or
+                (Lowercase(ChildPath) <> Lowercase(ProtectedLibraryPath))) then
             begin
               DelTreeExceptBooksAndBackups(ChildPath);
               RemoveDir(ChildPath);
@@ -1085,6 +1118,72 @@ begin
   end;
 end;
 
+// תיקיית ההתקנה של רשומת uninstall בהיקף הנתון — בלי לדרוש שהתיקייה קיימת.
+function GetRegisteredInstallDir(RootKey: Integer): String;
+begin
+  if not RegQueryStringValue(RootKey, UninstallRegKey, 'Inno Setup: App Path', Result) then
+    Result := '';
+  if Result = '' then
+    RegQueryStringValue(RootKey, UninstallRegKey, 'InstallLocation', Result);
+end;
+
+function SameInstallDir(PathA, PathB: String): Boolean;
+begin
+  Result := CompareText(RemoveBackslash(PathA), RemoveBackslash(PathB)) = 0;
+end;
+
+// מסיר התקנת אוצריא שנותרה רשומה בהיקף אחר (issue #886): רשומה בנתיב אחר
+// מוסרת דרך ה-uninstaller שלה (מוחק גם קבצים וקיצורים שאחרת ימשיכו להריץ
+// בינארי ישן); רשומה שמצביעה על {app} נמחקת מהרישום בלבד — הקבצים שלנו.
+procedure RemoveStaleScopeRegistration(RootKey: Integer);
+var
+  StaleDir, UninstallExe: String;
+  ResultCode: Integer;
+begin
+  if not RegKeyExists(RootKey, UninstallRegKey) then
+    exit;
+
+  StaleDir := GetRegisteredInstallDir(RootKey);
+  if (StaleDir <> '') and
+     (not SameInstallDir(StaleDir, ExpandConstant('{app}'))) and
+     RegQueryStringValue(RootKey, UninstallRegKey, 'UninstallString', UninstallExe) then
+  begin
+    UninstallExe := RemoveQuotes(Trim(UninstallExe));
+    if FileExists(UninstallExe) and
+       Exec(UninstallExe, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART', '',
+         SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    begin
+      Log(Format('Removed stale install at %s (exit code %d)', [StaleDir, ResultCode]));
+      exit;
+    end;
+  end;
+
+  Log('Deleting stale uninstall registration for ' + StaleDir);
+  RegDeleteKeyIncludingSubkeys(RootKey, UninstallRegKey);
+end;
+
+// התקנת מנהל מנקה רשומות שנותרו בהיקפים האחרים: HKCU (התקנת משתמש מקבילה,
+// המצב של issue #886) ו-WOW6432Node (מתקיני מנהל 32-ביט ישנים). ההיקף
+// הנגדי אינו מנוקה בהתקנת משתמש — מחיקה ב-HKLM דורשת הרשאות מנהל.
+procedure RemoveOtherScopeInstalls();
+begin
+  if PortableMode or (not IsAdminInstallMode) then
+    exit;
+  RemoveStaleScopeRegistration(HKCU);
+  RemoveStaleScopeRegistration(HKLM32);
+end;
+
+// איפוס הרסני לא רץ בשדרוג שקט מבחירה שנשמרה ברישום (issue #941) —
+// בריצה שקטה הוא דורש /TASKS או /MERGETASKS מפורש בשורת הפקודה.
+function ShouldResetSettings(): Boolean;
+begin
+  Result := WizardIsTaskSelected('resetsettings');
+  if Result and WizardSilent then
+    Result := Pos('resetsettings',
+      Lowercase(ExpandConstant('{param:TASKS|}') + ' ' +
+                ExpandConstant('{param:MERGETASKS|}'))) > 0;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   AppDataPath: string;
@@ -1096,6 +1195,7 @@ begin
     // ב-otzaria_data ליד ה-EXE (ראה lib/core/app_paths.dart → isPortable).
     if PortableMode then
       SaveStringToFile(ExpandConstant('{app}\portable.marker'), '', False);
+    RemoveOtherScopeInstalls();
     exit;
   end;
 
@@ -1114,8 +1214,11 @@ begin
   if FileExists(ErrorLogPath) then
     DeleteFile(ErrorLogPath);
 
-  if WizardIsTaskSelected('resetsettings') then
+  if ShouldResetSettings() then
   begin
+    // נקרא לפני מחיקת ה-prefs — מגן על ספרייה מותאמת שיושבת בתוך נתיב נמחק.
+    ProtectedLibraryPath := RemoveBackslash(GetCustomLibraryPath());
+
     AppDataPath := GetDataDir('');
     if DirExists(AppDataPath) then
       DelTreeExceptBooksAndBackups(AppDataPath);
@@ -1138,13 +1241,10 @@ begin
     if DirExists(AppDataPath) then
       DelTreeExceptBooksAndBackups(AppDataPath);
 
-    // נתיבים ישנים מאוד: LocalAppData בעברית (לפני גרסה 0.9.x)
+    // נתיב ישן מאוד: LocalAppData בעברית (לפני גרסה 0.9.x) — גם כאן ספרים
+    // וגיבויים נשמרים; DelTree מלא מחק שם ספריות שלמות (issue #873).
     AppDataPath := ExpandConstant('{localappdata}\אוצריא');
     if DirExists(AppDataPath) then
-      DelTree(AppDataPath, True, True, True);
-
-    AppDataPath := ExpandConstant('{localappdata}\אוצריא\Data');
-    if DirExists(AppDataPath) then
-      DelTree(AppDataPath, True, True, True);
+      DelTreeExceptBooksAndBackups(AppDataPath);
   end;
 end;

@@ -8,7 +8,11 @@ import 'package:http/http.dart' as http;
 import 'package:otzaria/core/messages/report_messages.dart';
 import 'package:otzaria/data/repository/hive_list_repository.dart';
 import 'package:otzaria/models/direct_error_report.dart';
+import 'package:otzaria/services/offline_report_script_builder.dart';
 import 'package:otzaria/settings/engine/settings_repository.dart';
+
+export 'package:otzaria/services/offline_report_script_builder.dart'
+    show OfflineSendScript, OfflineSendScriptTarget;
 
 enum DirectReportDeliveryStatus {
   sent,
@@ -20,15 +24,23 @@ class DirectReportDeliveryResult {
   final DirectReportDeliveryStatus status;
   final String message;
 
+  /// השרת קלט את הדיווח אך לא שלח מייל, כי תוכן זהה כבר נשלח בעבר.
+  final bool isDuplicate;
+
   const DirectReportDeliveryResult._({
     required this.status,
     required this.message,
+    this.isDuplicate = false,
   });
 
-  factory DirectReportDeliveryResult.sent(String message) {
+  factory DirectReportDeliveryResult.sent(
+    String message, {
+    bool isDuplicate = false,
+  }) {
     return DirectReportDeliveryResult._(
       status: DirectReportDeliveryStatus.sent,
       message: message,
+      isDuplicate: isDuplicate,
     );
   }
 
@@ -51,32 +63,29 @@ class DirectReportDeliveryResult {
   bool get isQueued => status == DirectReportDeliveryStatus.queued;
 }
 
-/// מערכת ההפעלה של המחשב המחובר שאליו מיועד סקריפט השליחה האופליין.
-enum OfflineSendScriptTarget { windows, unix }
-
-/// תוצר בניית סקריפט השליחה: תוכן הקובץ ושם הקובץ המתאים.
-class OfflineSendScript {
-  final String content;
-  final String fileName;
-
-  const OfflineSendScript({required this.content, required this.fileName});
-}
-
 class DirectErrorReportService {
   static const String _endpoint = 'https://otzaria.org/api/reportingerrors';
-  static const String _queueBoxName = 'error_reports_queue';
-  static const String _queueKey = 'pending_reports';
-  static const String _sentKey = 'sent_reports';
-  static const int _maxSentReportsToKeep = 100;
+  static const String queueBoxName = 'error_reports_queue';
+  static const String pendingReportsKey = 'pending_reports';
+  static const String sentReportsKey = 'sent_reports';
+  static const int maxSentReportsToKeep = 100;
   static const Duration _timeout = Duration(seconds: 10);
   static const Duration _flushInterval = Duration(minutes: 5);
   static const int _maxQueuedFlushPerRun = 20;
   static const String _otzariaDirectReportTarget = 'אוצריא';
   static const String _sefariaDirectReportTarget = 'ספריא';
-  static const String _psBodyMarker = 'OTZARIA_REPORTS_PS_BODY';
 
   static Timer? _flushTimer;
   static bool _isFlushing = false;
+  static Completer<void>? _flushInFlight;
+
+  /// עוצר את השליחה האוטומטית וממתין לשליחה שבאמצע, כדי שכתיבה חיצונית לתור
+  /// (שחזור מגיבוי) לא תדרוס אותה. `startAutomaticFlush` מפעיל מחדש בעלייה.
+  static Future<void> suspendAutomaticFlush() async {
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    await _flushInFlight?.future;
+  }
 
   final http.Client _client;
   final HiveListRepository<DirectErrorReport> _queueRepository;
@@ -90,16 +99,16 @@ class DirectErrorReportService {
        _queueRepository =
            queueRepository ??
            HiveListRepository<DirectErrorReport>(
-             boxName: _queueBoxName,
-             key: _queueKey,
+             boxName: queueBoxName,
+             key: pendingReportsKey,
              fromJson: DirectErrorReport.fromJson,
              toJson: (report) => report.toJson(),
            ),
        _sentRepository =
            sentRepository ??
            HiveListRepository<DirectErrorReport>(
-             boxName: _queueBoxName,
-             key: _sentKey,
+             boxName: queueBoxName,
+             key: sentReportsKey,
              fromJson: DirectErrorReport.fromJson,
              toJson: (report) => report.toJson(),
            );
@@ -222,18 +231,14 @@ class DirectErrorReportService {
     List<DirectErrorReport> reports, {
     required OfflineSendScriptTarget target,
   }) {
-    switch (target) {
-      case OfflineSendScriptTarget.windows:
-        return OfflineSendScript(
-          content: _buildWindowsBatchScript(reports),
-          fileName: 'otzaria_send_saved_reports.bat',
-        );
-      case OfflineSendScriptTarget.unix:
-        return OfflineSendScript(
-          content: _buildUnixShellScript(reports),
-          fileName: 'otzaria_send_saved_reports.sh',
-        );
-    }
+    return buildOfflineReportScript(
+      target: target,
+      endpoint: _endpoint,
+      payloads: reports.map((report) => report.toApiPayload()).toList(),
+      ids: reports.map((report) => report.id).toList(),
+      idField: 'report_id',
+      baseFileName: 'otzaria_send_saved_reports',
+    );
   }
 
   Future<DirectReportDeliveryResult> submitReport(
@@ -261,6 +266,12 @@ class DirectErrorReportService {
     if (attemptResult.isSuccess) {
       await _saveSentReport(report);
       unawaited(flushPendingReports(onlyAutomaticRetry: true));
+      if (attemptResult.isDuplicate) {
+        return DirectReportDeliveryResult.sent(
+          ReportMessages.duplicateReport(directReportTargetLabel),
+          isDuplicate: true,
+        );
+      }
       if (_isSefariaReport(report)) {
         return DirectReportDeliveryResult.sent(ReportMessages.sentToSefaria);
       }
@@ -301,6 +312,7 @@ class DirectErrorReportService {
     }
 
     _isFlushing = true;
+    final inFlight = _flushInFlight = Completer<void>();
     try {
       final pendingReports = await _queueRepository.load();
       if (pendingReports.isEmpty) {
@@ -350,6 +362,8 @@ class DirectErrorReportService {
       return sentCount;
     } finally {
       _isFlushing = false;
+      _flushInFlight = null;
+      inFlight.complete();
     }
   }
 
@@ -391,8 +405,8 @@ class DirectErrorReportService {
     final sentReports = await _sentRepository.load();
     sentReports.removeWhere((item) => item.id == report.id);
     sentReports.insert(0, report);
-    if (sentReports.length > _maxSentReportsToKeep) {
-      sentReports.removeRange(_maxSentReportsToKeep, sentReports.length);
+    if (sentReports.length > maxSentReportsToKeep) {
+      sentReports.removeRange(maxSentReportsToKeep, sentReports.length);
     }
     await _sentRepository.save(sentReports);
   }
@@ -411,7 +425,9 @@ class DirectErrorReportService {
           .timeout(_timeout);
 
       if (response.statusCode == HttpStatus.ok) {
-        return const _SendAttemptResult.success();
+        return _SendAttemptResult.success(
+          isDuplicate: _isDuplicateResponse(response.body),
+        );
       }
 
       if (_isPermanentHttpFailure(response.statusCode)) {
@@ -443,126 +459,15 @@ class DirectErrorReportService {
     return statusCode == HttpStatus.badRequest || statusCode == 422;
   }
 
-  /// בונה קובץ .bat קריא: שורת הפעלה קצרה שקוראת את הקובץ עצמו, מחלצת את גוף
-  /// ה-PowerShell שאחרי הסמן ומריצה אותו. הסמן נבנה ב-PowerShell מ-[char]35
-  /// כדי שלא יופיע כפי שהוא בשורת הפקודה ויתנגש עם החיפוש.
-  String _buildWindowsBatchScript(List<DirectErrorReport> reports) {
-    final payloads = reports.map((report) => report.toApiPayload()).toList();
-    final payloadJson = jsonEncode(payloads);
-    final powerShellBody = _buildWindowsPowerShellBody(payloadJson);
-    final script =
-        '''@echo off
-powershell -NoProfile -ExecutionPolicy Bypass -Command "\$f=[IO.File]::ReadAllText('%~f0',[Text.Encoding]::UTF8); \$m=[char]35+'$_psBodyMarker'; iex \$f.Substring(\$f.IndexOf(\$m)+\$m.Length)"
-exit /b %ERRORLEVEL%
-#$_psBodyMarker
-$powerShellBody''';
-    // cmd.exe דורש CRLF; מנרמלים קודם ל-LF כדי שמקור CRLF לא ייצור \r\r\n.
-    return script.replaceAll('\r\n', '\n').replaceAll('\n', '\r\n');
-  }
-
-  String _buildWindowsPowerShellBody(String payloadJson) {
-    return '''Add-Type -AssemblyName System.Windows.Forms | Out-Null
-\$ErrorActionPreference = 'Stop'
-\$endpoint = '$_endpoint'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-\$payloadsJson = @'
-$payloadJson
-'@
-
-\$payloads = \$payloadsJson | ConvertFrom-Json
-\$sent = 0
-\$failed = 0
-\$lines = @()
-foreach (\$payload in @(\$payloads)) {
-  try {
-    \$body = \$payload | ConvertTo-Json -Depth 10 -Compress
-    \$bodyBytes = [System.Text.Encoding]::UTF8.GetBytes(\$body)
-    \$response = Invoke-WebRequest -Uri \$endpoint -Method Post -ContentType 'application/json; charset=utf-8' -Body \$bodyBytes -UseBasicParsing
-    if (\$response.StatusCode -eq 200) {
-      \$sent++
-      \$lines += ('נשלח: ' + \$payload.report_id)
-    } else {
-      \$failed++
-      \$lines += ('נכשל: ' + \$payload.report_id + ' (סטטוס ' + \$response.StatusCode + ')')
+  /// השרת מחזיר 200 עם duplicate:true כשתוכן זהה כבר נשלח — הדיווח נקלט
+  /// אך לא נשלח מייל, ואסור להציג למשתמש "נשלח בהצלחה".
+  static bool _isDuplicateResponse(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      return decoded is Map<String, dynamic> && decoded['duplicate'] == true;
+    } catch (_) {
+      return false;
     }
-  } catch {
-    \$failed++
-    \$lines += ('נכשל: ' + \$payload.report_id + ' (' + \$_.Exception.Message + ')')
-  }
-}
-
-\$summary = "נשלחו בהצלחה: \$sent`r`nנכשלו: \$failed`r`n`r`n" + (\$lines -join "`r`n")
-[System.Windows.Forms.MessageBox]::Show(\$summary, '${ReportMessages.offlineScriptWindowTitle}') | Out-Null''';
-  }
-
-  /// בונה קובץ .sh ל-Linux/macOS: שולח כל דיווח ב-curl ומציג את הסיכום בחלון
-  /// גרפי (zenity/kdialog/osascript) עם נפילה חזרה לפלט במסוף אם אין כלי גרפי.
-  String _buildUnixShellScript(List<DirectErrorReport> reports) {
-    final buffer = StringBuffer()
-      ..writeln('#!/usr/bin/env bash')
-      ..writeln("endpoint='$_endpoint'")
-      ..writeln('sent=0')
-      ..writeln('failed=0')
-      ..writeln('results=""')
-      ..writeln('')
-      ..writeln('send_one() {')
-      ..writeln('  local body="\$1"')
-      ..writeln('  local id="\$2"')
-      ..writeln('  local code')
-      ..writeln(
-        "  code=\$(printf '%s' \"\$body\" | curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json; charset=utf-8' --data-binary @- \"\$endpoint\")",
-      )
-      ..writeln('  if [ "\$code" = "200" ]; then')
-      ..writeln('    sent=\$((sent + 1))')
-      ..writeln('    results="\${results}\\nנשלח: \${id}"')
-      ..writeln('  else')
-      ..writeln('    failed=\$((failed + 1))')
-      ..writeln('    results="\${results}\\nנכשל: \${id} (סטטוס \${code})"')
-      ..writeln('  fi')
-      ..writeln('}')
-      ..writeln('');
-
-    for (var index = 0; index < reports.length; index++) {
-      final report = reports[index];
-      final payloadJson = jsonEncode(report.toApiPayload());
-      final delimiter = 'OTZARIA_PAYLOAD_$index';
-      buffer
-        ..writeln('send_one "\$(cat <<\'$delimiter\'')
-        ..writeln(payloadJson)
-        ..writeln(delimiter)
-        ..writeln(')" ${_shellSingleQuote(report.id)}');
-    }
-
-    buffer
-      ..writeln('')
-      ..writeln(
-        'summary="נשלחו בהצלחה: \${sent}\\nנכשלו: \${failed}\\n\${results}"',
-      )
-      ..writeln('tmp="\$(mktemp)"')
-      ..writeln("printf '%b\\n' \"\$summary\" > \"\$tmp\"")
-      ..writeln('if command -v zenity >/dev/null 2>&1; then')
-      ..writeln(
-        "  zenity --text-info --filename=\"\$tmp\" --title='${ReportMessages.offlineScriptWindowTitle}'",
-      )
-      ..writeln('elif command -v kdialog >/dev/null 2>&1; then')
-      ..writeln(
-        "  kdialog --title '${ReportMessages.offlineScriptWindowTitle}' --textbox \"\$tmp\"",
-      )
-      ..writeln('elif command -v osascript >/dev/null 2>&1; then')
-      ..writeln(
-        "  osascript -e \"display dialog (do shell script \\\"cat \\\" & quoted form of \\\"\$tmp\\\") buttons {\\\"סגור\\\"} with title \\\"${ReportMessages.offlineScriptWindowTitle}\\\"\" >/dev/null 2>&1",
-      )
-      ..writeln('else')
-      ..writeln("  cat \"\$tmp\"")
-      ..writeln('fi')
-      ..writeln('rm -f "\$tmp"');
-
-    return buffer.toString();
-  }
-
-  String _shellSingleQuote(String value) {
-    return "'${value.replaceAll("'", r"'\''")}'";
   }
 }
 
@@ -570,15 +475,22 @@ class _SendAttemptResult {
   final bool isSuccess;
   final String message;
   final _SendAttemptFailureType? failureType;
+  final bool isDuplicate;
 
   const _SendAttemptResult._({
     required this.isSuccess,
     required this.message,
     this.failureType,
+    this.isDuplicate = false,
   });
 
-  const _SendAttemptResult.success()
-    : this._(isSuccess: true, message: '', failureType: null);
+  const _SendAttemptResult.success({bool isDuplicate = false})
+    : this._(
+        isSuccess: true,
+        message: '',
+        failureType: null,
+        isDuplicate: isDuplicate,
+      );
 
   bool get isPermanentFailure =>
       !isSuccess && failureType == _SendAttemptFailureType.permanent;

@@ -161,6 +161,8 @@ class PluginExternalSearchService {
     int offset = 0,
     int limit = 20,
     List<int>? ids,
+    Map<String, bool> options = const {},
+    Map<String, Map<String, bool>> wordOptions = const {},
     void Function(ExternalSearchPage partial)? onUpdate,
   }) async {
     final pluginId = _providerToPlugin[provider];
@@ -197,6 +199,12 @@ class PluginExternalSearchService {
       // עמוד לפי מזהים מפורשים: דפדוף בתוצאות מסוננות-קטגוריה שהקורא
       // חישב מהאינדקס. הספק מגיש אותם מהמטמון של החיפוש.
       'ids': ?ids,
+      // אפשרויות חיפוש בפורמט של search.requested — הספק מחיל את מה שהמנוע
+      // שלו תומך בו. options היא המפה הגלובלית (חלה על כל מילות השאילתה) —
+      // בלעדיה ספק שמפרק את השאילתה למילים אחרת (מקף, פיסוק) לא היה מזהה
+      // את מפתחות ה-wordOptions והאפשרויות היו מתבטלות בשקט.
+      'options': ?(options.isEmpty ? null : options),
+      'wordOptions': ?(wordOptions.isEmpty ? null : wordOptions),
       // הקורא צורך שמות ספרים באינדקס. ספק ותיק מתעלם מהשדה ושולח רשומות
       // בלי שם; ספק שמכיר אותו יודע שהשם לא ייזרק — ומארח ותיק, שאינו
       // שולח את השדה, לא יקבל רשומות שהיה זורק בסניטציה. רק בקשת העמוד
@@ -249,7 +257,8 @@ class PluginExternalSearchService {
 
   /// תשובת התוסף לבקשה: רשימת תוצאות גולמית שעוברת ניקוי וקיצוץ כאן.
   /// `done: false` מסמן עדכון חלקי — הבקשה נשארת פתוחה והטיימאוט מתאפס;
-  /// תשובה לבקשה שכבר פגה או שאינה שייכת ל-[pluginId] נדחית.
+  /// תשובה לבקשה שכבר פגה, שאינה שייכת ל-[pluginId] או שהגיעה ממופע אחר
+  /// של התוסף ([instanceId]) נדחית.
   bool respond(
     String pluginId,
     String requestId, {
@@ -260,6 +269,7 @@ class PluginExternalSearchService {
     bool done = true,
     List<Object?>? index,
     String? error,
+    String? instanceId,
   }) {
     debugPrint(
       'PluginExternalSearchService: ← $requestId done=$done '
@@ -272,6 +282,7 @@ class PluginExternalSearchService {
         pending.completer.isCompleted) {
       return false;
     }
+    if (!pending.bindResponder(instanceId)) return false;
     pending.sawActivity = true;
     if (error != null && error.isNotEmpty) {
       _pending.remove(requestId);
@@ -377,7 +388,18 @@ class _PendingExternalSearch {
   /// הגיעה תגובה כלשהי (חלקית/שגיאה) — מבטל את הניסיון החוזר.
   bool sawActivity = false;
 
+  /// המופע שענה ראשון. הבקשה משוגרת ליעד יחיד, אבל ניסיון חוזר (retry)
+  /// עלול להימסר למופע אחר — בלי הנעילה זרימת done=false צוברת כפולים.
+  String? _responderInstanceId;
+
   Timer? _timer;
+
+  /// נועל את הבקשה למופע העונה הראשון; תשובה ממופע אחר נדחית (false).
+  bool bindResponder(String? instanceId) {
+    if (instanceId == null) return true;
+    _responderInstanceId ??= instanceId;
+    return _responderInstanceId == instanceId;
+  }
 
   _PendingExternalSearch({
     required this.pluginId,

@@ -97,6 +97,14 @@ class ReferenceBooksCache {
       // Warm up shared caches
       await BooksCache.instance.warmUp();
       if (myGen != _generation) return;
+      // רשימה ריקה תקינה; רק טעינה שלא הושלמה מעידה שאין עדיין במה לחפש.
+      if (!BooksCache.instance.isLoaded) {
+        debugPrint(
+          '[ReferenceBooksCache] aborting warmUp — BooksCache not loaded; '
+          'next warmUp() will retry',
+        );
+        return;
+      }
       await AcronymsCache.instance.warmUp();
       if (myGen != _generation) return;
 
@@ -172,6 +180,7 @@ class ReferenceBooksCache {
 
       // Swap אטומי — רק אם הדור עדיין שלנו.
       if (myGen != _generation) return;
+
       _normalizedTitles
         ..clear()
         ..addAll(localNormalizedTitles);
@@ -233,10 +242,13 @@ class ReferenceBooksCache {
       );
     } catch (e) {
       debugPrint('[ReferenceBooksCache] Warmup failed: $e');
+      // לא מסמנים loaded: כשל זמני (למשל DB נעול ביציאה ממצב שינה) יאופשר
+      // retry ב-warmUp הבא, במקום קאש ריק שמחזיר "לא נמצא ספר" לכל ה-session.
       if (myGen == _generation) {
         _normalizedTitles.clear();
         _fsPdfBooks.clear();
-        _isLoaded = true;
+        _categoryPaths.clear();
+        _isLoaded = false;
       }
     }
   }
@@ -532,6 +544,10 @@ class ReferenceBooksCache {
     final starts = <ReferenceBookHit>[];
     final contains = <ReferenceBookHit>[];
 
+    // מסננת הביגרמים חוסכת את המעבר על כינויי כל הספרים בכל הקלדה — היא
+    // קבוצת-על, ולכן הלולאה שמתחתיה נשארת הפוסקת היחידה על הדירוג.
+    final acronymCandidates = AcronymsCache.instance.candidatesFor(q);
+
     for (final book in BooksCache.instance.books) {
       final t = _normalizedTitles[book.id] ?? '';
       if (t.isEmpty) continue;
@@ -546,7 +562,7 @@ class ReferenceBooksCache {
         matchRank = 1;
       } else if (t.contains(q)) {
         matchRank = 2;
-      } else {
+      } else if (acronymCandidates?.contains(book.id) ?? true) {
         // התאמת ראשי תיבות — המונחים כבר מנורמלים בעת טעינת הקאש.
         final normalizedAcronyms = AcronymsCache.instance.getAcronymsForBook(
           book.id,
@@ -565,9 +581,7 @@ class ReferenceBooksCache {
               titleTokens ??= titleMatchTokens(t);
               final tailIsTitle = _acronymTailIsTitleWords(a, q, titleTokens);
               // דירוג טוב יותר גובר על קודמיו — אחרת מונח "contains" (5) שנסרק
-              // קודם היה מקבע 5 ומונע מהתאמת-התחילית הזו לדרג 4. ובין מונחי
-              // תחילית — עדיף זה שהזנב שלו מילות-כותרת (ראו [ReferenceBookHit
-              // .acronymTailIsTitleWords]).
+              // קודם היה מקבע 5 ומונע מהתאמת-התחילית הזו לדרג 4.
               if (matchRank == null ||
                   matchRank > 4 ||
                   (tailIsTitle && !tailIsTitleWords)) {

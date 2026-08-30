@@ -15,6 +15,7 @@ import 'package:otzaria/personal_notes/bloc/personal_notes_event.dart';
 import 'package:otzaria/personal_notes/bloc/personal_notes_state.dart';
 import 'package:otzaria/personal_notes/models/personal_note.dart';
 import 'package:otzaria/personal_notes/repository/personal_notes_repository.dart';
+import 'package:otzaria/utils/file/save_file_with_extension.dart';
 import 'package:otzaria/personal_notes/services/personal_notes_import_export_service.dart';
 import 'package:otzaria/personal_notes/storage/personal_notes_database.dart';
 import 'package:otzaria/personal_notes/widgets/personal_note_content_view.dart';
@@ -26,6 +27,7 @@ import 'package:otzaria/library/bloc/library_bloc.dart';
 import 'package:otzaria/library/bloc/library_state.dart';
 import 'package:otzaria/library/models/library.dart';
 import 'package:otzaria/models/books.dart';
+import 'package:otzaria/utils/text/html_link_handler.dart';
 import 'package:otzaria/widgets/lists/nav_tree_tile.dart';
 import 'package:otzaria/widgets/feedback/tool_empty_state.dart';
 import 'package:otzaria/utils/navigation/open_book.dart';
@@ -39,7 +41,7 @@ import 'package:otzaria/settings/settings_exports.dart';
 import 'package:otzaria/shortcuts/shortcut_helper.dart';
 import 'package:otzaria/shortcuts/shortcut_validator.dart';
 import 'package:otzaria/widgets/navigation/app_top_bar.dart';
-import 'package:otzaria/widgets/layout/adaptive_side_pane.dart';
+import 'package:otzaria/widgets/navigation/nav_side_panel.dart';
 import 'package:otzaria/widgets/widgets_exports.dart';
 import 'package:otzaria/theme/theme_exports.dart';
 import 'package:otzaria/tools/calendar/helpers/calendar_date_helpers.dart';
@@ -316,7 +318,7 @@ class _PersonalNotesManagerScreenState
               Expanded(
                 child: PrimaryScrollController(
                   controller: _contentScrollController,
-                  child: AdaptiveSidePane(
+                  child: NavSidePanel(
                     isOpen: _isNavigationVisible,
                     alignment: AlignmentDirectional
                         .centerEnd, // ימין בעברית (RTL) - סרגל ניווט
@@ -337,7 +339,6 @@ class _PersonalNotesManagerScreenState
                       _navigationWidth = nextWidth;
                     },
                     paneContent: _buildNotesTree(),
-                    wrapPaneInFloatingPanel: true,
                   ),
                 ),
               ),
@@ -355,37 +356,16 @@ class _PersonalNotesManagerScreenState
         return AppTopBar(
           leadingItems: [
             AppTopBarItem(
-              widget: IconButton(
-                tooltip: _isNavigationVisible ? 'הסתר ניווט' : 'הצג ניווט',
-                onPressed: () {
-                  setState(() {
-                    _isNavigationVisible = !_isNavigationVisible;
-                  });
-                },
-                icon: AnimatedSwitcher(
-                  duration: AppTokens.animFast,
-                  transitionBuilder: (child, animation) => RotationTransition(
-                    turns: Tween<double>(
-                      begin: 0.5,
-                      end: 0.0,
-                    ).animate(animation),
-                    child: FadeTransition(opacity: animation, child: child),
-                  ),
-                  child: Icon(
-                    _isNavigationVisible
-                        ? FluentIcons.panel_right_contract_24_regular
-                        : FluentIcons.panel_right_24_regular,
-                    key: ValueKey(_isNavigationVisible),
-                    size: 24,
-                  ),
-                ),
-                visualDensity: VisualDensity.standard,
-                splashRadius: 22,
-                color: Theme.of(context).colorScheme.onSecondaryContainer,
+              widget: NavPanelToggleButton(
+                isOpen: _isNavigationVisible,
+                onToggle: () => setState(() {
+                  _isNavigationVisible = !_isNavigationVisible;
+                }),
               ),
             ),
           ],
           center: OtzariaSearchField(
+            icon: OtzariaIcons.search_in_the_document_24_regular,
             controller: _searchController,
             focusNode: _searchFocusNode,
             hintText: 'חפש בהערות...',
@@ -410,8 +390,7 @@ class _PersonalNotesManagerScreenState
                     : 'סנן לפי תאריך',
                 icon: _dateRange != null
                     ? FluentIcons.calendar_checkmark_24_filled
-                    : FluentIcons.calendar_24_regular,
-                flipInRtl: true,
+                    : OtzariaIcons.calendar_24_regular,
                 onPressed: _pickDateRange,
               ),
             ),
@@ -458,7 +437,9 @@ class _PersonalNotesManagerScreenState
   Future<List<TocEntry>?> _tocFor(String bookId) {
     return _tocFutureByBook.putIfAbsent(bookId, () {
       final library = context.read<LibraryBloc>().state.library;
-      final book = library?.findBookByTitle(bookId, TextBook);
+      final book = library == null
+          ? null
+          : HtmlLinkHandler.resolveBookLinkTarget(library, bookId);
       if (book is! TextBook) return Future.value(null);
       return book.tableOfContents;
     });
@@ -499,13 +480,11 @@ class _PersonalNotesManagerScreenState
         ),
       ),
     );
-    final path = await FilePicker.saveFile(
+    final path = await saveFileWithExtension(
       dialogTitle: 'בחר מיקום לשמירת קובץ הגיבוי',
       fileName: 'otzaria_notes_backup.json',
-      allowedExtensions: ['json'],
-      type: FileType.custom,
+      extension: 'json',
       bytes: bytes,
-      lockParentWindow: true,
     );
     if (!mounted) return;
     if (path == null) return;
@@ -536,13 +515,11 @@ class _PersonalNotesManagerScreenState
         ),
       ),
     );
-    final path = await FilePicker.saveFile(
+    final path = await saveFileWithExtension(
       dialogTitle: 'בחר מיקום לשמירת קובץ הטקסט',
       fileName: 'otzaria_notes.txt',
-      allowedExtensions: ['txt'],
-      type: FileType.custom,
+      extension: 'txt',
       bytes: bytes,
-      lockParentWindow: true,
     );
     if (!mounted) return;
     if (path == null) return;
@@ -654,11 +631,12 @@ class _PersonalNotesManagerScreenState
           rows[lastGrouped!].isGroupEnd = true;
         }
 
-        return ListView.builder(
-          // שוליים אופקיים — הכרטיסים לא נוגעים בקצה, וקו הגלילה ברווח.
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          itemCount: rows.length,
-          itemBuilder: (context, index) => _buildNotesNavRow(rows[index]),
+        return NavTreeFocusGroup(
+          child: ListView.builder(
+            padding: kNavTreeListPadding,
+            itemCount: rows.length,
+            itemBuilder: (context, index) => _buildNotesNavRow(rows[index]),
+          ),
         );
       },
     );
@@ -1080,8 +1058,8 @@ class _PersonalNotesManagerScreenState
       ),
       child: Row(
         children: [
-          RtlIcon(
-            FluentIcons.calendar_24_regular,
+          Icon(
+            OtzariaIcons.calendar_24_regular,
             size: 18,
             color: cs.onSecondaryContainer,
           ),
@@ -1196,7 +1174,7 @@ class _PersonalNotesManagerScreenState
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     _InfoChip(
-                      icon: FluentIcons.calendar_24_regular,
+                      icon: OtzariaIcons.calendar_24_regular,
                       text: hebrewDate,
                       backgroundColor: cs.secondaryContainer,
                       foregroundColor: cs.onSecondaryContainer,
@@ -1230,7 +1208,7 @@ class _PersonalNotesManagerScreenState
                   if (!isMissing)
                     BarButton.icon(
                       tooltip: 'פתח ספר בשורה',
-                      icon: FluentIcons.book_open_24_regular,
+                      icon: OtzariaIcons.otzaria_icon_2_page_24_regular,
                       onPressed: () => _openNoteInBook(note),
                     ),
                   BarButton.icon(
@@ -1346,7 +1324,7 @@ class _PersonalNotesManagerScreenState
     }
 
     final book =
-        library.findBookByTitle(note.bookId, TextBook) ??
+        HtmlLinkHandler.resolveBookLinkTarget(library, note.bookId) ??
         library.findBookByTitle(note.bookId, null);
     if (book == null) {
       UiSnack.show(NotesMessages.bookNotFound(note.bookId));

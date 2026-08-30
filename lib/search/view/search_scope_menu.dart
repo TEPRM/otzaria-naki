@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/data/data_providers/sqlite_data_provider.dart';
 import 'package:otzaria/data/data_providers/user_books_database_holder.dart';
@@ -546,6 +548,9 @@ class _MenuItem {
   final ValueChanged<bool>? onToggle;
   final VoidCallback? onTap;
   final VoidCallback? onDrill;
+
+  /// פעולת "רק" — בחירת השורה הזו בלבד תוך ניקוי כל שאר הבחירה.
+  final VoidCallback? onOnly;
   final bool isHeader;
 
   bool get isDrill => onDrill != null;
@@ -559,6 +564,7 @@ class _MenuItem {
     this.onToggle,
     this.onTap,
     this.onDrill,
+    this.onOnly,
   }) : isHeader = false;
 
   const _MenuItem.header(this.label)
@@ -569,6 +575,7 @@ class _MenuItem {
       onToggle = null,
       onTap = null,
       onDrill = null,
+      onOnly = null,
       isHeader = true;
 }
 
@@ -609,6 +616,7 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
   _View _view = _View.root;
   final List<ScopeNode> _stack = [];
   int _highlight = 0;
+  int _hoveredRow = -1;
 
   List<String> _authorResults = const [];
   int _authorRequestId = 0;
@@ -728,6 +736,9 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
 
   /// מסיר את כל הסימונים (כולל "כל הספרים") — מאפשר לבחור למשל רק ספר יסוד אחד.
   void _clearAll() => _apply(<String>{});
+
+  /// בחירת "רק" — הבחירה מוחלפת ב-[facet] בלבד.
+  void _selectOnly(String facet) => _apply({facet});
 
   /// כל ספרי היסוד תחת [folderFacet], בסדר הספרייה.
   List<BookScopeNode> _baseUnder(String folderFacet) => [
@@ -850,7 +861,7 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
     return _MenuItem(
       label: node.title,
       subtitle: node.subtitle,
-      icon: FluentIcons.book_24_regular,
+      icon: OtzariaIcons.book_24_regular,
       useRtlIcon: true,
       check: tree.isFacetCovered(node.facet, _categoryPart),
       onToggle: (v) => _toggleCategoryFacet(node.facet, v),
@@ -909,10 +920,14 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
 
   List<_MenuItem> _rootItems() {
     final categoryPart = _categoryPart;
-    // "כל הספרים" מסומן רק כשאין שום צמצום (לא קטגוריה ולא ממד).
+    // "נקה הכל" מוצג רק כשיש צמצום כלשהו (קטגוריה או ממד).
     final isEverything =
         (categoryPart.isEmpty || categoryPart.contains('/')) &&
         _dimensionPart.isEmpty;
+    // התיבה משקפת את חלק הקטגוריות בלבד, בעקביות עם התיקיות שבמסך הפנימי:
+    // סט ריק = לא מסומן (אף שחיפוש בלי שום סינון עדיין רץ על הכול).
+    final hasAllCategories = categoryPart.contains('/');
+    final hasPartialCategories = categoryPart.isNotEmpty && !hasAllCategories;
     final baseSelected = _selection.contains(FacetHelper.baseDimensionFacet);
 
     return [
@@ -926,13 +941,13 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
       _MenuItem(
         label: 'כל הספרים',
         icon: FluentIcons.library_24_regular,
-        check: isEverything,
-        onToggle: (_) => isEverything ? _clearAll() : _apply({'/'}),
+        check: hasAllCategories ? true : (hasPartialCategories ? null : false),
+        onToggle: (v) => _setCategorySelection(v ? {'/'} : {}),
         onDrill: () => _enterView(_View.categories),
       ),
       _MenuItem(
         label: 'ספרי יסוד',
-        icon: FluentIcons.book_star_24_regular,
+        icon: OtzariaIcons.book_star_24_regular,
         useRtlIcon: true,
         check: baseSelected,
         onToggle: (v) => _toggleDimension(FacetHelper.baseDimensionFacet, v),
@@ -942,7 +957,7 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
       for (final era in _eraNames)
         _MenuItem(
           label: era,
-          icon: FluentIcons.calendar_24_regular,
+          icon: OtzariaIcons.calendar_24_regular,
           useRtlIcon: true,
           check: _selection.contains(FacetHelper.buildEraFacet(era)),
           onToggle: (v) => _toggleDimension(FacetHelper.buildEraFacet(era), v),
@@ -960,34 +975,46 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
         if (normalizeFindText(era).contains(query)) era,
     ];
     return [
+      // ברירת המחדל ("כל הספרייה") מסמנת את כל התוצאות — בלי שורה זו הדרך
+      // היחידה לצמצם היא הורדת סימון שורה-שורה (issue #933).
+      if (_selection.isNotEmpty)
+        _MenuItem(
+          label: 'נקה הכל',
+          icon: FluentIcons.arrow_reset_24_regular,
+          check: null,
+          onTap: _clearAll,
+        ),
       for (final author in _authorResults)
         _MenuItem(
           label: author,
           subtitle: 'מחבר',
-          icon: FluentIcons.person_24_regular,
+          icon: OtzariaIcons.person_24_regular,
           check: _selection.contains(FacetHelper.buildAuthorFacet(author)),
           onToggle: (v) =>
               _toggleDimension(FacetHelper.buildAuthorFacet(author), v),
+          onOnly: () => _selectOnly(FacetHelper.buildAuthorFacet(author)),
         ),
       for (final era in eraMatches)
         _MenuItem(
           label: era,
           subtitle: 'תקופה',
-          icon: FluentIcons.calendar_24_regular,
+          icon: OtzariaIcons.calendar_24_regular,
           useRtlIcon: true,
           check: _selection.contains(FacetHelper.buildEraFacet(era)),
           onToggle: (v) => _toggleDimension(FacetHelper.buildEraFacet(era), v),
+          onOnly: () => _selectOnly(FacetHelper.buildEraFacet(era)),
         ),
       for (final item in treeResults)
         _MenuItem(
           label: item.title,
           subtitle: item.subtitle,
           icon: item.isBook
-              ? FluentIcons.book_24_regular
+              ? OtzariaIcons.book_24_regular
               : FluentIcons.folder_24_regular,
           useRtlIcon: item.isBook,
           check: tree.isFacetCovered(item.facet, categoryPart),
           onToggle: (v) => _toggleCategoryFacet(item.facet, v),
+          onOnly: () => _selectOnly(item.facet),
         ),
     ];
   }
@@ -1133,7 +1160,7 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
     final isFolder =
         item.icon == FluentIcons.folder_24_regular ||
         item.icon == FluentIcons.library_24_regular ||
-        item.icon == FluentIcons.book_star_24_regular;
+        item.icon == OtzariaIcons.book_star_24_regular;
     final iconColor = isFolder
         ? colorScheme.primary
         : colorScheme.onSurfaceVariant;
@@ -1148,16 +1175,34 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
       }
     }
 
+    // במגע אין hover — "רק" מוצג תמיד; בעכבר הוא נחשף בריחוף או בניווט מקלדת.
+    final showOnly =
+        item.onOnly != null &&
+        (Platform.isAndroid ||
+            Platform.isIOS ||
+            Platform.isWindows ||
+            index == _hoveredRow ||
+            highlighted);
+
     return InkWell(
       canRequestFocus: false,
       onTap: onRowTap,
+      onHover: (hovering) {
+        if (hovering) {
+          setState(() => _hoveredRow = index);
+        } else if (_hoveredRow == index) {
+          setState(() => _hoveredRow = -1);
+        }
+      },
       child: Container(
         constraints: const BoxConstraints(minHeight: _rowHeight),
         color: highlighted ? colorScheme.primary.withValues(alpha: 0.10) : null,
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
         child: Row(
           children: [
-            if (item.check != null)
+            // check==null עם onToggle = מצב ביניים (tristate); בלי onToggle
+            // זו שורת פעולה (כמו "נקה הכל") שאין לה תיבה.
+            if (item.onToggle != null)
               SizedBox(
                 width: 28,
                 height: 28,
@@ -1206,6 +1251,30 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
                 ],
               ),
             ),
+            if (showOnly) ...[
+              const SizedBox(width: 4),
+              Tooltip(
+                message: 'בחר רק את זה',
+                child: TextButton(
+                  onPressed: () {
+                    item.onOnly!();
+                    widget.onKeepFocus();
+                  },
+                  style: TextButton.styleFrom(
+                    minimumSize: Size.zero,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: const Text(
+                    'רק',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+            ],
             if (item.isDrill) ...[
               const SizedBox(width: 4),
               // בכיוון RTL מתהפך ומצביע שמאלה — כיוון הכניסה פנימה.

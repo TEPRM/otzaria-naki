@@ -120,6 +120,31 @@ class CopyUtils {
     }
   }
 
+  /// גוזר מ-reference של תוצאת חיפוש את חלק הנתיב שאחרי שם הספר, כדי
+  /// ש-[formatTextWithHeaders] (שמרכיב "שם ספר, נתיב") לא יכפיל את השם:
+  /// המנוע מחזיר לעיתים reference שכבר פותח בשם הספר ("עבודה זרה, דף עג.")
+  /// ולעיתים נתיב בלבד ("סימן א").
+  static String referencePath({
+    required String bookName,
+    required String reference,
+  }) {
+    final ref = reference.trim();
+    final book = bookName.trim();
+    if (book.isEmpty || ref == book) return ref == book ? '' : ref;
+    if (!ref.startsWith(book)) return ref;
+    final suffix = ref.substring(book.length);
+    if (suffix.isNotEmpty &&
+        !suffix.startsWith(',') &&
+        suffix.trimLeft() == suffix) {
+      return ref;
+    }
+    var rest = suffix.trimLeft();
+    if (rest.startsWith(',')) {
+      rest = rest.substring(1).trimLeft();
+    }
+    return rest;
+  }
+
   /// מעצב טקסט עם כותרות בהתאם להגדרות
   static String formatTextWithHeaders({
     required String originalText,
@@ -173,17 +198,25 @@ class CopyUtils {
     return result;
   }
 
-  /// יוצר HTML מעוצב להעתקה, עם בלוק נפרד לכל שורה כדי לשמור Enter רגיל.
+  /// יוצר HTML מעוצב להעתקה: שורות הביניים כבלוקים (Enter אמיתי ב-Word),
+  /// והשורה האחרונה inline — אחרת ההדבקה מוסיפה Enter מיותר בסופה.
   static String buildStyledHtml({
     required String htmlText,
     required String fontFamily,
     required double fontSize,
   }) {
+    final style =
+        'font-family: $fontFamily; font-size: ${fontSize}px; direction: rtl;';
     final normalizedText = htmlText.trimRight().replaceAll('\r\n', '\n');
     final lines = normalizedText.split('\n');
-    final htmlLines = lines.join('<br>');
 
-    return '<span dir="rtl" style="font-family: $fontFamily; font-size: ${fontSize}px; direction: rtl;">$htmlLines</span>';
+    final buffer = StringBuffer();
+    for (var i = 0; i < lines.length - 1; i++) {
+      final line = lines[i].isEmpty ? '<br>' : lines[i];
+      buffer.write('<div dir="rtl" style="$style">$line</div>');
+    }
+    buffer.write('<span dir="rtl" style="$style">${lines.last}</span>');
+    return buffer.toString();
   }
 
   /// העתקת טקסט מעוצב ללוח עם HTML

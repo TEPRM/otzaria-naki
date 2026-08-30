@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otzaria/models/books.dart';
 import 'package:otzaria/plugins/declarative/models/declarative_program.dart';
@@ -152,6 +153,199 @@ void main() {
     expect(fixture.toolbar.getAll(), isEmpty);
     expect(fixture.errors, hasLength(1));
   });
+
+  group('טריגרים שאינם תלויי-הקשר', () {
+    test('app.startup רץ בסנכרון, בלי שנפתח ספר', () async {
+      final fixture = _Fixture();
+      addTearDown(fixture.dispose);
+
+      await fixture.host.syncPlugins([fixture.plugin]);
+
+      expect(
+        fixture.host.programRepository.getProgramOutputs(
+          fixture.plugin.pluginId,
+          'boot',
+        ),
+        containsPair('ready', true),
+      );
+    });
+
+    test('הפלט של app.startup שורד יציאה ממסך הספר', () async {
+      final fixture = _Fixture();
+      addTearDown(fixture.dispose);
+      await fixture.host.syncPlugins([fixture.plugin]);
+      await fixture.host.readerBookChanged(
+        TextBook(id: 1, title: 'ספר נוכחי'),
+        context: 'reader-text',
+      );
+
+      await fixture.host.readerBookChanged(null, context: 'reader-text');
+
+      final outputs = fixture.host.programRepository.getPluginOutputs(
+        fixture.plugin.pluginId,
+      );
+      expect(outputs.keys, {'boot'});
+      expect(fixture.toolbar.getAll(), isEmpty);
+    });
+
+    test('app.startup אינו נורה שוב בסנכרון חוזר ללא שינוי', () async {
+      final fixture = _Fixture();
+      addTearDown(fixture.dispose);
+      await fixture.host.syncPlugins([fixture.plugin]);
+      final firstOutputs = fixture.host.programRepository.getProgramOutputs(
+        fixture.plugin.pluginId,
+        'boot',
+      );
+
+      await fixture.host.syncPlugins([fixture.plugin]);
+
+      // אותו מופע פלט בדיוק: התכנית לא רצה שוב והפקד לא נעלם בדרך.
+      expect(
+        fixture.host.programRepository.getProgramOutputs(
+          fixture.plugin.pluginId,
+          'boot',
+        ),
+        same(firstOutputs),
+      );
+    });
+
+    test('תוסף שנרשם אחרי העלייה מקבל app.startup בהתקנתו', () async {
+      final fixture = _Fixture();
+      addTearDown(fixture.dispose);
+      await fixture.host.syncPlugins(const []);
+      expect(fixture.runs, 0);
+
+      await fixture.host.syncPlugins([fixture.plugin]);
+
+      expect(
+        fixture.host.programRepository.getProgramOutputs(
+          fixture.plugin.pluginId,
+          'boot',
+        ),
+        containsPair('ready', true),
+      );
+    });
+
+    test('שינוי הגדרות מריץ מחדש את התכנית, מקובץ להשהיה אחת', () async {
+      final fixture = _Fixture();
+      addTearDown(fixture.dispose);
+      await fixture.host.syncPlugins([fixture.plugin]);
+      final baseline = fixture.runs;
+
+      fixture.settingsRevision.value++;
+      fixture.settingsRevision.value++;
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+
+      expect(fixture.runs - baseline, 1);
+      expect(
+        fixture.host.programRepository.getProgramOutputs(
+          fixture.plugin.pluginId,
+          'boot',
+        ),
+        containsPair('ready', true),
+      );
+    });
+  });
+
+  group('dispatchSelectionAction', () {
+    final template = <String, dynamic>{
+      'type': 'storage.set',
+      'args': {
+        'key': 'savedBooks',
+        'value': {
+          'id': {r'$selection': 'id'},
+          'title': {r'$selection': 'currentBook'},
+        },
+      },
+    };
+    const payload = <String, dynamic>{
+      'id': 42,
+      'currentBook': 'ברכות',
+      'selectedText': 'טקסט מסומן',
+    };
+
+    test('כותבת לאחסון התוסף מנתוני הסימון בלי מנוע', () async {
+      final fixture = _Fixture(
+        declaredPermissions: const [
+          'app.startup_contributions',
+          'reader.context_menu',
+          'plugin.storage.write',
+        ],
+      );
+      addTearDown(fixture.dispose);
+      fixture.permissions.add('plugin.storage.write');
+
+      await fixture.host.dispatchSelectionAction(
+        fixture.plugin.pluginId,
+        template,
+        payload,
+      );
+
+      expect(fixture.errors, isEmpty);
+      final write = fixture.storage.sets.single;
+      expect(write.pluginId, fixture.plugin.pluginId);
+      expect(write.key, 'savedBooks');
+      expect(write.value, {'id': 42, 'title': 'ברכות'});
+    });
+
+    test('הרשאה שלא הוצהרה במניפסט חוסמת את הפעולה', () async {
+      final fixture = _Fixture(
+        declaredPermissions: const [
+          'app.startup_contributions',
+          'reader.context_menu',
+        ],
+      );
+      addTearDown(fixture.dispose);
+      fixture.permissions.add('plugin.storage.write');
+
+      await fixture.host.dispatchSelectionAction(
+        fixture.plugin.pluginId,
+        template,
+        payload,
+      );
+
+      expect(fixture.storage.sets, isEmpty);
+      expect(fixture.errors, hasLength(1));
+    });
+
+    test('הרשאה מוצהרת אך לא מוענקת נחסמת בזמן הביצוע', () async {
+      final fixture = _Fixture(
+        declaredPermissions: const [
+          'app.startup_contributions',
+          'plugin.storage.write',
+        ],
+      );
+      addTearDown(fixture.dispose);
+      fixture.permissions.remove('plugin.storage.write');
+
+      await fixture.host.dispatchSelectionAction(
+        fixture.plugin.pluginId,
+        template,
+        payload,
+      );
+
+      expect(fixture.storage.sets, isEmpty);
+      expect(fixture.errors, hasLength(1));
+    });
+
+    test('reader.openBook נפתר מזהות הסימון ופותח את הספר', () async {
+      final fixture = _Fixture();
+      addTearDown(fixture.dispose);
+
+      await fixture.host.dispatchSelectionAction(fixture.plugin.pluginId, {
+        'type': 'reader.openBookInSidePane',
+        'args': {
+          'identity': {
+            'id': {r'$selection': 'id'},
+          },
+          'searchQuery': {r'$selection': 'selectedText'},
+        },
+      }, payload);
+
+      expect(fixture.errors, isEmpty);
+      expect(fixture.access.opened.single, {'id': 42});
+    });
+  });
 }
 
 class _Fixture {
@@ -163,8 +357,13 @@ class _Fixture {
   };
   final errors = <Object>[];
   final _BookAccess access = _BookAccess();
+  final _StorageWriter storage = _StorageWriter();
+  final settingsRevision = ValueNotifier<int>(0);
   late final InstalledPlugin plugin;
   late final DeclarativePluginHostService host;
+
+  /// מספר הריצות שהמאגר סימן לתוסף — כל runTrigger מקדם דור אחד.
+  int get runs => host.programRepository.getGeneration(plugin.pluginId);
 
   _Fixture({
     bool invalidProgram = false,
@@ -181,11 +380,28 @@ class _Fixture {
       bookResolver: access,
       bookOpener: access,
       toolbarRegistry: toolbar,
+      storageWriter: storage,
+      settingsRevision: settingsRevision,
       onError: (_, error, _) => errors.add(error),
     );
   }
 
-  void dispose() => host.dispose();
+  void dispose() {
+    host.dispose();
+    settingsRevision.dispose();
+  }
+}
+
+class _StorageWriter implements DeclarativeStorageWriter {
+  final sets = <({String pluginId, String key, Object? value})>[];
+
+  @override
+  Future<void> set(String pluginId, String key, Object? value) async {
+    sets.add((pluginId: pluginId, key: key, value: value));
+  }
+
+  @override
+  Future<void> remove(String pluginId, String key) async {}
 }
 
 class _BookAccess implements DeclarativeBookResolver, DeclarativeBookOpener {
@@ -270,7 +486,7 @@ InstalledPlugin _plugin({
           ],
       'contributes': {
         'startup': {
-          'programs': [program],
+          'programs': [program, _bootProgram()],
           'toolbarItems': _toolbarItems(),
         },
       },
@@ -279,6 +495,27 @@ InstalledPlugin _plugin({
     updatedAt: now,
   );
 }
+
+/// תכנית שאינה תלוית-הקשר: רצה בעלייה ובכל שינוי הגדרות.
+Map<String, dynamic> _bootProgram() => {
+  'id': 'boot',
+  'version': 1,
+  'triggers': ['app.startup', 'settings.changed'],
+  'commands': [
+    {
+      'id': 'flag',
+      'type': 'data.first',
+      'args': {
+        'items': {
+          r'$literal': [true],
+        },
+      },
+    },
+  ],
+  'outputs': {
+    'ready': {r'$result': 'flag'},
+  },
+};
 
 List<Map<String, dynamic>> _toolbarItems() => [
   {

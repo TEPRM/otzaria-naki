@@ -1,8 +1,7 @@
 import 'dart:async';
-import 'package:otzaria/theme/app_tokens.dart';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:fluentui_system_icons/fluentui_system_icons.dart';
+import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/text_book/bloc/text_book_bloc.dart';
 import 'package:otzaria/text_book/bloc/text_book_state.dart';
@@ -10,10 +9,11 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:otzaria/models/books.dart';
 import 'package:otzaria/utils/text/ref_helper.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:otzaria/widgets/text/rtl_text_field.dart';
+import 'package:otzaria/widgets/navigation/nav_panel_search.dart';
 import 'package:otzaria/text_book/utils/reading_segment_navigation.dart';
 import 'package:otzaria/text_book/view/toc_filter.dart';
 import 'package:otzaria/text_book/view/toc_navigator_internals.dart';
+import 'package:otzaria/widgets/lists/nav_tree_tile.dart';
 
 class TocViewer extends StatefulWidget {
   const TocViewer({
@@ -69,6 +69,10 @@ class _TocViewerState extends State<TocViewer>
   Timer? _searchDebounce;
   String _appliedQuery = '';
 
+  // סימון הדפדוף בחיצים בין תוצאות החיפוש (index של TocEntry). הפוקוס נשאר
+  // בשדה החיפוש, כמו ב"איתור". מתאפס בכל שינוי שאילתה.
+  int? _highlightedEntryIndex;
+
   // משמשים במסלול הוירטואלי בלבד. ScrollablePositionedList מאפשר גלילה
   // לפי אינדקס פריט גם אם הפריט עוד לא נבנה בעץ.
   final ItemScrollController _virtualScrollController = ItemScrollController();
@@ -100,7 +104,10 @@ class _TocViewerState extends State<TocViewer>
     _searchDebounce?.cancel();
     // ניקוי הוא חזרה לעץ המלא - זול, ואין סיבה להשהות אותו.
     if (value.isEmpty) {
-      setState(() => _appliedQuery = '');
+      setState(() {
+        _appliedQuery = '';
+        _highlightedEntryIndex = null;
+      });
       return;
     }
     // רענון מיידי של השדה (כפתור הניקוי) - הסינון עצמו ממתין לטיימר,
@@ -108,8 +115,88 @@ class _TocViewerState extends State<TocViewer>
     setState(() {});
     _searchDebounce = Timer(const Duration(milliseconds: 220), () {
       if (!mounted) return;
-      setState(() => _appliedQuery = value);
+      setState(() {
+        _appliedQuery = value;
+        _highlightedEntryIndex = null;
+      });
     });
+  }
+
+  /// מזיז את סימון הדפדוף בין תוצאות החיפוש בלי להוציא את הפוקוס מהשדה.
+  void _moveHighlight(int delta) {
+    final state = context.read<TextBookBloc>().state;
+    if (state is! TextBookLoaded) return;
+    final display = _displayDataFor(state.tableOfContents);
+    if (!display.isSearching) return;
+    final flat = _flatItemsFor(display);
+    if (flat.isEmpty) return;
+
+    final current = _highlightedEntryIndex == null
+        ? -1
+        : flat.indexWhere((item) => item.entry.index == _highlightedEntryIndex);
+    final start = current >= 0 ? current : (delta >= 0 ? -1 : flat.length);
+    final next = (start + delta).clamp(0, flat.length - 1);
+    if (next == current) return;
+
+    setState(() => _highlightedEntryIndex = flat[next].entry.index);
+    final useFlat = display.totalCount > _kTocFlattenThreshold;
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _scrollEntryIntoView(
+        flat[next].entry.index,
+        display: display,
+        useFlat: useFlat,
+      );
+    });
+  }
+
+  /// גולל את הספר אל השורה של ערך ה-TOC (לחיצה על שורה או אנטר בחיפוש).
+  void _navigateToLine(int lineIndex) {
+    setState(() {
+      _isManuallyScrolling = false;
+      _lastScrolledTocIndex = null;
+    });
+    final state = context.read<TextBookBloc>().state;
+    if (state is! TextBookLoaded) {
+      return;
+    }
+    final navigation = scrollToSourceLine(
+      scrollController: widget.scrollController,
+      scrollOffsetController: state.scrollOffsetController,
+      positionsListener: state.positionsListener,
+      segments: state.readingSegments,
+      lineIndex: lineIndex,
+      viewportExtent: context.size?.height ?? MediaQuery.sizeOf(context).height,
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.ease,
+    );
+    if (Platform.isAndroid) {
+      unawaited(
+        closePaneAfterNavigation(
+          navigation: navigation,
+          closePane: () {
+            if (mounted) widget.closeLeftPaneCallback();
+          },
+        ),
+      );
+    } else {
+      unawaited(navigation);
+    }
+  }
+
+  /// אנטר בשדה החיפוש: פתיחת התוצאה המסומנת, ובהיעדר סימון — הראשונה.
+  void _openHighlightedEntry() {
+    final state = context.read<TextBookBloc>().state;
+    if (state is! TextBookLoaded) return;
+    final display = _displayDataFor(state.tableOfContents);
+    if (!display.isSearching) return;
+    final flat = _flatItemsFor(display);
+    if (flat.isEmpty) return;
+
+    final target = _highlightedEntryIndex == null
+        ? flat.first.entry.index
+        : _highlightedEntryIndex!;
+    _navigateToLine(target);
   }
 
   void _ensureParentsOpen(List<TocEntry> entries, int targetIndex) {
@@ -169,98 +256,108 @@ class _TocViewerState extends State<TocViewer>
 
       SchedulerBinding.instance.addPostFrameCallback((_) {
         if (!mounted || _isManuallyScrolling) return;
-
-        if (useFlat) {
-          // במסלול הוירטואלי הפריט הפעיל עשוי לא להיות בעץ. גוללים לפי
-          // אינדקס ברשימה השטוחה דרך ItemScrollController, שמטפל בגלילה
-          // לפריטים שאינם מורכבים.
-          if (!_virtualScrollController.isAttached) return;
-          final flat = _flatItemsFor(display);
-          final flatIndex = flat.indexWhere(
-            (item) => item.entry.index == activeIndex,
-          );
-          if (flatIndex < 0) return;
-
-          final positions = _virtualPositionsListener.itemPositions.value;
-          ItemPosition? current;
-          for (final p in positions) {
-            if (p.index == flatIndex) {
-              current = p;
-              break;
-            }
-          }
-          // כבר גלוי במלואו - לא גוללים.
-          if (current != null &&
-              current.itemLeadingEdge >= 0 &&
-              current.itemTrailingEdge <= 1) {
-            _lastScrolledTocIndex = activeIndex;
-            return;
-          }
-
-          // לא גלוי - מביאים לקצה הקרוב (עליון/תחתון), לא למרכז.
-          final bool below = current != null
-              ? current.itemLeadingEdge >= 1
-              : (positions.isNotEmpty &&
-                    flatIndex >
-                        positions
-                            .map((p) => p.index)
-                            .reduce((a, b) => a > b ? a : b));
-          _virtualScrollController.scrollTo(
-            index: flatIndex,
-            alignment: below ? 0.85 : 0.0,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeInOut,
-          );
+        if (_scrollEntryIntoView(
+          activeIndex,
+          display: display,
+          useFlat: useFlat,
+        )) {
           _lastScrolledTocIndex = activeIndex;
-          return;
         }
-
-        // מסלול רקורסיבי - הפריט תמיד בנוי בעץ, ניתן להשתמש ב-GlobalKey
-        final key = _tocItemKeys[activeIndex];
-        final itemContext = key?.currentContext;
-        if (itemContext == null) return;
-
-        final itemRenderObject = itemContext.findRenderObject();
-        if (itemRenderObject is! RenderBox) return;
-
-        final scrollableBox =
-            _tocScrollController.position.context.storageContext
-                    .findRenderObject()
-                as RenderBox;
-
-        final itemOffset = itemRenderObject
-            .localToGlobal(Offset.zero, ancestor: scrollableBox)
-            .dy;
-        final viewportHeight = scrollableBox.size.height;
-        final itemHeight = itemRenderObject.size.height;
-
-        final itemBottom = itemOffset + itemHeight;
-        // כבר גלוי במלואו - לא גוללים.
-        if (itemOffset >= 0 && itemBottom <= viewportHeight) {
-          _lastScrolledTocIndex = activeIndex;
-          return;
-        }
-
-        // לא גלוי - גוללים לקצה הקרוב (עליון/תחתון), לא למרכז.
-        const double margin = 8.0;
-        final double target = itemOffset < 0
-            ? _tocScrollController.offset + itemOffset - margin
-            : _tocScrollController.offset +
-                  (itemBottom - viewportHeight) +
-                  margin;
-
-        _tocScrollController.animateTo(
-          target.clamp(
-            0.0,
-            _tocScrollController.position.maxScrollExtent,
-          ),
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeInOut,
-        );
-
-        _lastScrolledTocIndex = activeIndex;
       });
     });
+  }
+
+  /// גולל את הערך אל תוך אזור התצוגה אם אינו גלוי במלואו.
+  /// מחזיר אמת כשהערך גלוי או שהגלילה בוצעה, ושקר כשהערך לא נמצא.
+  bool _scrollEntryIntoView(
+    int targetIndex, {
+    required _TocDisplayData display,
+    required bool useFlat,
+  }) {
+    if (useFlat) {
+      // במסלול הוירטואלי הפריט עשוי לא להיות בעץ. גוללים לפי אינדקס ברשימה
+      // השטוחה דרך ItemScrollController, שמטפל בגלילה לפריטים שאינם מורכבים.
+      if (!_virtualScrollController.isAttached) return false;
+      final flat = _flatItemsFor(display);
+      final flatEntryIndex = flat.indexWhere(
+        (item) => item.entry.index == targetIndex,
+      );
+      if (flatEntryIndex < 0) return false;
+      // +1: פריט 0 ברשימה הוא הכותרת הראשית.
+      final flatIndex = flatEntryIndex + 1;
+
+      final positions = _virtualPositionsListener.itemPositions.value;
+      ItemPosition? current;
+      for (final p in positions) {
+        if (p.index == flatIndex) {
+          current = p;
+          break;
+        }
+      }
+      // כבר גלוי במלואו - לא גוללים.
+      if (current != null &&
+          current.itemLeadingEdge >= 0 &&
+          current.itemTrailingEdge <= 1) {
+        return true;
+      }
+
+      // לא גלוי - מביאים לקצה הקרוב (עליון/תחתון), לא למרכז.
+      final bool below = current != null
+          ? current.itemLeadingEdge >= 1
+          : (positions.isNotEmpty &&
+                flatIndex >
+                    positions
+                        .map((p) => p.index)
+                        .reduce((a, b) => a > b ? a : b));
+      _virtualScrollController.scrollTo(
+        index: flatIndex,
+        alignment: below ? 0.85 : 0.0,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+      );
+      return true;
+    }
+
+    // מסלול רקורסיבי - הפריט תמיד בנוי בעץ, ניתן להשתמש ב-GlobalKey
+    final key = _tocItemKeys[targetIndex];
+    final itemContext = key?.currentContext;
+    if (itemContext == null) return false;
+
+    final itemRenderObject = itemContext.findRenderObject();
+    if (itemRenderObject is! RenderBox) return false;
+
+    final scrollableBox =
+        _tocScrollController.position.context.storageContext.findRenderObject()
+            as RenderBox;
+
+    final itemOffset = itemRenderObject
+        .localToGlobal(Offset.zero, ancestor: scrollableBox)
+        .dy;
+    final viewportHeight = scrollableBox.size.height;
+    final itemHeight = itemRenderObject.size.height;
+
+    final itemBottom = itemOffset + itemHeight;
+    // כבר גלוי במלואו - לא גוללים.
+    if (itemOffset >= 0 && itemBottom <= viewportHeight) {
+      return true;
+    }
+
+    // לא גלוי - גוללים לקצה הקרוב (עליון/תחתון), לא למרכז.
+    const double margin = 8.0;
+    final double target = itemOffset < 0
+        ? _tocScrollController.offset + itemOffset - margin
+        : _tocScrollController.offset + (itemBottom - viewportHeight) + margin;
+
+    _tocScrollController.animateTo(
+      target.clamp(
+        0.0,
+        _tocScrollController.position.maxScrollExtent,
+      ),
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
+    );
+
+    return true;
   }
 
   _TocDisplayData _displayDataFor(List<TocEntry> tableOfContents) {
@@ -306,182 +403,47 @@ class _TocViewerState extends State<TocViewer>
     bool showFullText = false,
     required int? activeIndex,
     required bool isExpanded,
+    bool isGroupStart = false,
+    bool isGroupEnd = false,
   }) {
     final itemKey = _tocItemKeys.putIfAbsent(entry.index, () => GlobalKey());
-    void navigateToEntry() {
-      setState(() {
-        _isManuallyScrolling = false;
-        _lastScrolledTocIndex = null;
-      });
-      final state = context.read<TextBookBloc>().state;
-      if (state is! TextBookLoaded) {
-        return;
-      }
-      final navigation = scrollToSourceLine(
-        scrollController: widget.scrollController,
-        scrollOffsetController: state.scrollOffsetController,
-        positionsListener: state.positionsListener,
-        segments: state.readingSegments,
-        lineIndex: entry.index,
-        viewportExtent:
-            context.size?.height ?? MediaQuery.sizeOf(context).height,
-        duration: const Duration(milliseconds: 250),
-        curve: Curves.ease,
-      );
-      if (Platform.isAndroid) {
-        unawaited(
-          closePaneAfterNavigation(
-            navigation: navigation,
-            closePane: () {
-              if (mounted) widget.closeLeftPaneCallback();
-            },
-          ),
-        );
-      } else {
-        unawaited(navigation);
-      }
-    }
+    void navigateToEntry() => _navigateToLine(entry.index);
 
-    final bool selected = activeIndex == entry.index;
+    // בזמן דפדוף בחיצים הסימון הוא של תוצאת הדפדוף, לא של מיקום הקריאה.
+    final bool selected = _highlightedEntryIndex != null
+        ? _highlightedEntryIndex == entry.index
+        : activeIndex == entry.index;
+    final title = showFullText ? entry.fullText : entry.text;
+    // רמות ה-TOC מתחילות ב-1, ורמת ההזחה של עץ הניווט מתחילה ב-0.
+    final level = (entry.level - 1).clamp(0, 100);
 
-    if (entry.children.isEmpty) {
-      return InkWell(
-        key: itemKey,
-        onTap: navigateToEntry,
-        child: Container(
-          padding: EdgeInsets.only(
-            right: 16.0 + (entry.level * 24.0),
-            left: 16.0,
-            top: 10.0,
-            bottom: 10.0,
-          ),
-          decoration: BoxDecoration(
-            color: selected
-                ? Theme.of(
-                    context,
-                  ).colorScheme.primaryContainer.withValues(alpha: 0.3)
-                : null,
-            border: Border(
-              bottom: BorderSide(
-                color: Theme.of(context).dividerColor,
-                width: 0.5,
-              ),
-            ),
-          ),
-          child: Row(
-            children: [
-              Icon(
-                FluentIcons.text_bullet_list_24_regular,
-                color: Theme.of(context).colorScheme.secondary,
-                size: 18,
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  showFullText ? entry.fullText : entry.text,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                  maxLines: 2,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    // ערך עם ילדים (header בלבד - בלי לרנדר את הילדים).
-    return Container(
-      key: itemKey,
-      decoration: BoxDecoration(
-        color: selected
-            ? Theme.of(
-                context,
-              ).colorScheme.primaryContainer.withValues(alpha: 0.3)
-            : null,
-        border: Border(
-          bottom: BorderSide(
-            color: Theme.of(context).dividerColor,
-            width: 0.5,
-          ),
-        ),
-      ),
-      child: Row(
-        children: [
-          // אזור הטקסט לניווט
-          Expanded(
-            child: InkWell(
-              onTap: navigateToEntry,
-              child: Container(
-                padding: EdgeInsets.only(
-                  right: 16.0 + (entry.level * 24.0),
-                  left: 8.0,
-                  top: 12.0,
-                  bottom: 12.0,
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      // רק רמה 1 מקבלת אייקון ספר, שאר הרמות מקבלות רשימה
-                      entry.level == 1
-                          ? FluentIcons.book_24_regular
-                          : FluentIcons.text_bullet_list_24_regular,
-                      color: entry.level == 1
-                          ? Theme.of(context).colorScheme.primary
-                          : Theme.of(context).colorScheme.secondary,
-                      size: entry.level == 1 ? 20 : 18,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        showFullText ? entry.fullText : entry.text,
-                        style: TextStyle(
-                          fontSize: entry.level == 1 ? 15 : 14,
-                          fontWeight: entry.level == 1
-                              ? FontWeight.w600
-                              : FontWeight.normal,
-                          color: entry.level == 1
-                              ? Theme.of(context).colorScheme.primary
-                              : null,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                        maxLines: 2,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          // כפתור החץ לפתיחה/סגירה
-          InkWell(
-            onTap: () {
+    final tile = entry.children.isEmpty
+        ? NavTreeTile.book(
+            title: title,
+            level: level,
+            isSelected: selected,
+            icon: OtzariaIcons.text_bullet_list_24_regular,
+            onTap: navigateToEntry,
+          )
+        : NavTreeTile.category(
+            title: title,
+            level: level,
+            isSelected: selected,
+            isExpanded: isExpanded,
+            hasChildren: true,
+            onTap: navigateToEntry,
+            onToggleExpand: () {
               setState(() {
                 _expanded[entry.index] = !isExpanded;
                 _expandedRevision++;
               });
             },
-            child: Container(
-              padding: const EdgeInsets.only(
-                left: 16.0,
-                right: 8.0,
-                top: 12.0,
-                bottom: 12.0,
-              ),
-              child: Icon(
-                isExpanded
-                    ? FluentIcons.chevron_up_24_regular
-                    : FluentIcons.chevron_down_24_regular,
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-                size: 20,
-              ),
-            ),
-          ),
-        ],
-      ),
+          );
+
+    return NavTreeGroupCard(
+      isGroupStart: isGroupStart,
+      isGroupEnd: isGroupEnd,
+      child: KeyedSubtree(key: itemKey, child: tile),
     );
   }
 
@@ -490,20 +452,26 @@ class _TocViewerState extends State<TocViewer>
     List<TocFlatItem> flat,
     int? activeIndex, {
     required bool isSearching,
+    required String title,
   }) {
     return ScrollablePositionedList.builder(
       itemScrollController: _virtualScrollController,
       itemPositionsListener: _virtualPositionsListener,
-      itemCount: flat.length,
+      // +1 עבור הכותרת הראשית, שנגללת עם הרשימה (פריט 0).
+      itemCount: flat.length + 1,
       itemBuilder: (context, index) {
-        final item = flat[index];
+        if (index == 0) return NavTreeHeader(title: title);
+        final item = flat[index - 1];
         return _buildTocRow(
           item.entry,
           showFullText: isSearching,
           activeIndex: activeIndex,
           isExpanded: item.isExpanded,
+          isGroupStart: index == 1,
+          isGroupEnd: index == flat.length,
         );
       },
+      padding: kNavTreeListPadding,
     );
   }
 
@@ -516,6 +484,8 @@ class _TocViewerState extends State<TocViewer>
     bool isFirstChild = false,
     bool? defaultExpanded,
     required int? activeIndex,
+    bool isGroupStart = false,
+    bool isGroupEnd = false,
   }) {
     if (entry.children.isEmpty) {
       return _buildTocRow(
@@ -523,6 +493,8 @@ class _TocViewerState extends State<TocViewer>
         showFullText: showFullText,
         activeIndex: activeIndex,
         isExpanded: false,
+        isGroupStart: isGroupStart,
+        isGroupEnd: isGroupEnd,
       );
     }
 
@@ -537,6 +509,9 @@ class _TocViewerState extends State<TocViewer>
           showFullText: showFullText,
           activeIndex: activeIndex,
           isExpanded: isExpanded,
+          isGroupStart: isGroupStart,
+          // הקבוצה נסגרת אצל הצאצא האחרון כשהערך פתוח.
+          isGroupEnd: isGroupEnd && !isExpanded,
         ),
         if (isExpanded)
           ...entry.children.asMap().entries.map(
@@ -546,6 +521,7 @@ class _TocViewerState extends State<TocViewer>
               defaultExpanded: defaultExpanded,
               showFullText: showFullText,
               activeIndex: activeIndex,
+              isGroupEnd: isGroupEnd && e.key == entry.children.length - 1,
             ),
           ),
       ],
@@ -613,82 +589,91 @@ class _TocViewerState extends State<TocViewer>
           final display = _displayDataFor(state.tableOfContents);
           final bool useFlat = display.totalCount > _kTocFlattenThreshold;
 
-          return Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: RtlTextField(
-                  controller: searchController,
-                  onChanged: _onSearchChanged,
-                  // ללא autofocus: הפוקוס מנוהל אך ורק דרך focusNode מהמסך
-                  // האב (_focusActiveTabSearchField), שמכבד את ההגנה מפני
-                  // פוקוס אוטומטי באנדרואיד. autofocus היה עוקף הגנה זו.
-                  focusNode: widget.focusNode,
-                  onSubmitted: (_) {
-                    widget.focusNode.requestFocus();
-                  },
-                  decoration: InputDecoration(
-                    hintText: 'איתור כותרת...',
-                    prefixIcon: const Icon(FluentIcons.search_24_regular),
-                    suffixIcon: searchController.text.isNotEmpty
-                        ? IconButton(
-                            icon: const Icon(FluentIcons.dismiss_24_regular),
-                            onPressed: () {
-                              searchController.clear();
-                              _onSearchChanged('');
-                            },
-                          )
-                        : null,
-                    isDense: true,
-                    border: OutlineInputBorder(
-                      borderRadius: AppTokens.borderRadiusAll,
+          // שדה החיפוש עצמו מצויר בסרגל שמעל החלונית; כאן רק מפרסמים את
+          // הפעולה שלו. הפוקוס עדיין מנוהל דרך focusNode מהמסך האב
+          // (_focusActiveTabSearchField), שמכבד את ההגנה מפני פוקוס אוטומטי
+          // באנדרואיד — ראה resolveLeftPaneSearchFocus.
+          final delegate = NavPanelSearchDelegate(
+            controller: searchController,
+            hintText: 'איתור כותרת...',
+            focusNode: widget.focusNode,
+            onChanged: _onSearchChanged,
+            onSubmitted: (_) {
+              _openHighlightedEntry();
+              widget.focusNode.requestFocus();
+            },
+            onClear: () => _onSearchChanged(''),
+            onArrowDown: display.isSearching ? () => _moveHighlight(1) : null,
+            onArrowUp: display.isSearching ? () => _moveHighlight(-1) : null,
+          );
+          final hoisted = NavPanelSearch.isHoisted(context);
+
+          return NavPanelSearchPublisher(
+            delegate: delegate,
+            child: Column(
+              children: [
+                if (!hoisted) NavPanelLocalSearchField(delegate: delegate),
+                Expanded(
+                  child: NotificationListener<ScrollNotification>(
+                    onNotification: (notification) {
+                      if (notification is ScrollStartNotification &&
+                          notification.dragDetails != null) {
+                        setState(() {
+                          _isManuallyScrolling = true;
+                        });
+                      } else if (notification is ScrollEndNotification) {
+                        setState(() {
+                          _isManuallyScrolling = false;
+                        });
+                      }
+                      return false;
+                    },
+                    child: NavTreeFocusGroup(
+                      child: useFlat
+                          ? _buildVirtualizedTocList(
+                              _flatItemsFor(display),
+                              activeIndex,
+                              isSearching: display.isSearching,
+                              title: state.book.title,
+                            )
+                          : SingleChildScrollView(
+                              controller: _tocScrollController,
+                              padding: kNavTreeListPadding,
+                              child: Column(
+                                children: [
+                                  NavTreeHeader(title: state.book.title),
+                                  ListView.builder(
+                                    shrinkWrap: true,
+                                    physics:
+                                        const NeverScrollableScrollPhysics(),
+                                    itemCount: display.entries.length,
+                                    itemBuilder: (context, index) =>
+                                        _buildTocItem(
+                                          display.entries[index],
+                                          isFirstChild: index == 0,
+                                          isGroupStart: index == 0,
+                                          isGroupEnd:
+                                              index ==
+                                              display.entries.length - 1,
+                                          showFullText: display.isSearching,
+                                          defaultExpanded: display.isSearching
+                                              ? shouldExpandInSearch(
+                                                  _expanded[display
+                                                      .entries[index]
+                                                      .index],
+                                                )
+                                              : null,
+                                          activeIndex: activeIndex,
+                                        ),
+                                  ),
+                                ],
+                              ),
+                            ),
                     ),
                   ),
                 ),
-              ),
-              Expanded(
-                child: NotificationListener<ScrollNotification>(
-                  onNotification: (notification) {
-                    if (notification is ScrollStartNotification &&
-                        notification.dragDetails != null) {
-                      setState(() {
-                        _isManuallyScrolling = true;
-                      });
-                    } else if (notification is ScrollEndNotification) {
-                      setState(() {
-                        _isManuallyScrolling = false;
-                      });
-                    }
-                    return false;
-                  },
-                  child: useFlat
-                      ? _buildVirtualizedTocList(
-                          _flatItemsFor(display),
-                          activeIndex,
-                          isSearching: display.isSearching,
-                        )
-                      : SingleChildScrollView(
-                          controller: _tocScrollController,
-                          child: ListView.builder(
-                            shrinkWrap: true,
-                            physics: const NeverScrollableScrollPhysics(),
-                            itemCount: display.entries.length,
-                            itemBuilder: (context, index) => _buildTocItem(
-                              display.entries[index],
-                              isFirstChild: index == 0,
-                              showFullText: display.isSearching,
-                              defaultExpanded: display.isSearching
-                                  ? shouldExpandInSearch(
-                                      _expanded[display.entries[index].index],
-                                    )
-                                  : null,
-                              activeIndex: activeIndex,
-                            ),
-                          ),
-                        ),
-                ),
-              ),
-            ],
+              ],
+            ),
           );
         },
       ),

@@ -8,13 +8,14 @@ import 'package:otzaria/models/links.dart';
 import 'package:otzaria/user_content_import/services/user_links_loader.dart';
 import 'package:otzaria/models/link_types.dart';
 import 'package:otzaria/data/book_locator.dart';
-import 'package:otzaria/utils/file/docx_cache.dart';
-import 'package:otzaria/utils/file/text_encoding.dart';
+import 'package:otzaria/utils/file/document_converter.dart';
+import 'package:otzaria/utils/file/document_format.dart';
 import 'package:otzaria/utils/file/toc_parser.dart';
 import 'package:otzaria/utils/text/text_manipulation.dart' as utils;
 import 'package:otzaria/text_book/utils/commentator_group_builder.dart';
 import 'package:otzaria/services/commentary_service.dart';
 import 'dart:io';
+import 'package:otzaria/utils/file/markdown_to_otzaria.dart';
 import 'dart:isolate';
 
 class BookContentRange {
@@ -28,6 +29,19 @@ class BookContentRange {
     required this.endLine,
     required this.totalLines,
     required this.lines,
+  });
+}
+
+/// מפרש של ספר כפי שהוא יושב בשאילתות הקישורים: השם, המחבר ומספר הקישורים.
+class CommentatorInfo {
+  final String title;
+  final String? author;
+  final int linkCount;
+
+  const CommentatorInfo({
+    required this.title,
+    this.author,
+    this.linkCount = 0,
   });
 }
 
@@ -83,15 +97,9 @@ class TextBookRepository {
       if (dbBook.isFileBacked && dbBook.filePath != null) {
         final file = File(dbBook.filePath!);
         if (await file.exists()) {
-          final ext = (dbBook.fileType ?? '').toLowerCase();
-          if (ext == 'docx') {
-            return await convertDocxWithCache(file, title);
-          }
-          if (ext == 'epub') {
-            return await convertEpubWithCache(file, title);
-          }
-          if (ext == 'pdf') return '';
-          return await readTextFileSmart(file);
+          // PDF מוחזר '' — אין ממנו טקסט, והקוראים שלו בצנרת נפרדת.
+          return await readFileBackedBookText(file, dbBook.fileType, title) ??
+              '';
         }
       }
 
@@ -117,6 +125,12 @@ class TextBookRepository {
   }) async {
     final categoryId = book.categoryId;
     final fileType = book.fileType ?? 'txt';
+
+    // מסד ספרי המשתמש שומר את שורות מקור ה-Markdown בעוד שהקורא מציג HTML
+    // מומר; טעינת טווח מהמסד תערבב שתי מפות אינדקסים ותשבור ניווט וקישורים.
+    if (isMarkdownBook(fileType: fileType, filePath: book.filePath)) {
+      return null;
+    }
 
     // ספרי seforim.db בלבד: השאילתה וה-split רצים ב-isolate (כמו הקישורים),
     // כדי שלא יחסמו את ה-UI thread בזמן גלילה. ה-isolate פותח רק את seforim.db,
@@ -320,17 +334,16 @@ class TextBookRepository {
       if (dbBook.isFileBacked && dbBook.filePath != null) {
         final file = File(dbBook.filePath!);
         if (await file.exists()) {
-          final ext = (dbBook.fileType ?? '').toLowerCase();
-          final String content;
-          if (ext == 'docx') {
-            content = await convertDocxWithCache(file, title);
-          } else if (ext == 'epub') {
-            content = await convertEpubWithoutEmbeddedImages(file, title);
-          } else if (ext == 'pdf') {
-            content = '';
-          } else {
-            content = await readTextFileSmart(file);
-          }
+          final format = documentFormatOf(
+            fileType: dbBook.fileType,
+            path: file.path,
+          );
+          // PDF הוא file-backed אך אינו טקסט — הוא בונה TOC מה-outline שלו
+          // במסלול נפרד, ושליחתו לממיר טקסט זורקת.
+          final content = format == null || !format.isTextual
+              ? ''
+              // בלי תמונות: לתוכן העניינים נדרש רק מבנה הכותרות.
+              : await convertDocumentForIndex(file, title, format);
           if (content.isNotEmpty) {
             return await Isolate.run(
               () => TocParser.parseEntriesFromContent(content),
@@ -364,6 +377,17 @@ class TextBookRepository {
   Future<({List<String> all, Set<String> rare})> getCommentatorsWithRarity(
     TextBook book,
   ) async {
+    final detailed = await getCommentatorsDetailed(book);
+    return (
+      all: [for (final c in detailed.commentators) c.title],
+      rare: detailed.rare,
+    );
+  }
+
+  /// אותם מפרשים של [getCommentatorsWithRarity], בלי לאבד את המחבר ומספר
+  /// הקישורים שהשאילתה כבר מחזירה. ממוין לפי שם.
+  Future<({List<CommentatorInfo> commentators, Set<String> rare})>
+  getCommentatorsDetailed(TextBook book) async {
     // מפרשים מקישורי-משתמש (user_books.db) — נוספים לרשימת המפרשים של כל
     // ספר; מפרש מיובא לעולם אינו "נדיר" (יובא במכוון).
     final userCommentators = (await loadUserCommentatorTitles(
@@ -371,8 +395,13 @@ class TextBookRepository {
       bookCategoryId: book.categoryId,
       isUserBook: book.isUserBook,
     )).toSet();
-    userOnly() =>
-        (all: userCommentators.toList()..sort(), rare: const <String>{});
+    userOnly() => (
+      commentators: [
+        for (final title in userCommentators.toList()..sort())
+          CommentatorInfo(title: title),
+      ],
+      rare: const <String>{},
+    );
 
     // ספרים אישיים אינם כוללים קישורי מפרשים במסד הנתונים הרשמי.
     // חיפוש לפי book.id ב-seforim.db יחזיר מפרשים של ספר רשמי עם אותו ID.
@@ -397,11 +426,16 @@ class TextBookRepository {
     // מפרש עשוי להופיע בכמה שורות (מחבר לכל שורה) עם אותו linkCount; לוקחים
     // את הערך המרבי כמספר הקישורים לספר.
     final linkCountByTitle = <String, int>{};
+    final authorByTitle = <String, String>{};
     for (final row in commentatorsData) {
       final title = row['targetBookTitle'] as String;
       final count = (row['linkCount'] as int?) ?? 0;
       if (count > (linkCountByTitle[title] ?? 0)) {
         linkCountByTitle[title] = count;
+      }
+      final author = row['author'] as String?;
+      if (author != null && author.isNotEmpty) {
+        authorByTitle.putIfAbsent(title, () => author);
       }
     }
 
@@ -411,7 +445,59 @@ class TextBookRepository {
       bookTotalLines: dbBook.totalLines,
       linkCountByCommentator: linkCountByTitle,
     ).difference(userCommentators);
-    return (all: all, rare: rare);
+    return (
+      commentators: [
+        for (final title in all)
+          CommentatorInfo(
+            title: title,
+            author: authorByTitle[title],
+            linkCount: linkCountByTitle[title] ?? 0,
+          ),
+      ],
+      rare: rare,
+    );
+  }
+
+  /// מפרשי הספר על טווח שורות המקור [startLine]–[endLine] (0-based, כולל) —
+  /// חיווט של `selectCommentatorsByLineRange` ששימשה עד כה רק את FindRef.
+  Future<List<CommentatorInfo>> getCommentatorsInLineRange(
+    TextBook book, {
+    required int startLine,
+    required int endLine,
+  }) async {
+    final repository = _sqliteProvider.repository;
+    if (repository == null || book.isUserBook) return const [];
+
+    final dbBook = book.categoryId != null
+        ? await repository.getBookByTitleAndCategory(
+            book.title,
+            book.categoryId!,
+          )
+        : await repository.getBookByTitle(book.title);
+    if (dbBook == null) return const [];
+
+    // הגבול העליון בשאילתה בלעדי, בעוד ש-[endLine] כולל את שורת הסיום.
+    final rows = await repository.database.linkDao
+        .selectCommentatorsByLineRange(
+          dbBook.id,
+          startLine,
+          endLine + 1,
+        );
+
+    final byTitle = <String, CommentatorInfo>{};
+    for (final row in rows) {
+      final title = row['targetBookTitle'] as String;
+      final count = (row['linkCount'] as int?) ?? 0;
+      final existing = byTitle[title];
+      if (existing == null || count > existing.linkCount) {
+        byTitle[title] = CommentatorInfo(
+          title: title,
+          author: row['author'] as String?,
+          linkCount: count,
+        );
+      }
+    }
+    return byTitle.values.toList()..sort((a, b) => a.title.compareTo(b.title));
   }
 
   /// מחזיר את "המפרשים הנוספים" על הקטע שבו יושבת שורת המקור [sourceLineIndex]

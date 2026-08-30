@@ -5,11 +5,15 @@ import 'package:otzaria/plugins/models/installed_plugin.dart';
 import 'package:otzaria/plugins/models/plugin_manifest.dart';
 import 'package:otzaria/plugins/models/plugin_permission_grant.dart';
 import 'package:otzaria/plugins/models/plugin_published_record.dart';
+import 'package:otzaria/plugins/models/plugin_valid_permissions.dart';
+import 'package:otzaria/plugins/models/plugin_when_condition.dart';
 import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
 import 'package:otzaria/plugins/services/context_menu_registry.dart';
+import 'package:otzaria/plugins/services/plugin_condition_evaluator.dart';
 import 'package:otzaria/plugins/services/plugin_external_editions_registry.dart';
 import 'package:otzaria/plugins/services/plugin_lazy_activation_service.dart';
 import 'package:otzaria/plugins/services/plugin_search_dialog_registry.dart';
+import 'package:otzaria/plugins/services/plugin_shortcut_registry.dart';
 import 'package:otzaria/plugins/services/plugin_startup_contributions_service.dart';
 import 'package:otzaria/plugins/services/plugin_toolbar_registry.dart';
 
@@ -32,6 +36,10 @@ class _FakeRepo implements PluginRegistryRepository {
         grantedAt: DateTime(2026),
       ),
   ];
+
+  @override
+  Future<List<String>> getGrantedPermissionNames(String id) async =>
+      withBaselinePermissions(grantedByPlugin[id] ?? const <String>{});
 
   @override
   Future<void> publishRecord(
@@ -90,6 +98,17 @@ class _FakeRepo implements PluginRegistryRepository {
       kv[_kvKey(pluginId, namespace, key)];
 
   @override
+  Future<Map<String, String>> getKVMany(
+    String pluginId,
+    String namespace,
+    Iterable<String> keys,
+  ) async => {
+    for (final key in keys)
+      if (kv[_kvKey(pluginId, namespace, key)] != null)
+        key: kv[_kvKey(pluginId, namespace, key)]!,
+  };
+
+  @override
   Future<void> setKV(
     String pluginId,
     String namespace,
@@ -143,6 +162,9 @@ Map<String, dynamic> _fullStartup() => {
   'contextMenuItems': [
     {'id': 'm1', 'title': 'פריט'},
   ],
+  'shortcuts': [
+    {'id': 's1', 'label': 'קיצור', 'key': 'ctrl+alt+s', 'command': 'run'},
+  ],
   'publishedData': [
     {
       'type': 'calendar.event',
@@ -163,6 +185,7 @@ Map<String, dynamic> _fullStartup() => {
 
 const _allPermissions = {
   'app.startup_contributions',
+  'app.shortcuts',
   'reader.toolbar',
   'reader.context_menu',
   'published_data.write',
@@ -173,6 +196,7 @@ const _allPermissions = {
 void main() {
   late PluginToolbarRegistry toolbar;
   late ContextMenuRegistry contextMenu;
+  late PluginShortcutRegistry shortcuts;
   late PluginLazyActivationService activation;
   late PluginSearchDialogRegistry searchDialog;
   late PluginExternalEditionsRegistry externalEditions;
@@ -182,6 +206,7 @@ void main() {
   setUp(() {
     toolbar = PluginToolbarRegistry.forTesting();
     contextMenu = ContextMenuRegistry.forTesting();
+    shortcuts = PluginShortcutRegistry.forTesting();
     activation = PluginLazyActivationService.forTesting();
     searchDialog = PluginSearchDialogRegistry.forTesting();
     externalEditions = PluginExternalEditionsRegistry.detached();
@@ -189,6 +214,7 @@ void main() {
       toolbarRegistry: toolbar,
       contextMenuRegistry: contextMenu,
       activationService: activation,
+      shortcutRegistry: shortcuts,
       searchDialogRegistry: searchDialog,
       externalEditionsRegistry: externalEditions,
     );
@@ -202,6 +228,8 @@ void main() {
 
     expect(toolbar.getAll().single.$2.id, 'b1');
     expect(contextMenu.getAll().single.$2.id, 'm1');
+    expect(shortcuts.getAll().single.$2.id, 's1');
+    expect(shortcuts.getAll().single.$2.key, 'ctrl+alt+s');
     expect(searchDialog.getAll().single.$2.id, 'include-external');
     final record = repo.records.single;
     expect(record.key, 'manifest:k1');
@@ -212,6 +240,19 @@ void main() {
       reason: 'בלי app.run_on_startup אין הערה שקטה — לחיצה תפתח את הדף',
     );
   });
+
+  test(
+    'shortcuts are not registered without the app.shortcuts permission',
+    () async {
+      repo.grantedByPlugin['p1'] = {..._allPermissions}
+        ..remove('app.shortcuts');
+
+      await service.sync([_plugin(startup: _fullStartup())], repo);
+
+      expect(shortcuts.getAll(), isEmpty);
+      expect(contextMenu.getAll().single.$2.id, 'm1');
+    },
+  );
 
   group('externalEditions', () {
     InstalledPlugin editionsPlugin({List<String> permissions = const []}) {
@@ -407,10 +448,10 @@ void main() {
     await service.sync([_plugin(startup: pair('a1', 'a2'))], repo);
     await service.sync([_plugin(startup: pair('b1', 'b2'))], repo);
 
-    expect(
-      toolbar.getAll().map((record) => record.$2.id).toSet(),
-      {'b1', 'b2'},
-    );
+    expect(toolbar.getAll().map((record) => record.$2.id).toSet(), {
+      'b1',
+      'b2',
+    });
   });
 
   test('an unchanged publishedData seed is not rewritten', () async {
@@ -542,17 +583,14 @@ void main() {
         'app.startup_contributions',
         'app.run_on_startup',
       };
-      await service.sync(
-        [
-          _plugin(
-            id: 'p2',
-            startup: {
-              'activationEvents': ['app.startup'],
-            },
-          ),
-        ],
-        repo,
-      );
+      await service.sync([
+        _plugin(
+          id: 'p2',
+          startup: {
+            'activationEvents': ['app.startup'],
+          },
+        ),
+      ], repo);
       await Future<void>.delayed(const Duration(milliseconds: 20));
       expect(startupScheduled, isTrue);
     },
@@ -582,10 +620,7 @@ void main() {
               'id': 'host-only',
               'title': 'Host',
               'icon': 'book_24_regular',
-              'binding': {
-                'program': 'links',
-                'visibleOutput': 'book',
-              },
+              'binding': {'program': 'links', 'visibleOutput': 'book'},
               'action': {
                 'type': 'reader.openBook',
                 'args': {
@@ -627,5 +662,170 @@ void main() {
     expect(toolbar.getAll(), hasLength(1));
     expect(contextMenu.getAll(), hasLength(1));
     expect(searchDialog.getAll(), hasLength(1));
+  });
+
+  group('רישום מפתחות האחסון של תנאי when', () {
+    late PluginConditionEvaluator evaluator;
+    late PluginToolbarRegistry conditionalToolbar;
+    late PluginStartupContributionsService conditionalService;
+
+    Map<String, dynamic> startupWithWhen() => {
+      'toolbarItems': [
+        {
+          'id': 'b1',
+          'title': 'כפתור',
+          'icon': 'apps_24_regular',
+          'when': {
+            'storage': {'key': 'showButton', 'equals': 'yes'},
+          },
+        },
+      ],
+    };
+
+    setUp(() {
+      evaluator = PluginConditionEvaluator.forTesting();
+      conditionalToolbar = PluginToolbarRegistry.forTesting(
+        evaluator: evaluator,
+      );
+      conditionalService = PluginStartupContributionsService.forTesting(
+        toolbarRegistry: conditionalToolbar,
+        contextMenuRegistry: ContextMenuRegistry.forTesting(
+          evaluator: evaluator,
+        ),
+        activationService: PluginLazyActivationService.forTesting(),
+        searchDialogRegistry: PluginSearchDialogRegistry.forTesting(
+          evaluator: evaluator,
+        ),
+        externalEditionsRegistry: PluginExternalEditionsRegistry.detached(),
+        conditionEvaluator: evaluator,
+      );
+    });
+
+    test('הסנכרון טוען את ערך המפתח ומכריע את התצוגה', () async {
+      repo.grantedByPlugin['p1'] = {..._allPermissions};
+      repo.kv['p1|default|showButton'] = jsonEncode('yes');
+
+      await conditionalService.sync([
+        _plugin(startup: startupWithWhen()),
+      ], repo);
+
+      expect(conditionalToolbar.getAll(), hasLength(1));
+    });
+
+    test('מפתח חסר ב-KV מסתיר את הפריט', () async {
+      repo.grantedByPlugin['p1'] = {..._allPermissions};
+
+      await conditionalService.sync([
+        _plugin(startup: startupWithWhen()),
+      ], repo);
+
+      expect(conditionalToolbar.getAll(), isEmpty);
+      evaluator.onStorageValueChanged('p1', 'showButton', 'yes');
+      expect(conditionalToolbar.getAll(), hasLength(1));
+    });
+
+    test('הסרת התוסף מנקה את הרישום ב-evaluator', () async {
+      repo.grantedByPlugin['p1'] = {..._allPermissions};
+      repo.kv['p1|default|showButton'] = jsonEncode('yes');
+      await conditionalService.sync([
+        _plugin(startup: startupWithWhen()),
+      ], repo);
+
+      await conditionalService.sync([], repo);
+
+      evaluator.onStorageValueChanged('p1', 'showButton', 'yes');
+      expect(
+        evaluator.evaluate(
+          'p1',
+          PluginWhenCondition.fromJson({
+            'storage': {'key': 'showButton', 'equals': 'yes'},
+          }),
+        ),
+        isFalse,
+      );
+    });
+  });
+
+  group('תנאי when על activationEvents', () {
+    late PluginConditionEvaluator evaluator;
+    late PluginLazyActivationService conditionalActivation;
+    late PluginStartupContributionsService conditionalService;
+
+    Map<String, dynamic> startupWithGatedEvent() => {
+      'toolbarItems': [
+        {'id': 'b1', 'title': 'כפתור', 'icon': 'apps_24_regular'},
+      ],
+      'activationEvents': [
+        {
+          'topic': 'reader.sectionContentChanged',
+          'when': {
+            'storage': {'key': 'listen', 'equals': 'yes'},
+          },
+        },
+      ],
+    };
+
+    setUp(() {
+      evaluator = PluginConditionEvaluator.forTesting();
+      conditionalActivation = PluginLazyActivationService.forTesting(
+        conditionEvaluator: evaluator,
+      );
+      conditionalService = PluginStartupContributionsService.forTesting(
+        toolbarRegistry: PluginToolbarRegistry.forTesting(evaluator: evaluator),
+        contextMenuRegistry: ContextMenuRegistry.forTesting(
+          evaluator: evaluator,
+        ),
+        activationService: conditionalActivation,
+        searchDialogRegistry: PluginSearchDialogRegistry.forTesting(
+          evaluator: evaluator,
+        ),
+        externalEditionsRegistry: PluginExternalEditionsRegistry.detached(),
+        conditionEvaluator: evaluator,
+      );
+      repo.grantedByPlugin['p1'] = {..._allPermissions, 'app.run_on_startup'};
+    });
+
+    test('מפתח האחסון של האירוע נטען והתנאי חוסם הערה', () async {
+      await conditionalService.sync([
+        _plugin(startup: startupWithGatedEvent()),
+      ], repo);
+
+      expect(
+        conditionalActivation.queueTargetedEvent(
+          'p1',
+          'reader.sectionContentChanged',
+          {},
+        ),
+        isFalse,
+      );
+
+      // המפתח נרשם למעקב בסנכרון, ולכן עדכון חי מהגשר מהפך את התוצאה.
+      evaluator.onStorageValueChanged('p1', 'listen', 'yes');
+      expect(
+        conditionalActivation.queueTargetedEvent(
+          'p1',
+          'reader.sectionContentChanged',
+          {},
+        ),
+        isTrue,
+      );
+    });
+
+    test('ערך קיים ב-KV מאפשר הערה מיד', () async {
+      repo.kv['p1|default|listen'] = jsonEncode('yes');
+
+      await conditionalService.sync([
+        _plugin(startup: startupWithGatedEvent()),
+      ], repo);
+
+      expect(
+        conditionalActivation.queueTargetedEvent(
+          'p1',
+          'reader.sectionContentChanged',
+          {},
+        ),
+        isTrue,
+      );
+    });
   });
 }
