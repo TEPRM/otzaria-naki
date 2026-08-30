@@ -2217,6 +2217,7 @@ jobs:
         env:
           RELEASE_TITLE: ${{ steps.version.outputs.title }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
           COMMIT_MESSAGE: ${{ steps.commit.outputs.message }}
         run: |
           set -euo pipefail
@@ -2336,6 +2337,16 @@ jobs:
           > את הספרייה מורידים מתוך התוכנה עצמה לאחר ההתקנה, או על־ידי הורדת המתקין המלא (FULL) להתקנה במחשב ללא אינטרנט.
 
           EOF
+
+          # אזהרה על גירסת נסיון/קדם־יציאה — מופיעה אוטומטית בגירסאות prerelease בלבד.
+          if [ "$PRERELEASE" = "true" ]; then
+            cat >> release-body.md <<'EOF'
+          > **אזהרה – גירסא זו נבנתה באמצע תהליכי שיפור של אוצריא (גירסת נסיון) וייתכן שיש בה באגים לא ידועים – מומלץ לחכות לגירסא הבאה.**
+          >
+          > **מהדורה זו של אוצריא נועדה להיות כמו אוצריא המקורית אך ללא תיאורי הקטגוריות.**
+
+          EOF
+          fi
 
           if [ ${#indexed_library_parts[@]} -gt 0 ]; then
             printf "## ספרייה מלאה עם אינדקס מוכן\n\n" >> release-body.md
