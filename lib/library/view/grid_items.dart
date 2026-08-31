@@ -281,6 +281,7 @@ class CategoryGridItem extends StatelessWidget {
             const SizedBox(width: 18),
             // כפתור המידע של הקטגוריה הוסר — הדיאלוג הציג רק את שם הקטגוריה
             // (התיאורים הוסרו), ולכן הכפתור היה מיותר.
+            const SizedBox(width: 4),
             Container(
               width: 32,
               height: 32,
@@ -592,50 +593,72 @@ class _BookGridActionColumn extends StatelessWidget {
 
     return Column(
       mainAxisSize: MainAxisSize.min,
-      children: [
-        // לחצן המידע נשמר — דיאלוג פרטי הספר מציג את שאר הפרטים ללא תיאורים.
-        infoButton,
-        FutureBuilder<List<bool>>(
-          future: Future.wait([
-            _canDeleteBookFromLibrary(book),
-            versionsEligible
-                ? DatabaseLibraryProvider.instance.hasSelectableBookVersions(
-                    book.title,
-                    book.categoryId!,
-                  )
-                : Future.value(false),
-          ]),
-          builder: (context, snapshot) {
-            // מחיקה מהספרייה מותרת רק לספרי משתמש מסוג "עותק עצמאי"
-            // (התוכן שמור בתוכנה). ספר "קריאה מהקבצים" נמחק רק ע"י מחיקת
-            // הקובץ מהדיסק, והספרייה הרשמית (seforim.db) אינה ניתנת למחיקה.
-            final canDelete = snapshot.data?[0] ?? false;
-            final showVersions = snapshot.data?[1] ?? false;
-            if (!canDelete && !showVersions) {
-              return const SizedBox.shrink();
-            }
+        children: [
+          // לחצן המידע נשמר — דיאלוג פרטי הספר מציג את שאר הפרטים ללא תיאורים.
+          infoButton,
+          FutureBuilder<List<bool>>(
+            future: Future.wait([
+              _canDeleteBookFromLibrary(book),
+              versionsEligible
+                  ? DatabaseLibraryProvider.instance.hasSelectableBookVersions(
+                      book.title,
+                      book.categoryId!,
+                    )
+                  : Future.value(false),
+            ]),
+            builder: (context, snapshot) {
+              // מחיקה מהספרייה מותרת רק לספרי משתמש מסוג "עותק עצמאי"
+              // (התוכן שמור בתוכנה). ספר "קריאה מהקבצים" נמחק רק ע"י מחיקת
+              // הקובץ מהדיסק, והספרייה הרשמית (seforim.db) אינה ניתנת למחיקה.
+              final canDelete = snapshot.data?[0] ?? false;
+              final showVersions = snapshot.data?[1] ?? false;
+              if (!canDelete && !showVersions) {
+                return const SizedBox.shrink();
+              }
 
-            return SizedBox(
-              width: 28,
-              height: 28,
-              child: AppPopupMenuButton<String>(
-                icon: Icon(
-                  FluentIcons.more_vertical_24_regular,
-                  size: 15,
-                  color: theme.colorScheme.secondary,
-                ),
-                tooltip: 'אפשרויות נוספות',
-                position: PopupMenuPosition.under,
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(
-                  minWidth: 28,
-                  minHeight: 28,
+              return SizedBox(
+                width: 28,
+                height: 28,
+                child: AppPopupMenuButton<String>(
+                  icon: Icon(
+                    FluentIcons.more_vertical_24_regular,
+                    size: 15,
+                    color: theme.colorScheme.secondary,
+                  ),
+                  tooltip: 'אפשרויות נוספות',
+                  position: PopupMenuPosition.under,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 28,
+                    minHeight: 28,
+                  ),
+                  onSelected: (value) {
+                    if (value == 'delete') {
+                      _showDeleteBookDialog(context, book, onBookDeleted);
+                    } else if (value == 'versions') {
+                      showBookVersionsDialog(context, book as TextBook);
+                    }
+                  },
+                  entries: [
+                    if (showVersions)
+                      const AppMenuEntry<String>(
+                        value: 'versions',
+                        label: 'גרסאות',
+                        icon: OtzariaIcons.books_stacked_high_24_regular,
+                      ),
+                    if (canDelete)
+                      const AppMenuEntry<String>(
+                        value: 'delete',
+                        label: 'מחק מהספרייה',
+                        icon: FluentIcons.delete_24_regular,
+                        isDestructive: true,
+                      ),
+                  ],
                 ),
               );
             },
           ),
-        ],
-      ),
+      ],
     );
   }
 }
