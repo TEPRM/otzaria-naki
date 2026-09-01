@@ -1,0 +1,106 @@
+name: "Split FULL bundles & attach to release"
+
+# עבודה חד-פעמית/משלימה: לוקח את חבילות ה-FULL הגדולות (Linux/macOS) של ריצת
+# build קיימת, מפצל אותן לחלקים מתחת ל-2 GiB (כמו שהספרייה המאונדקסת
+# מפוצלת), מעלה את החלקים + manifest ל-release קיים, ואז מוחק את הארטיפקטים
+# של אותה ריצה. הכול רץ בתוך GitHub Actions — לא מורידים שום דבר מקומית.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Build run whose FULL artifacts to split (e.g. 33443914619)'
+        required: true
+        default: '33443914619'
+      release_tag:
+        description: 'Release tag to attach the split parts to'
+        required: true
+        default: '0.9.97+8'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  split-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: dev
+
+      - name: Download FULL artifacts from run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p downloads
+          for name in otzaria-linux-full otzaria-macos-full; do
+            id=$(gh api "repos/${{ github.repository }}/actions/runs/${{ inputs.run_id }}/artifacts?name=$name" \
+              --jq '.artifacts[] | select(.expired == false) | .id' | head -1)
+            if [ -z "$id" ]; then echo "::error::artifact not found for $name"; exit 1; fi
+            echo "Downloading $name (id=$id)"
+            gh api -H "Accept: application/zip" \
+              "repos/${{ github.repository }}/actions/artifacts/$id/zip" > "downloads/$name.zip"
+            mkdir -p "downloads/$name"
+            unzip -o "downloads/$name.zip" -d "downloads/$name"
+          done
+          echo "--- downloaded ---"
+          find downloads -type f -exec ls -la {} \;
+
+      - name: Split FULL bundles into sub-2GiB parts
+        run: |
+          set -euo pipefail
+          mkdir -p release-parts
+          for pair in "otzaria-linux-full:tar.gz" "otzaria-macos-full:zip"; do
+            name="${pair%%:*}"
+            ext="${pair##*:}"
+            archive=$(find "downloads/$name" -name "*.$ext" | head -1)
+            if [ -z "$archive" ]; then echo "::error::no .$ext archive in $name"; ls -la "downloads/$name"; exit 1; fi
+            echo "Splitting $archive"
+            bash tool/release/split_release_asset.sh "$archive" "release-parts/$name" 1992294400
+          done
+          echo "--- split parts ---"
+          find release-parts -type f -exec ls -la {} \;
+
+      - name: Upload parts and manifests to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          files=(release-parts/*/*)
+          echo "Uploading ${#files[@]} files to ${{ inputs.release_tag }}"
+          gh release upload "${{ inputs.release_tag }}" "${files[@]}" --clobber
+
+      - name: Verify all parts present on release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "${{ inputs.release_tag }}" --json assets \
+            --jq '.assets[].name' | sort > /tmp/release-assets.txt
+          find release-parts -type f -printf '%f\n' | sort > /tmp/expected.txt
+          echo "--- expected parts missing from release (should be empty) ---"
+          comm -23 /tmp/expected.txt /tmp/release-assets.txt
+          missing=$(comm -23 /tmp/expected.txt /tmp/release-assets.txt | wc -l)
+          [ "$missing" -eq 0 ] || { echo "::error::$missing parts missing from release"; exit 1; }
+          echo "All $(wc -l < /tmp/expected.txt) parts are on the release."
+
+      - name: Delete artifacts of the build run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ids=$(gh api "repos/${{ github.repository }}/actions/runs/${{ inputs.run_id }}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired == false) | .id')
+          count=$(printf '%s\n' "$ids" | grep -c . || true)
+          echo "Deleting $count artifact(s) from run ${{ inputs.run_id }}"
+          for id in $ids; do
+            echo "deleting artifact $id"
+            gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id" || \
+              echo "warning: failed to delete $id"
+          done
+          echo "--- remaining artifacts for run (should be empty) ---"
+          gh api "repos/${{ github.repository }}/actions/runs/${{ inputs.run_id }}/artifacts?per_page=100" \
+            --jq '.artifacts[].name' || true
