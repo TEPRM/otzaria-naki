@@ -89,6 +89,25 @@ class AppFonts {
     return hasSeparateBoldFace(fontFamily) ? '400' : null;
   }
 
+  /// ברירת המחדל של fwfh נותנת ל-`<h4>` את גודל הגוף בדיוק ול-`<h3>` גדול
+  /// ב-17% בלבד — משהוסרה מהן ההדגשה הן מתמזגות בטקסט. הסולם לקוח מכותרות
+  /// המרקדאון שכבר בשימוש ב-SmartTextWidget.
+  static const Map<String, String> _boldlessHeadingFontSize = {
+    'h3': '1.25em',
+    'h4': '1.1em',
+  };
+
+  /// גודל הכותרת ל-`customStylesBuilder` של fwfh, או null כשאין מה לשנות.
+  /// חל רק במשפחות שבהן [headingFontWeightOverride] מנטרל את ההדגשה, ורק
+  /// ברמות שבלעדיה אינן נבדלות מהטקסט.
+  static String? headingFontSizeOverride(
+    String? elementTag,
+    String? fontFamily,
+  ) {
+    if (elementTag == null || !hasSeparateBoldFace(fontFamily)) return null;
+    return _boldlessHeadingFontSize[elementTag];
+  }
+
   static bool get _supportsSystemFonts {
     if (kIsWeb) return false;
     return defaultTargetPlatform == TargetPlatform.windows ||
@@ -127,11 +146,18 @@ class AppFonts {
       label: 'רש"י',
       category: FontCategory.serif,
     ),
-    FontInfo(value: 'Rubik', label: 'רוביק', category: FontCategory.sansSerif),
+    // רוביק הוא הגופן המובנה היחיד שאינו ממפה טעמים (נאכף בבדיקה).
+    FontInfo(
+      value: 'Rubik',
+      label: 'רוביק',
+      category: FontCategory.sansSerif,
+      supportsTaamim: false,
+    ),
   ];
 
   static List<FontInfo>? _systemFontsHebrewCache;
   static Map<String, SystemFontFamilyFaces>? _systemFamiliesCache;
+  static Map<String, SystemFontFamilyFaces>? _pluginSystemFamiliesCache;
   static Map<String, String>? _systemFontAliasCache;
   static Future<void>? _warmUpFuture;
 
@@ -146,6 +172,52 @@ class AppFonts {
     }
 
     return fonts;
+  }
+
+  /// טעמי המקרא בטקסט המרונדר. תווי הניקוד (מ-U+05B0) אינם בטווח — גופן
+  /// שאין בו טעמים בלבד ממשיך לשמש לטקסט מנוקד.
+  static final RegExp _taamimPattern = RegExp('[֑-֯]');
+
+  static Map<String, bool>? _taamimSupportByFamily;
+
+  static Map<String, bool> _taamimSupportMap() {
+    final cached = _taamimSupportByFamily;
+    if (cached != null) return cached;
+    final map = <String, bool>{
+      for (final font in _bundledFonts)
+        font.value.toLowerCase(): font.supportsTaamim,
+    };
+    final system = _systemFontsHebrewCache;
+    if (system == null) return map;
+    for (final font in system) {
+      map[font.value.toLowerCase()] = font.supportsTaamim;
+    }
+    return _taamimSupportByFamily = map;
+  }
+
+  /// האם [fontFamily] ממפה את טעמי המקרא. גופן שאינו מוכר (סריקת המערכת עוד
+  /// לא הסתיימה) מוחזר כתומך — אזהרה שגויה גרועה מהחמצה.
+  static bool familySupportsTaamim(String? fontFamily) {
+    if (fontFamily == null || fontFamily.isEmpty) return true;
+    return _taamimSupportMap()[fontFamily.toLowerCase()] ?? true;
+  }
+
+  /// הגופן שבו יוצג [text]: הגופן שנבחר, או [defaultFont] כשהטקסט מכיל טעמים
+  /// והגופן הנבחר אינו ממפה אותם. נפילה לגליף בודד אינה פתרון — הטעם היה
+  /// מגיע מגופן אחר מהאות שהוא יושב עליה, ומיקומו נשבר.
+  static String? taamimSafeFontFamily(String? fontFamily, String text) {
+    if (fontFamily == null || familySupportsTaamim(fontFamily)) {
+      return fontFamily;
+    }
+    return _taamimPattern.hasMatch(text) ? defaultFont : fontFamily;
+  }
+
+  /// [style] אחרי החלת [taamimSafeFontFamily] על הגופן שבו.
+  static TextStyle taamimSafeStyle(TextStyle style, String text) {
+    final family = taamimSafeFontFamily(style.fontFamily, text);
+    return family == style.fontFamily
+        ? style
+        : style.copyWith(fontFamily: family);
   }
 
   /// טוען מראש לקאש את גופני המערכת התומכים בעברית, ברקע (compute isolate).
@@ -177,7 +249,9 @@ class AppFonts {
   static void _storeScan(SystemFontScanResult scan) {
     if (_systemFontsHebrewCache != null) return;
     _systemFontsHebrewCache = scan.fonts;
+    _taamimSupportByFamily = null;
     _systemFamiliesCache = scan.families;
+    _pluginSystemFamiliesCache = scan.allFamilies;
     _systemFontAliasCache = scan.aliases;
   }
 
@@ -209,16 +283,15 @@ class AppFonts {
     }
   }
 
-  /// מקבץ קבצי גופן למשפחות לפי שם המשפחה מטבלת ה-name (לא לפי שם הקובץ —
-  /// התקנה פר-משתמש שומרת שמות קבצים שרירותיים שהמשתמש אינו מזהה).
+  /// מקבץ קבצי גופן למשפחות לפי שם המשפחה מטבלת ה-name.
   static SystemFontScanResult _buildScan(
     Iterable<MapEntry<String, Uint8List>> faces,
   ) {
     final builders = <String, _FamilyAccumulator>{};
+    final allBuilders = <String, _FamilyAccumulator>{};
     final aliases = <String, String>{};
     for (final face in faces) {
       final bytes = face.value;
-      if (!_sfntSupportsHebrew(bytes)) continue;
       final info = _sfntFaceInfo(bytes);
       if (info == null || info.italic) continue;
       // p.windows מפרק גם נתיבי \ וגם / — נתיבי ה-registry של Windows מגיעים
@@ -226,15 +299,35 @@ class AppFonts {
       final family = info.family.trim().isNotEmpty
           ? info.family.trim()
           : p.windows.basenameWithoutExtension(face.key);
+      final allAcc = allBuilders.putIfAbsent(
+        family.toLowerCase(),
+        () => _FamilyAccumulator(family),
+      );
+      allAcc.addFace(
+        path: face.key,
+        info: info,
+        category: FontCategory.unknown,
+        supportsTaamim: false,
+      );
+      if (!_sfntSupportsHebrew(bytes)) continue;
       final acc = builders.putIfAbsent(
         family.toLowerCase(),
         () => _FamilyAccumulator(family),
       );
-      acc.addFace(path: face.key, info: info, category: _sfntCategory(bytes));
+      acc.addFace(
+        path: face.key,
+        info: info,
+        category: _sfntCategory(bytes),
+        supportsTaamim: _sfntSupportsTaamim(bytes),
+      );
       aliases[p.windows.basenameWithoutExtension(face.key).toLowerCase()] =
           family;
     }
 
+    final allFamilies = <String, SystemFontFamilyFaces>{
+      for (final entry in allBuilders.entries)
+        entry.value.family: (builders[entry.key] ?? entry.value).build(),
+    };
     final fonts = <FontInfo>[];
     final families = <String, SystemFontFamilyFaces>{};
     for (final acc in builders.values) {
@@ -245,6 +338,7 @@ class AppFonts {
           value: familyFaces.family,
           label: familyFaces.family,
           category: familyFaces.category,
+          supportsTaamim: familyFaces.supportsTaamim,
         ),
       );
     }
@@ -254,6 +348,7 @@ class AppFonts {
     return SystemFontScanResult(
       fonts: fonts,
       families: families,
+      allFamilies: allFamilies,
       aliases: aliases,
     );
   }
@@ -270,9 +365,30 @@ class AppFonts {
     }
   }
 
+  /// גופנים עבריים לזיהוי: U+0590–05FF (עברית) ו-U+FB1D–FB4F (צורות תצוגה).
+  static bool _sfntSupportsHebrew(Uint8List data) => _sfntCoversAny(
+    data,
+    (start, end) =>
+        end >= start &&
+        ((end >= 0x0590 && start <= 0x05FF) ||
+            (end >= 0xFB1D && start <= 0xFB4F)),
+  );
+
+  /// טעמי המקרא: U+0591–U+05AF. הזיהוי הוא ברמת ה-cmap בלבד — גופן שממפה את
+  /// הטעמים אך אינו ממקם אותם כראוי (GPOS) ייחשב כאן תומך.
+  static bool _sfntSupportsTaamim(Uint8List data) => _sfntCoversAny(
+    data,
+    (start, end) => end >= start && end >= 0x0591 && start <= 0x05AF,
+  );
+
+  /// האם ה-cmap של הגופן מכסה טווח שעליו [overlaps] מחזיר true.
   /// [base] = היסט תחילת ה-Offset Table של הגופן. ב-TTC ה-offsets בטבלאות
   /// מוחלטים (יחסית לקובץ), לכן נשמר על כל ה-data ומקדמים רק את ה-base.
-  static bool _sfntSupportsHebrew(Uint8List data, [int base = 0]) {
+  static bool _sfntCoversAny(
+    Uint8List data,
+    bool Function(int start, int end) overlaps, [
+    int base = 0,
+  ]) {
     // TTC (TrueType Collection): magic "ttcf" at offset 0.
     // numFonts at offset 8; font offsets start at offset 12.
     if (base == 0 &&
@@ -292,27 +408,11 @@ class AppFonts {
             (data[offsetPos + 2] << 8) |
             data[offsetPos + 3];
         if (fontOffset <= 0 || fontOffset >= data.length) continue;
-        if (_sfntSupportsHebrew(data, fontOffset)) {
+        if (_sfntCoversAny(data, overlaps, fontOffset)) {
           return true;
         }
       }
       return false;
-    }
-
-    // Hebrew blocks to detect:
-    // - U+0590..U+05FF (Hebrew)
-    // - U+FB1D..U+FB4F (Hebrew Presentation Forms)
-    const hebrewStart = 0x0590;
-    const hebrewEnd = 0x05FF;
-    const hebrewPresStart = 0xFB1D;
-    const hebrewPresEnd = 0xFB4F;
-
-    bool overlapsHebrew(int start, int end) {
-      if (end < start) return false;
-      final overlapsMain = end >= hebrewStart && start <= hebrewEnd;
-      if (overlapsMain) return true;
-      final overlapsPres = end >= hebrewPresStart && start <= hebrewPresEnd;
-      return overlapsPres;
     }
 
     int u16(int offset) {
@@ -425,7 +525,7 @@ class AppFonts {
 
         // End sentinel often uses 0xFFFF.
         if (endCode == 0xFFFF && startCode == 0xFFFF) continue;
-        if (overlapsHebrew(startCode, endCode)) return true;
+        if (overlaps(startCode, endCode)) return true;
       }
       return false;
     }
@@ -448,7 +548,7 @@ class AppFonts {
         final startChar = u32(off);
         final endChar = u32(off + 4);
         if (startChar < 0 || endChar < 0) continue;
-        if (overlapsHebrew(startChar, endChar)) return true;
+        if (overlaps(startChar, endChar)) return true;
       }
       return false;
     }
@@ -578,6 +678,10 @@ class AppFonts {
   /// דורש שהקאש יהיה חם — ראו [warmUpSystemFontsCache].
   static SystemFontFamilyFaces? systemFamilyFaces(String fontFamily) =>
       _systemFamiliesCache?[fontFamily];
+
+  /// ה-faces של כל גופן מערכת שהסריקה יכולה לקרוא, לתוספים שמבקשים את הבייטים.
+  static SystemFontFamilyFaces? pluginSystemFamilyFaces(String fontFamily) =>
+      _pluginSystemFamiliesCache?[fontFamily];
 
   /// בייטים של קובץ גופן מהדיסק, או null כשאינו קריא.
   static Uint8List? readFontBytes(String path) => _readFontBytesSync(path);
@@ -894,6 +998,10 @@ class AppFonts {
       _sfntSupportsHebrew(data);
 
   @visibleForTesting
+  static bool debugSfntSupportsTaamim(Uint8List data) =>
+      _sfntSupportsTaamim(data);
+
+  @visibleForTesting
   static FontCategory debugSfntCategory(Uint8List data) => _sfntCategory(data);
 
   @visibleForTesting
@@ -903,6 +1011,7 @@ class AppFonts {
   @visibleForTesting
   static set debugSystemFontsHebrewCache(List<FontInfo>? cache) {
     _systemFontsHebrewCache = cache;
+    _taamimSupportByFamily = null;
   }
 
   @visibleForTesting
@@ -917,7 +1026,9 @@ class AppFonts {
   @visibleForTesting
   static void debugResetSystemFontsCache() {
     _systemFontsHebrewCache = null;
+    _taamimSupportByFamily = null;
     _systemFamiliesCache = null;
+    _pluginSystemFamiliesCache = null;
     _systemFontAliasCache = null;
     _warmUpFuture = null;
     _variableSystemFonts.clear();
@@ -993,17 +1104,20 @@ class _FontFaceInfo {
 class SystemFontScanResult {
   final List<FontInfo> fonts;
   final Map<String, SystemFontFamilyFaces> families;
+  final Map<String, SystemFontFamilyFaces> allFamilies;
   final Map<String, String> aliases;
 
   const SystemFontScanResult({
     required this.fonts,
     required this.families,
+    required this.allFamilies,
     required this.aliases,
   });
 
   const SystemFontScanResult.empty()
     : fonts = const [],
       families = const {},
+      allFamilies = const {},
       aliases = const {};
 }
 
@@ -1014,6 +1128,7 @@ class SystemFontFamilyFaces {
   final String? boldPath;
   final bool hasWeightAxis;
   final FontCategory category;
+  final bool supportsTaamim;
 
   const SystemFontFamilyFaces({
     required this.family,
@@ -1021,12 +1136,14 @@ class SystemFontFamilyFaces {
     this.boldPath,
     this.hasWeightAxis = false,
     this.category = FontCategory.unknown,
+    this.supportsTaamim = true,
   });
 }
 
 /// צובר את ה-faces של משפחה במהלך הסריקה ובוחר את הרגיל והבולד המתאימים.
 class _FamilyAccumulator {
   final String family;
+  bool _supportsTaamim = false;
   String? _regularPath;
   int _regularDistance = 1 << 30;
   bool _regularHasWeightAxis = false;
@@ -1040,7 +1157,9 @@ class _FamilyAccumulator {
     required String path,
     required _FontFaceInfo info,
     required FontCategory category,
+    required bool supportsTaamim,
   }) {
+    if (supportsTaamim) _supportsTaamim = true;
     final weight = info.weightClass > 0 ? info.weightClass : 400;
     if (info.isBoldStyle) {
       final distance = (weight - 700).abs();
@@ -1070,6 +1189,7 @@ class _FamilyAccumulator {
       boldPath: useBoldFace ? _boldPath : null,
       hasWeightAxis: _regularHasWeightAxis,
       category: _category,
+      supportsTaamim: _supportsTaamim,
     );
   }
 }
@@ -1080,9 +1200,13 @@ class FontInfo {
   final String label;
   final FontCategory category;
 
+  /// האם הגופן ממפה את טעמי המקרא (U+0591–U+05AF).
+  final bool supportsTaamim;
+
   const FontInfo({
     required this.value,
     required this.label,
     this.category = FontCategory.unknown,
+    this.supportsTaamim = true,
   });
 }

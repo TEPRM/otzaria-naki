@@ -133,6 +133,8 @@ if (response.success) {
 | `app.registerShortcut` | 0.9.97 |
 | `app.unregisterShortcut` | 0.9.97 |
 | `app.updateShortcut` | 0.9.97 |
+| `fonts.resolveFamilies` | 0.9.97 |
+| `fonts.listInstalled` | 0.9.97 |
 | `library.findBooks` | 0.9.89 |
 | `library.getBookMetadata` | 0.9.89 |
 | `library.resolveBooks` | 0.9.97 |
@@ -148,6 +150,7 @@ if (response.success) {
 | `library.getRawLinks` | 0.9.97 |
 | `library.getLinkTargetsSummary` | 0.9.97 |
 | `library.getLinkContent` | 0.9.97 |
+| `library.refreshUserBooks` | 0.9.97 |
 | `network.fetch` | 0.9.93 |
 | `network.fetchStream` | 0.9.97 |
 | `network.download` | 0.9.93 |
@@ -505,6 +508,86 @@ await Otzaria.call('app.unregisterShortcut', { id: 'toggle-night-mode' });
 
 ---
 
+## fonts.* - גופנים למסמכים
+
+### `fonts.resolveFamilies`
+
+מחזיר כללי `@font-face` מוכנים להזרקה, שהבייטים שלהם מגיעים מהגופנים הארוזים של אוצריא או מגופני המערכת — **תחת שם שאתם מבקשים**.
+
+למה זה קיים: `src: local()` בתוך WebView של תוסף פותר רק גופנים **מותקנים במערכת**, ולעולם לא את ה-faces שאוצריא מזריקה בעצמה. תוסף שמציג מסמך שמבקש גופן שאיש לא התקין אינו יכול להגיע לגופנים הארוזים בלי הבייטים.
+
+זה משנה יותר ממראה: ב-DOCX, `w:lineRule="auto"` גוזר את גובה השורה ממדדי הגופן **שנבחר בפועל**, ולכן גופן חסר משנה את פריסת המסמך כולו.
+
+לכל משפחה מבוקשת מציינים רשימת תחליפים לפי סדר עדיפות. מוחזר ה-`@font-face` של הראשון שאוצריא מצליחה להרכיב, כשהוא נושא את השם שביקשתם.
+
+```javascript
+const { data } = await Otzaria.call('fonts.resolveFamilies', {
+  families: [
+    { name: 'FrankRuehl DP', substitutes: ['FrankRuehl', 'FrankRuhlCLM', 'David'] }
+  ]
+});
+
+const style = document.createElement('style');
+style.textContent = data.css;
+document.head.appendChild(style);
+```
+
+| שדה | טיפוס | הסבר |
+|---|---|---|
+| `families` | array | עד 24 פריטים. כל פריט: `name` (השם שהמסמך מבקש) ו-`substitutes` (עד 12 שמות, לפי סדר). |
+
+מוחזר:
+
+| שדה | טיפוס | הסבר |
+|---|---|---|
+| `css` | string | כללי `@font-face`, מופרדים בשורות. ריק כשלא נמצאה אף התאמה. |
+| `resolved` | string[] | השמות המבוקשים שקיבלו face. |
+
+המדיניות — אילו תחליפים ובאיזה סדר — נשארת אצלכם: אתם יודעים מה המסמך מבקש, ואוצריא נותנת רק את מה שרק היא יכולה לתת.
+
+הרשאה: `app.info.read` (baseline — אין דיאלוג נוסף).
+
+---
+
+### `fonts.listInstalled`
+
+מחזיר את משפחות הגופנים **המותקנות במכונה**. בלי ארגומנטים.
+
+למה זה קיים: `fonts.resolveFamilies` נותן בייטים, אבל כדי לבחור תחליף נכון צריך קודם לדעת מה בכלל קיים כאן. בלי הרשימה נותר רק לנחש, או לבקש בייטים של משפחה אחר משפחה רק כדי לגלות מי מהן נפתרת — יקר בהרבה מרשימת שמות.
+
+```javascript
+const { data } = await Otzaria.call('fonts.listInstalled');
+
+const installed = new Set(data.families.map(f => f.name));
+const hebrew = data.families.filter(f => f.scripts.includes('hebrew'));
+```
+
+מוחזר:
+
+| שדה | טיפוס | הסבר |
+|---|---|---|
+| `families` | array | המשפחות המותקנות, ממוינות לפי שם. כל שם מופיע פעם אחת. |
+| `platform` | string | הפלטפורמה, למשל `windows`. |
+
+כל פריט ב-`families`:
+
+| שדה | טיפוס | הסבר |
+|---|---|---|
+| `name` | string | השם **בדיוק כפי ש-CSS `font-family` מקבל אותו** — לא שם קובץ, ולא `David Bold`. |
+| `scripts` | string[] | מתוך `latin` `hebrew` `arabic` `cyrillic` `greek` `cjk` `thai` `symbol`. משפחה מרובת-שפות נושאת כמה. |
+| `monospace` | boolean | `true` לגופן ברוחב קבוע, למשל `Consolas`. |
+
+פלטפורמה שאין בה מימוש מחזירה `families: []` — זו אינה שגיאה, ועליכם ליפול חזרה למדיניות התחליפים שלכם.
+
+שתי מגבלות ב-Windows, שנובעות מ-GDI עצמו:
+
+- גופני raster ישנים (`.fon` — `Terminal`, `Fixedsys`, `MS Sans Serif` וכדומה) **אינם ברשימה**, משום ש-WebView אינו מרנדר אותם ולכן שמם אינו שם שאפשר למסור ל-CSS.
+- שם משפחה נקטע ב-31 תווים. `Bahnschrift SemiBold SemiCondensed`, למשל, חוזר כ-`Bahnschrift SemiBold SemiConden`. אין דרך לקבל אותו שלם דרך GDI.
+
+הרשאה: `app.info.read` (baseline — אין דיאלוג נוסף).
+
+---
+
 ## library.* - גישה לספרייה
 
 ### `library.findBooks`
@@ -673,6 +756,39 @@ const { data } = await Otzaria.call('library.getBookAltToc', {
 // [{ text: "בראשית", index: 0, level: 1 }, ...]
 ```
 
+### `library.refreshUserBooks`
+**הרשאה:** `library.refresh` · **מ-0.9.97**
+
+סורק מחדש את התיקיות האישיות שהמשתמש הגדיר, מעדכן את `user_books.db`
+לפי מה שנמצא בהן, ומרענן בעקבות זאת את קטלוג הספרייה. זו בדיוק הפעולה
+שמבצע הלחצן „סרוק מחדש תיקיות אישיות” בהגדרות.
+
+**מתי להשתמש:** תוסף שמוריד למשתמש ספרים וכותב אותם לתיקייה אישית
+(`network.download` / `fs.*` אל תוך תיקייה שהמשתמש אישר) — קורא לו בסיום, והספרים
+מופיעים בספרייה בלי שהמשתמש יפעיל מחדש את אוצריא.
+
+**אין פרמטרים.** אילו תיקיות ייסרקו נקבע מהגדרות המשתמש בלבד — התוסף אינו
+מעביר נתיב, ולכן אינו יכול לגרום לסריקה של תיקייה שלא הוגדרה.
+
+```javascript
+const { data } = await Otzaria.call('library.refreshUserBooks');
+// { addedBooks: 3, updatedBooks: 0, errors: [] }
+```
+
+| שדה | משמעות |
+|------|---------|
+| `addedBooks` | מספר הספרים החדשים שנוספו בסריקה. |
+| `updatedBooks` | מספר הספרים שתוכנם השתנה ועודכן. |
+| `errors` | כשלים חלקיים — קבצים בודדים שלא נסרקו. מערך ריק = הכל עבר בהצלחה. |
+
+הקריאה ממתינה לסיום הסריקה, שמשכה תלוי בכמות הקבצים אצל המשתמש, ולכן אינה
+כפופה ל-timeout הגנרי של 30 שניות. אחרי 15 דקות היא מוחזרת עם `error.timeout`.
+רענון הקטלוג עצמו נשלח לפני החזרת התשובה, אך מושלם ברקע; אינדוקס החיפוש מתעדכן
+לפי הגדרת „עדכון אינדקס אוטומטי” של המשתמש.
+
+**שגיאות:** `error.unavailable` — רענון אינו זמין בהקשר הנוכחי;
+`error.timeout` — הסריקה לא הסתיימה בזמן; `error.internal` — הסריקה נכשלה.
+
 ---
 
 ## מפרשים וקישורים
@@ -694,7 +810,8 @@ const { data } = await Otzaria.call('library.getBookAltToc', {
 
 > 💡 **התחילו מ-`getLinkTargetsSummary`.** הוא מחזיר את כל ספרי היעד של הספר
 > בקריאה אחת וזולה, כולל `maxSourceLine` — ומאפשר לבחור אילו יעדים לבקש
-> ב-`getLinks`/`getRawLinks` (`targetTitles`) במקום לסרוק את כל הקישורים.
+> ב-`getLinks`/`getRawLinks` (`targetTitles`/`targetTitlePrefixes`) במקום
+> לסרוק את כל הקישורים.
 
 **`getLinks` או `getRawLinks`?** שתיהן בוחרות בדיוק את אותם קישורים ונבדלות
 רק בצורת הפלט. `getLinks` היא ברירת המחדל לכל שימוש תכנותי: 0-based כמו שאר
@@ -714,6 +831,9 @@ const { data } = await Otzaria.call('library.getBookAltToc', {
   טווח שורות. בקריאה זו `isRare` תמיד `false` — הנדירות מוגדרת ביחס לספר כולו.
 - `grouped: true` — במקום `commentators` מוחזר `groups`, המפרשים מקובצים לפי
   דורות באותו סדר שבו הממשק מציג אותם. קבוצות ריקות מושמטות.
+- `titlePrefixes` — סינון למפרשים ששמם פותח באחת התחיליות. שימושי לבחירת
+  ספרי הערות/הגהות בלבד (למשל `['הערות ', 'הגהות ', 'נוסחאות ']`) — במסד אין
+  סיווג "הערות" נפרד; ההבחנה היא לפי שם ספר היעד, והתוסף קובע את הרשימה.
 
 ```javascript
 const { data } = await Otzaria.call('library.getCommentators', {
@@ -745,6 +865,9 @@ const { data } = await Otzaria.call('library.getCommentators', {
 - `connectionTypes` — סינון לפי סוג חיבור (`"COMMENTARY"`, `"TARGUM"`,
   `"REFERENCE"` …). ההשוואה אינה תלוית רישיות.
 - `targetTitles` — סינון לספרי יעד מסוימים.
+- `targetTitlePrefixes` — סינון לספרי יעד ששמם פותח באחת התחיליות. כשהוא
+  ניתן יחד עם `targetTitles`, קישור עובר אם כותרת היעד מופיעה ברשימה **או**
+  פותחת באחת התחיליות (איחוד).
 - `includeAnchors` — כשהוא `true`, קישור בעל עוגן-מילה מקבל שדה `anchor`.
 
 ```javascript
@@ -754,6 +877,7 @@ const { data } = await Otzaria.call('library.getLinks', {
   endLine: 40,
   connectionTypes: ['COMMENTARY'],  // אופציונלי
   targetTitles: ['רש״י על בראשית'], // אופציונלי
+  targetTitlePrefixes: ['הערות '],  // אופציונלי — איחוד עם targetTitles
   includeAnchors: false             // אופציונלי, ברירת מחדל: false
 });
 // {
@@ -801,7 +925,8 @@ const { data } = await Otzaria.call('library.getLinks', {
 - `startLine`/`endLine` — אופציונליים, אך **חובה יחד** (0-based, כולל), כמו
   ב-`getCommentators`. בלעדיהם נסרקות 1000 השורות הראשונות. חלון גדול מ-**1000
   שורות** מוחזר כ-`error.invalid_params`. הטווח שנסרק בפועל חוזר בתשובה.
-- `targetTitles` / `connectionTypes` — סינון זהה לזה של `getLinks`.
+- `targetTitles` / `targetTitlePrefixes` / `connectionTypes` — סינון זהה לזה
+  של `getLinks`.
 - התשובה נחתכת אחרי **10,000** קישורים ומסומנת `truncated: true`.
 
 הפלט נושא בדיוק את המפתחות שהפורמט מגדיר. `targetCategoryId`, `isCommentary`,
@@ -869,9 +994,14 @@ while (line <= summary.maxSourceLine) {
 `maxSourceLine` הוא השורה הגבוהה ביותר שיש עליה קישור (0-based), או `-1`
 כשאין לספר קישורים כלל.
 
+- `targetTitles` / `targetTitlePrefixes` — סינון רשימת `targets` באותה
+  סמנטיקת איחוד של `getLinks`. `maxSourceLine` נשאר של הספר כולו, בלי קשר
+  לסינון.
+
 ```javascript
 const { data } = await Otzaria.call('library.getLinkTargetsSummary', {
-  bookId: 'בראשית'
+  bookId: 'בראשית',
+  targetTitlePrefixes: ['הערות ', 'הגהות ']  // אופציונלי
 });
 // {
 //   maxSourceLine: 1533,
@@ -1834,6 +1964,69 @@ for (const plugin of data) {
 1. **סדר התצוגה** — תוסף שהמשתמש סידר ידנית (גרירה) מקבל ערך ≥ 1000; תוסף שלא סודר ידנית מקבל את הערך שהוצהר ב-`toolTab.order` במניפסט (ברירת מחדל: 900). ערך נמוך יותר = מוקדם יותר.
 2. **תאריך התקנה** (tie-breaker) — כשלשניים אותו ערך סדר, הישן מגיע ראשון.
 3. **`pluginId`** (tie-breaker אחרון) — סדר לקסיקוגרפי; מבטיח תוצאה זהה בכל הרצה.
+
+---
+
+## קישורי otzaria:// בדף התוסף
+
+**הרשאה:** אין | **מגרסה:** 0.9.97
+
+קישור לאפליקציה שנכתב בדף התוסף עובד כמו כל קישור — המשתמש לוחץ, והאפליקציה
+פותחת את היעד:
+
+```html
+<a href="otzaria://open/book/1234?index=57">בבא קמא, דף ב</a>
+```
+
+אין צורך בהרשאה. הסיבה: לא פעם הקישור נכתב בידי המשתמש עצמו, בתוכן שהוא שומר
+בתוסף — ולא בידי מחבר התוסף. במקום לגדר את זה בהרשאה, הגבול הוא **לחיצה של
+המשתמש**.
+
+**רק לחיצה מפעילה קישור.** ניווט שהתוסף יזם בעצמו — `location.href`,
+‏`window.open`, ‏`<meta refresh>`, הפניה מהשרת או `iframe` — נחסם בשקט. תוסף שרוצה
+לפתוח ספר מיוזמתו משתמש ב-API הרגיל (`reader.openBook`,‏ `navigation.goTo`), שם
+ההרשאה נבדקת כרגיל.
+
+שלוש פעולות חסומות גם בלחיצה, כי אין להן שימוש בתוכן שמשתמש כותב:
+`otzaria://library/reindex`,‏ `otzaria://info/...` והתקנה מקובץ מקומי
+(`otzaria://plugin/install-local`).
+
+### הפיכת כתובות שנכתבו כטקסט לקישורים
+
+כתובת שמופיעה כטקסט רגיל אינה לחיצה — בדיוק כמו בדפדפן. שתי דרכים להפוך אותה
+לקישור:
+
+**יזום** — קריאה ל-`Otzaria.linkify(root)` אחרי שהתוכן נכנס ל-DOM. מחזירה את מספר
+צמתי הטקסט שהוחלפו:
+
+```javascript
+document.getElementById('note').textContent = userText;
+Otzaria.linkify(document.getElementById('note'));
+```
+
+**אוטומטי** — דגל במניפסט. סורק את הדף בטעינה, וממשיך לעקוב אחרי תוכן שנוסף
+מאוחר יותר:
+
+```json
+{
+  "contributes": {
+    "autoLinkify": true
+  }
+}
+```
+
+בשני המצבים הסריקה מדלגת על `<a>`,‏ `<code>`,‏ `<pre>`,‏ `<textarea>`,‏ `<input>`
+ו-`<script>`, ועל כל אלמנט עם `contenteditable`. לחסימה מקומית נוספת יש
+`data-otzaria-no-linkify`:
+
+```html
+<div data-otzaria-no-linkify>otzaria://open/book/1 יישאר טקסט</div>
+```
+
+> **שימו לב:** ההחלפה מנתקת את צומת הטקסט המקורי מה-DOM. אם התוסף בנוי על
+> ספריית רינדור שמחזיקה הפניות לצמתים (React,‏ Vue,‏ Svelte), עדכון מאוחר של אותו
+> טקסט עלול להיעלם. בתוסף כזה עדיפה קריאה יזומה על תוכן שכבר לא משתנה, על פני
+> `autoLinkify`.
 
 ---
 
@@ -4248,6 +4441,7 @@ Otzaria.on('plugin.boot', async (payload) => {
     "library.books.read",
     "library.content.read",
     "library.links.read",
+    "library.refresh",
     "search.fulltext.read",
     "reader.open",
     "navigation.write",

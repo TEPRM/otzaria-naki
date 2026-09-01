@@ -17,6 +17,7 @@ import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:otzaria/plugins/models/installed_plugin.dart';
+import 'package:otzaria/plugins/services/installed_fonts.dart';
 import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
 import 'package:otzaria/data/repository/data_repository.dart';
 import 'package:otzaria/data/data_providers/database_library_provider.dart';
@@ -58,6 +59,7 @@ import 'package:otzaria/tabs/models/pdf_tab.dart';
 import 'package:otzaria/text_book/bloc/text_book_state.dart';
 import 'package:otzaria/text_book/bloc/text_book_event.dart';
 import 'package:otzaria/history/bloc/history_bloc.dart';
+import 'package:otzaria/settings/services/custom_folders/bloc/custom_folders_bloc.dart';
 import 'package:otzaria/history/bloc/history_state.dart';
 import 'package:otzaria/history/bloc/history_event.dart';
 import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
@@ -222,14 +224,17 @@ String _fontFaceRule(String family, Uint8List bytes, String weight) {
 /// \u05d4-faces \u05e9\u05dc \u05d2\u05d5\u05e4\u05df \u05de\u05d5\u05d1\u05e0\u05d4: \u05d4-regular, \u05d5\u05d1\u05de\u05e9\u05e4\u05d7\u05d4 \u05e2\u05dd \u05e7\u05d5\u05d1\u05e5 \u05d1\u05d5\u05dc\u05d3 \u05e0\u05e4\u05e8\u05d3 \u05d2\u05dd \u05d4\u05d5\u05d0.
 /// \u05d2\u05d5\u05e4\u05df \u05de\u05e9\u05ea\u05e0\u05d4 \u05de\u05e7\u05d1\u05dc \u05d8\u05d5\u05d5\u05d7 \u05de\u05e9\u05e7\u05dc\u05d9\u05dd \u2014 \u05d1\u05dc\u05e2\u05d3\u05d9\u05d5 \u05d4-WebView \u05e0\u05e2\u05d5\u05dc \u05e2\u05dc \u05de\u05d5\u05e4\u05e2
 /// \u05d1\u05e8\u05d9\u05e8\u05ea \u05d4\u05de\u05d7\u05d3\u05dc \u05d5\u05de\u05e1\u05e0\u05ea\u05d6 \u05d1\u05d5\u05dc\u05d3 \u05de\u05dc\u05d0\u05db\u05d5\u05ea\u05d9 \u05d5\u05de\u05e8\u05d5\u05d7 \u05d1\u05de\u05e7\u05d5\u05dd \u05dc\u05d4\u05e9\u05ea\u05de\u05e9 \u05d1\u05e6\u05d9\u05e8 \u05d4-wght.
-Future<String> _bundledFontFaceCss(String family) async {
+/// [asFamily] מגיש את הבייטים תחת שם אחר. כך `fonts.resolveFamilies` עונה על
+/// בקשה לגופן שאינו במכונה: הבייטים של תחליף, בשם שהמסמך מבקש.
+Future<String> _bundledFontFaceCss(String family, {String? asFamily}) async {
   final assetPath = AppFonts.fontPaths[family];
   if (assetPath == null) return '';
+  final name = asFamily ?? family;
   final isVariable = AppFonts.variableWeightFonts.contains(family);
   final regular = await rootBundle.load(assetPath);
   final parts = <String>[
     _fontFaceRule(
-      family,
+      name,
       regular.buffer.asUint8List(),
       isVariable ? '100 900' : '400',
     ),
@@ -237,44 +242,102 @@ Future<String> _bundledFontFaceCss(String family) async {
   final boldPath = AppFonts.boldFontPaths[family];
   if (boldPath != null) {
     final bold = await rootBundle.load(boldPath);
-    parts.add(_fontFaceRule(family, bold.buffer.asUint8List(), '700'));
+    parts.add(_fontFaceRule(name, bold.buffer.asUint8List(), '700'));
   }
   return parts.join('\n');
 }
 
 /// \u05d4-faces \u05e9\u05dc \u05d2\u05d5\u05e4\u05df \u05de\u05e2\u05e8\u05db\u05ea \u05e9\u05e0\u05d1\u05d7\u05e8 \u05d1\u05d4\u05d2\u05d3\u05e8\u05d5\u05ea. \u05d0\u05d9\u05e0\u05d5 \u05de\u05d5\u05d1\u05e0\u05d4, \u05d5\u05dc\u05db\u05df \u05d4-WebView
 /// \u05d0\u05d9\u05e0\u05d5 \u05d9\u05db\u05d5\u05dc \u05dc\u05e4\u05ea\u05d5\u05e8 \u05d0\u05ea \u05e9\u05de\u05d5 \u05d0\u05dc\u05d0 \u05d0\u05dd \u05d4\u05d1\u05d9\u05d9\u05d8\u05d9\u05dd \u05e9\u05dc\u05d5 \u05e0\u05e9\u05dc\u05d7\u05d9\u05dd \u05d0\u05d9\u05ea\u05d5.
-Future<String> _systemFontFaceCss(String family) async {
+Future<String> _systemFontFaceCss(String family, {String? asFamily}) async {
   await AppFonts.warmUpSystemFontsCache();
-  final faces = AppFonts.systemFamilyFaces(family);
+  final faces = AppFonts.pluginSystemFamilyFaces(family);
   if (faces == null) return '';
   final regular = AppFonts.readFontBytes(faces.regularPath);
   if (regular == null) return '';
+  final name = asFamily ?? family;
   final parts = <String>[
-    _fontFaceRule(family, regular, faces.hasWeightAxis ? '100 900' : '400'),
+    _fontFaceRule(name, regular, faces.hasWeightAxis ? '100 900' : '400'),
   ];
   final boldPath = faces.boldPath;
   if (boldPath != null) {
     final bold = AppFonts.readFontBytes(boldPath);
-    if (bold != null) parts.add(_fontFaceRule(family, bold, '700'));
+    if (bold != null) parts.add(_fontFaceRule(name, bold, '700'));
   }
   return parts.join('\n');
 }
 
-Future<String> _loadFontFaceCss(String fontFamily) async {
+Future<String> _loadFontFaceCss(String fontFamily, {String? asFamily}) async {
   if (fontFamily.isEmpty) return '';
-  final cached = _fontFaceCache[fontFamily];
-  if (cached != null) return cached;
+  if (asFamily == null) {
+    final cached = _fontFaceCache[fontFamily];
+    if (cached != null) return cached;
+  }
   try {
     final css = AppFonts.fontPaths.containsKey(fontFamily)
-        ? await _bundledFontFaceCss(fontFamily)
-        : await _systemFontFaceCss(fontFamily);
-    if (css.isNotEmpty) _fontFaceCache[fontFamily] = css;
+        ? await _bundledFontFaceCss(fontFamily, asFamily: asFamily)
+        : await _systemFontFaceCss(fontFamily, asFamily: asFamily);
+    if (css.isNotEmpty && asFamily == null) {
+      _fontFaceCache[fontFamily] = css;
+    }
     return css;
   } catch (_) {
     return '';
   }
 }
+
+/// כמה משפחות ותחליפים בקשה אחת יכולה לבקש. גבול, לא מדיניות: כל גופן שמוגש
+/// הוא מאות קילובייטים ב-base64, ובקשה בלי תקרה היא דרך לנפח את ה-WebView.
+const int _maxResolveFamilies = 24;
+const int _maxResolveSubstitutes = 12;
+
+/// עונה על `fonts.resolveFamilies`: לכל משפחה מבוקשת, ה-`@font-face` הראשון
+/// שאפשר להרכיב מרשימת התחליפים שלה — **בשם שהמסמך מבקש**.
+///
+/// למה בכלל: `src: local()` ב-WebView רואה רק גופנים מותקנים במערכת, ולא את
+/// אלה שאוצריא מזריקה כ-`@font-face`. תוסף שפותח מסמך המבקש גופן שאינו מותקן
+/// אינו יכול להגיע לגופנים הארוזים כאן בלי הבייטים עצמם — וזה מה שמוחזר.
+///
+/// המדיניות — אילו תחליפים ובאיזה סדר — נשארת אצל הקורא: הוא זה שקרא את
+/// `word/fontTable.xml` ויודע מה המסמך באמת מבקש.
+Future<Map<String, dynamic>> _resolveFontFamilies(
+  List<dynamic> requested,
+) async {
+  final css = <String>[];
+  final resolved = <String>[];
+
+  for (final entry in requested.take(_maxResolveFamilies)) {
+    if (entry is! Map) continue;
+    final name = entry['name'];
+    if (name is! String || name.isEmpty) continue;
+
+    final substitutes = entry['substitutes'];
+    final candidates = substitutes is List
+        ? substitutes.whereType<String>().take(_maxResolveSubstitutes)
+        : const <String>[];
+
+    for (final candidate in candidates) {
+      final rule = await _loadFontFaceCss(candidate, asFamily: name);
+      if (rule.isEmpty) continue;
+      css.add(rule);
+      resolved.add(name);
+      break;
+    }
+  }
+
+  return {'css': css.join('\n'), 'resolved': resolved};
+}
+
+@visibleForTesting
+Future<Map<String, dynamic>> debugResolveFontFamilies(
+  List<dynamic> requested,
+) => _resolveFontFamilies(requested);
+
+@visibleForTesting
+void debugClearFontFaceCssCache() => _fontFaceCache.clear();
+
+@visibleForTesting
+int get debugFontFaceCssCacheSize => _fontFaceCache.length;
 
 /// \u05d1\u05d5\u05e0\u05d4 \u05d1\u05dc\u05d5\u05e7 CSS \u05e2\u05dd `@font-face` \u05dc\u05db\u05dc \u05d4\u05d2\u05d5\u05e4\u05e0\u05d9\u05dd \u05e9\u05ea\u05d5\u05e1\u05e3 \u05d9\u05db\u05d5\u05dc \u05dc\u05e0\u05e7\u05d5\u05d1 \u05d1\u05e9\u05de\u05dd:
 /// \u05d4\u05de\u05d5\u05d1\u05e0\u05d9\u05dd \u05e9\u05dc \u05d0\u05d5\u05e6\u05e8\u05d9\u05d0, \u05d5\u05d1\u05e0\u05d5\u05e1\u05e3 \u05d2\u05d5\u05e4\u05df \u05de\u05e2\u05e8\u05db\u05ea \u05e9\u05e0\u05d1\u05d7\u05e8 \u05d1\u05d4\u05d2\u05d3\u05e8\u05d5\u05ea. \u05de\u05e9\u05e4\u05d7\u05d4
@@ -422,13 +485,28 @@ class PluginBridgeDependencies {
 
   /// מייצר PDF מהדף של מופע התוסף (`ui.exportPdf`). אופציונלי — ברירת המחדל
   /// היא [PluginPrintService] מעל ה-WebView הרשום; קיים להזרקה בבדיקות.
-  final Future<Uint8List> Function(String pluginId, String instanceId)?
+  final Future<Uint8List> Function(
+    String pluginId,
+    String instanceId, {
+    PluginPdfLayout? layout,
+  })?
   capturePluginPagePdf;
 
   /// האם ל-WebView של המופע יש כרגע הפעלת-משתמש חולפת (`navigator
   /// .userActivation`). אופציונלי — ברירת המחדל קוראת מה-WebView הרשום.
   final Future<bool> Function(String pluginId, String instanceId)?
   hasUserActivation;
+
+  /// ה-BLoC של התיקיות האישיות — היעד של `library.refreshUserBooks`. אותה
+  /// סריקה שהלחצן „סרוק מחדש תיקיות אישיות” מפעיל, ולכן דרכה ולא בקוד סריקה
+  /// משלנו. אופציונלי: כשאינו מסופק (בדיקות), הקריאה מחזירה
+  /// `error.unavailable`.
+  final CustomFoldersBloc? customFoldersBloc;
+
+  /// ממתין לרענון הקטלוג שנוצר בעקבות `library.refreshUserBooks`. ההרשמה
+  /// נעשית לפני תחילת הסריקה, כדי שתוצאת API מוצלחת תבטיח שהספרים החדשים
+  /// כבר נראים לקריאה הבאה של התוסף.
+  final Future<void> Function(int requestId)? waitForLibraryRefresh;
 
   const PluginBridgeDependencies({
     required this.historyBloc,
@@ -459,6 +537,8 @@ class PluginBridgeDependencies {
     this.printPluginPage,
     this.capturePluginPagePdf,
     this.hasUserActivation,
+    this.customFoldersBloc,
+    this.waitForLibraryRefresh,
   });
 }
 
@@ -684,6 +764,8 @@ class PluginBridgeAdapter {
     switch (domain) {
       case 'app':
         return await _handleApp(action, args);
+      case 'fonts':
+        return await _handleFonts(action, args);
       case 'library':
         return await _handleLibrary(action, args);
       case 'search':
@@ -732,6 +814,24 @@ class PluginBridgeAdapter {
   // ----------------------------------------------------------------
   // app.*
   // ----------------------------------------------------------------
+  Future<dynamic> _handleFonts(
+    String action,
+    Map<String, dynamic> args,
+  ) async {
+    switch (action) {
+      case 'resolveFamilies':
+        final families = args['families'];
+        if (families is! List) {
+          throw Exception('error.invalid_params: families must be an array');
+        }
+        return await _resolveFontFamilies(families);
+      case 'listInstalled':
+        return InstalledFonts.list();
+      default:
+        throw Exception('error.not_supported: fonts.$action');
+    }
+  }
+
   Future<dynamic> _handleApp(String action, Map<String, dynamic> args) async {
     switch (action) {
       case 'getInfo':
@@ -819,12 +919,71 @@ class PluginBridgeAdapter {
   // ----------------------------------------------------------------
   // library.*
   // ----------------------------------------------------------------
+  /// מזהה בקשת הרענון הבא. סטטי בכוונה: כמה מופעי adapter (טאב + רקע, או
+  /// תוספים שונים) יכולים להמתין לאותו BLoC בו-זמנית, והמזהה חייב להיות
+  /// ייחודי ביניהם כדי שכל אחד יזהה את התוצאה של הבקשה שלו.
+  static int _nextUserBooksRefreshRequestId = 1;
+
+  /// חסם עליון לסריקת התיקיות האישיות. לסריקה עצמה אין timeout טבעי — משכה
+  /// תלוי בכמות הקבצים אצל המשתמש — ובלעדיו תוסף שממתין לתשובה נתקע לנצח.
+  static const Duration _userBooksRefreshTimeout = Duration(minutes: 15);
+
+  /// `library.refreshUserBooks` — סורק מחדש את התיקיות האישיות של המשתמש
+  /// ומרענן בעקבותיה את קטלוג הספרייה. זה המסלול שתוסף שמוריד ספרים למשתמש
+  /// משתמש בו כדי שהספרים שהוריד יופיעו בספרייה בלי הפעלה מחדש.
+  ///
+  /// אילו תיקיות ייסרקו נקבע מהגדרות המשתמש בלבד — התוסף אינו מעביר נתיב,
+  /// ולכן אינו יכול לגרום לסריקה של תיקייה שהמשתמש לא הגדיר.
+  Future<Map<String, dynamic>> _refreshUserBooks() async {
+    final bloc = _dependencies.customFoldersBloc;
+    if (bloc == null) {
+      throw Exception(
+        'error.unavailable: personal books refresh is not available',
+      );
+    }
+
+    final requestId = _nextUserBooksRefreshRequestId++;
+    // ההרשמה נעשית לפני ה-add: סריקה שמסתיימת מהר הייתה מספיקה לפלוט את
+    // התוצאה לפני שהמאזין נרשם, והקריאה הייתה תקועה עד ה-timeout.
+    final completed = bloc.stream
+        .firstWhere((state) => state.completedScan?.requestId == requestId)
+        .timeout(_userBooksRefreshTimeout);
+    final waitForRefresh = _dependencies.waitForLibraryRefresh;
+    final libraryRefreshCompleted = waitForRefresh == null
+        ? null
+        : waitForRefresh(requestId).timeout(_userBooksRefreshTimeout);
+    bloc.add(
+      RescanCustomFolders(showNoChangesMessage: false, requestId: requestId),
+    );
+
+    final CustomFoldersScanOutcome outcome;
+    try {
+      outcome = (await completed).completedScan!;
+      if (libraryRefreshCompleted != null) {
+        await libraryRefreshCompleted;
+      }
+    } on TimeoutException {
+      throw Exception('error.timeout: personal books refresh timed out');
+    }
+    if (!outcome.isSuccess) {
+      throw Exception('error.internal: ${outcome.failureMessage}');
+    }
+    return {
+      'addedBooks': outcome.addedBooks,
+      'updatedBooks': outcome.updatedBooks,
+      // כשלים חלקיים: קבצים בודדים שלא נסרקו. הסריקה עצמה הצליחה.
+      'errors': outcome.errors,
+    };
+  }
+
   Future<dynamic> _handleLibrary(
     String action,
     Map<String, dynamic> args,
   ) async {
     final library = await DataRepository.instance.library;
     switch (action) {
+      case 'refreshUserBooks':
+        return await _refreshUserBooks();
       case 'findBooks':
         final query = args['query']?.toString() ?? '';
         final limit = args['limit'] as int? ?? 20;
@@ -1104,12 +1263,28 @@ class PluginBridgeAdapter {
     return values;
   }
 
+  /// רשימת-ההיתר של כותרות: כותרת עוברת אם היא ברשימה המפורשת או פותחת
+  /// באחת התחיליות. בלי שני הפילטרים — הכל עובר.
+  static bool _titleAllowed(
+    String title,
+    Set<String>? titles,
+    List<String>? prefixes,
+  ) {
+    if (titles == null && prefixes == null) return true;
+    if (titles != null && titles.contains(title)) return true;
+    return prefixes?.any(title.startsWith) ?? false;
+  }
+
   Future<dynamic> _getCommentators(
     Library library,
     Map<String, dynamic> args,
   ) async {
     final rawStart = args['startLine'];
     final rawEnd = args['endLine'];
+    final titlePrefixes = _optionalStringList(
+      args['titlePrefixes'],
+      'titlePrefixes',
+    );
     if ((rawStart == null) != (rawEnd == null)) {
       throw Exception(
         'error.invalid_params: startLine and endLine must be given together',
@@ -1118,7 +1293,7 @@ class PluginBridgeAdapter {
     final book = _findLinksTextBook(library, args);
     if (book == null) throw Exception('error.not_found: book not found');
 
-    final List<CommentatorInfo> commentators;
+    List<CommentatorInfo> commentators;
     Set<String> rare = const {};
     if (rawStart != null) {
       final startLine = _requireWireLine(rawStart, 'startLine');
@@ -1135,6 +1310,12 @@ class PluginBridgeAdapter {
       final detailed = await _linksRepository.getCommentatorsDetailed(book);
       commentators = detailed.commentators;
       rare = detailed.rare;
+    }
+    if (titlePrefixes != null) {
+      commentators = [
+        for (final c in commentators)
+          if (titlePrefixes.any(c.title.startsWith)) c,
+      ];
     }
 
     if (args['grouped'] as bool? ?? false) {
@@ -1184,6 +1365,10 @@ class PluginBridgeAdapter {
       args['targetTitles'],
       'targetTitles',
     );
+    final targetTitlePrefixes = _optionalStringList(
+      args['targetTitlePrefixes'],
+      'targetTitlePrefixes',
+    );
     final connectionTypes = _optionalStringList(
       args['connectionTypes'],
       'connectionTypes',
@@ -1197,12 +1382,15 @@ class PluginBridgeAdapter {
       book,
       startIndex: startLine,
       endIndex: endLine,
-      targetBookTitles: targetTitles,
+      // צמצום ב-SQL רק כשאין תחיליות — SQL מכיר רק כותרות מלאות, וצמצום
+      // לפי targetTitles לבדו היה מפיל את התאמות התחילית.
+      targetBookTitles: targetTitlePrefixes == null ? targetTitles : null,
     );
 
     final filtered = _filterLinkRecords(
       links,
       targetTitles: targetTitles,
+      targetTitlePrefixes: targetTitlePrefixes,
       connectionTypes: connectionTypes,
       maxRecords: _pluginLinksMaxRecords,
       // index1/index2 הם 1-based במודל; ה-wire של getLinks 0-based — זו
@@ -1262,6 +1450,10 @@ class PluginBridgeAdapter {
       args['targetTitles'],
       'targetTitles',
     );
+    final targetTitlePrefixes = _optionalStringList(
+      args['targetTitlePrefixes'],
+      'targetTitlePrefixes',
+    );
     final connectionTypes = _optionalStringList(
       args['connectionTypes'],
       'connectionTypes',
@@ -1274,12 +1466,13 @@ class PluginBridgeAdapter {
       book,
       startIndex: startLine,
       endIndex: endLine,
-      targetBookTitles: targetTitles,
+      targetBookTitles: targetTitlePrefixes == null ? targetTitles : null,
     );
 
     final filtered = _filterLinkRecords(
       links,
       targetTitles: targetTitles,
+      targetTitlePrefixes: targetTitlePrefixes,
       connectionTypes: connectionTypes,
       maxRecords: _pluginRawLinksMaxRecords,
       toRecord: (link, _) => link.toJson(),
@@ -1297,6 +1490,7 @@ class PluginBridgeAdapter {
   ({List<Map<String, dynamic>> records, bool truncated}) _filterLinkRecords(
     List<Link> links, {
     required List<String>? targetTitles,
+    required List<String>? targetTitlePrefixes,
     required List<String>? connectionTypes,
     required int maxRecords,
     required Map<String, dynamic> Function(Link link, String targetTitle)
@@ -1308,7 +1502,9 @@ class PluginBridgeAdapter {
     var truncated = false;
     for (final link in links) {
       final targetTitle = getTitleFromPath(link.path2);
-      if (titlesFilter != null && !titlesFilter.contains(targetTitle)) continue;
+      if (!_titleAllowed(targetTitle, titlesFilter, targetTitlePrefixes)) {
+        continue;
+      }
       if (typesFilter != null &&
           !typesFilter.contains(LinkTypes.normalize(link.connectionType)) &&
           !typesFilter.contains(LinkTypes.canonicalType(link.connectionType))) {
@@ -1340,6 +1536,14 @@ class PluginBridgeAdapter {
     Library library,
     Map<String, dynamic> args,
   ) async {
+    final targetTitles = _optionalStringList(
+      args['targetTitles'],
+      'targetTitles',
+    );
+    final targetTitlePrefixes = _optionalStringList(
+      args['targetTitlePrefixes'],
+      'targetTitlePrefixes',
+    );
     final book = _findLinksTextBook(library, args);
     if (book?.categoryId == null) {
       throw Exception('error.not_found: book not found');
@@ -1351,14 +1555,20 @@ class PluginBridgeAdapter {
     if (summary == null) {
       throw Exception('error.internal: link targets summary unavailable');
     }
+    final titlesFilter = targetTitles?.toSet();
     return {
       'targets': [
         for (final target in summary.targets)
-          {
-            'targetTitle': target.targetTitle,
-            'connectionType': target.connectionType,
-            'linkCount': target.linkCount,
-          },
+          if (_titleAllowed(
+            target.targetTitle,
+            titlesFilter,
+            targetTitlePrefixes,
+          ))
+            {
+              'targetTitle': target.targetTitle,
+              'connectionType': target.connectionType,
+              'linkCount': target.linkCount,
+            },
       ],
       // maxSourceLine מגיע 1-based מהמסד; ‎-1‎ = לספר אין קישורים כלל.
       'maxSourceLine': summary.maxSourceLine - 1,
@@ -2526,6 +2736,9 @@ class PluginBridgeAdapter {
           replaceHolyNames:
               Settings.getValue<bool>(SettingsRepository.keyReplaceHolyNames) ??
               false,
+          holyNameStyle: HolyNameStyle.fromStorage(
+            Settings.getValue<String>(SettingsRepository.keyHolyNameStyle),
+          ),
         ),
         currentRef: snapshot?.currentRef,
       );
@@ -2566,6 +2779,9 @@ class PluginBridgeAdapter {
         replaceHolyNames:
             Settings.getValue<bool>(SettingsRepository.keyReplaceHolyNames) ??
             false,
+        holyNameStyle: HolyNameStyle.fromStorage(
+          Settings.getValue<String>(SettingsRepository.keyHolyNameStyle),
+        ),
       ),
       currentRef: null,
     );
@@ -2869,8 +3085,13 @@ class PluginBridgeAdapter {
           args['fileName'] as String?,
           'pdf',
         );
+        final layout = _parsePdfLayout(args);
         return await _runUserGatedDialog(() async {
-          final pdf = await capture(plugin.pluginId, instanceId);
+          final pdf = await capture(
+            plugin.pluginId,
+            instanceId,
+            layout: layout,
+          );
           final chosen = await saver(
             suggestedName: suggested,
             allowedExtensions: const ['pdf'],
@@ -3002,10 +3223,93 @@ class PluginBridgeAdapter {
 
   Future<Uint8List> _defaultCapturePagePdf(
     String pluginId,
-    String instanceId,
-  ) => const PluginPrintService().createPdf(
+    String instanceId, {
+    PluginPdfLayout? layout,
+  }) => const PluginPrintService().createPdf(
     _requireController(pluginId, instanceId),
+    layout: layout,
   );
+
+  /// גדלי דף נתמכים ב-`ui.exportPdf`, במילימטרים (רוחב, גובה) לאורך.
+  static const _pdfPageSizesMm = <String, (double, double)>{
+    'a4': (210, 297),
+    'a5': (148, 210),
+    'letter': (215.9, 279.4),
+    'legal': (215.9, 355.6),
+  };
+
+  /// מפרש את ארגומנטי העימוד של `ui.exportPdf`: `pageSize`, `orientation`,
+  /// `marginMm` (מספר או מפה לפי צד) ו-`printBackgrounds`. null כשלא סופק דבר.
+  PluginPdfLayout? _parsePdfLayout(Map<String, dynamic> args) {
+    final sizeName = (args['pageSize'] as String?)?.trim().toLowerCase();
+    final orientation = (args['orientation'] as String?)?.trim().toLowerCase();
+    final margin = args['marginMm'];
+    final backgrounds = args['printBackgrounds'];
+    if (sizeName == null &&
+        orientation == null &&
+        margin == null &&
+        backgrounds == null) {
+      return null;
+    }
+
+    (double, double)? size;
+    if (sizeName != null) {
+      size = _pdfPageSizesMm[sizeName];
+      if (size == null) {
+        throw Exception(
+          'error.invalid_params: unknown pageSize (supported: '
+          '${_pdfPageSizesMm.keys.join(', ')})',
+        );
+      }
+    }
+
+    bool? landscape;
+    if (orientation != null) {
+      if (orientation != 'portrait' && orientation != 'landscape') {
+        throw Exception(
+          "error.invalid_params: orientation must be 'portrait' or 'landscape'",
+        );
+      }
+      landscape = orientation == 'landscape';
+    }
+
+    double sideMm(Object? v, String name) {
+      if (v is! num || v.isNaN || v < 0 || v > 100) {
+        throw Exception('error.invalid_params: $name must be 0-100 (mm)');
+      }
+      return v.toDouble();
+    }
+
+    EdgeInsets? marginsMm;
+    if (margin != null) {
+      if (margin is num) {
+        marginsMm = EdgeInsets.all(sideMm(margin, 'marginMm'));
+      } else if (margin is Map) {
+        marginsMm = EdgeInsets.fromLTRB(
+          sideMm(margin['left'] ?? 0, 'marginMm.left'),
+          sideMm(margin['top'] ?? 0, 'marginMm.top'),
+          sideMm(margin['right'] ?? 0, 'marginMm.right'),
+          sideMm(margin['bottom'] ?? 0, 'marginMm.bottom'),
+        );
+      } else {
+        throw Exception(
+          'error.invalid_params: marginMm must be a number or a per-side map',
+        );
+      }
+    }
+
+    if (backgrounds != null && backgrounds is! bool) {
+      throw Exception('error.invalid_params: printBackgrounds must be a bool');
+    }
+
+    return PluginPdfLayout(
+      pageWidthMm: size?.$1,
+      pageHeightMm: size?.$2,
+      marginsMm: marginsMm,
+      landscape: landscape,
+      printBackgrounds: backgrounds as bool?,
+    );
+  }
 
   /// בודקת אם [targetPath] נמצא בתוך תיקייה שהמשתמש אישר דרך `ui.pickFolder`.
   ///
@@ -5002,6 +5306,9 @@ class PluginBridgeAdapter {
         replaceHolyNames:
             Settings.getValue<bool>(SettingsRepository.keyReplaceHolyNames) ??
             false,
+        holyNameStyle: HolyNameStyle.fromStorage(
+          Settings.getValue<String>(SettingsRepository.keyHolyNameStyle),
+        ),
       ),
       renderedStartUtf16: start,
       renderedEndUtf16: end,

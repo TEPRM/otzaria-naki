@@ -6,11 +6,14 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/core/messages/pdf_messages.dart';
 import 'package:otzaria/core/ui_snack.dart';
 import 'package:otzaria/data/data_providers/tantivy_data_provider.dart';
+import 'package:otzaria/indexing/repository/indexing_repository.dart';
 import 'package:otzaria/models/books.dart';
 import 'package:otzaria/pdf_book/bloc/pdf_book_bloc.dart';
 import 'package:otzaria/pdf_book/bloc/pdf_book_event.dart';
 import 'package:otzaria/pdf_book/bloc/pdf_book_state.dart';
 import 'package:otzaria/search/book_facet.dart';
+import 'package:otzaria/search/in_book_search_preferences.dart';
+import 'package:otzaria/search/view/whole_word_search_action.dart';
 import 'package:otzaria/search/models/search_configuration.dart';
 import 'package:otzaria/search/search_query_builder.dart';
 import 'package:otzaria/search/search_repository.dart';
@@ -130,13 +133,13 @@ class PdfBookSearchView extends StatefulWidget {
   /// בלעדיה "אין תוצאות" הגנרי מסתיר מהמשתמש את הסיבה האמיתית.
   @visibleForTesting
   static String? missingFromIndexNotice({
-    required String? pdfFilePath,
+    required String? indexedFilePath,
     required bool indexInitialized,
     required Set<String> indexedFilePaths,
   }) {
-    if (pdfFilePath == null || pdfFilePath.isEmpty) return null;
+    if (indexedFilePath == null || indexedFilePath.isEmpty) return null;
     if (!indexInitialized) return null;
-    if (indexedFilePaths.contains(pdfFilePath)) return null;
+    if (indexedFilePaths.contains(indexedFilePath)) return null;
     return PdfMessages.bookNotInSearchIndex;
   }
 
@@ -200,8 +203,24 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
   /// תוצאות מיושנות (race) של חיפוש קודם.
   String? _pendingSimpleSearchScrollFor;
 
+  bool _wholeWord = InBookSearchPreferences.loadWholeWord();
+
   bool get _isSimpleSearch =>
       !_forceSearchEngine && _searchMode == SearchMode.exact;
+
+  /// המפתח שבו רשומות מסמכי הספר באינדקס. לספר בעל מזהה חיצוני זה אינו
+  /// נתיב הקובץ, ולכן השוואה ל-[pdfFilePath] הייתה משליכה את כל התוצאות.
+  String get _indexedFilePath => IndexingRepository.indexedPdfFilePath(
+    externalLibraryId: widget.externalLibraryId,
+    filePath: widget.pdfFilePath,
+  );
+
+  /// החלפת מצב ההתאמה: הסריקה של pdfrx רצה מחדש עם התבנית המתאימה.
+  void _toggleWholeWord() {
+    setState(() => _wholeWord = !_wholeWord);
+    unawaited(InBookSearchPreferences.saveWholeWord(_wholeWord));
+    _searchTextUpdated();
+  }
 
   void _updateForceSearchEngine() {
     _forceSearchEngine = !InBookSearchRouting.canRunAsSimpleSearch(
@@ -264,7 +283,6 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
       _onIncomingSearchConfiguration,
     );
     widget.textSearcher.addListener(_onTextSearcherMatchesChanged);
-    widget.searchController.addListener(_searchTextUpdated);
     _initializeBookPath();
   }
 
@@ -394,7 +412,6 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
       _onIncomingSearchConfiguration,
     );
     widget.textSearcher.removeListener(_onTextSearcherMatchesChanged);
-    widget.searchController.removeListener(_searchTextUpdated);
     _pdfHighlightDebounce?.cancel();
     super.dispose();
   }
@@ -436,8 +453,6 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
     required SearchMatchPolicy matchPolicy,
     required PdfBookBloc pdfBookBloc,
   }) {
-    final queryChanged = widget.searchController.text != query;
-
     setState(() {
       _searchOptions = searchOptions;
       _alternativeWords = alternativeWords;
@@ -458,19 +473,33 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
       ),
     );
 
+    // שינוי תוכניתי של ה-controller אינו מפעיל את onChanged של השדה, ולכן
+    // החיפוש מורץ כאן ישירות.
     syncSearchControllerQuery(widget.searchController, query);
-    if (!queryChanged) {
-      _searchTextUpdated();
+    _searchTextUpdated();
+  }
+
+  /// השאילתה שתרוץ בפועל, מנורמלת, או `null` כשאין מה לחפש עליה.
+  String? _searchableQuery(String raw) {
+    var query = raw.trim();
+    if (utils.hasNikud(query)) {
+      query = utils.removeVolwels(query);
     }
+    return InBookSearchRouting.isSearchableQuery(
+          query,
+          wholeWord: _isSimpleSearch ? _wholeWord : true,
+        )
+        ? query
+        : null;
   }
 
   Future<void> _searchTextUpdated() async {
     // כל שינוי בשאילתה/במצב החיפוש מבטל תוצאות אסינכרוניות ישנות. בלי מזהה
     // דור, חיפוש איטי קודם יכול להסתיים אחרי החדש ולדרוס תוצאות והדגשות.
     final generation = ++_searchGeneration;
-    String query = widget.searchController.text.trim();
+    final searchable = _searchableQuery(widget.searchController.text);
 
-    if (query.isEmpty || (!_isSimpleSearch && _bookPath == null)) {
+    if (searchable == null || (!_isSimpleSearch && _bookPath == null)) {
       // איפוס גלילה ממתינה כדי שתוצאות מיושנות לא יגרמו לקפיצה אחרי
       // ניקוי השדה.
       _pendingSimpleSearchScrollFor = null;
@@ -490,9 +519,7 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
       return;
     }
 
-    if (utils.hasNikud(query)) {
-      query = utils.removeVolwels(query);
-    }
+    final query = searchable;
 
     // איפוס השגיאה לפני פיצול המסלול — במסלול הפשוט התוצאות מגיעות
     // אסינכרונית, ובלי האיפוס כאן שגיאת מנוע קודמת נשארת מוצגת.
@@ -507,7 +534,7 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
       _pdfHighlightDebounce?.cancel();
       _pendingSimpleSearchScrollFor = query;
       // תבנית סובלנית-ניקוד מהמנוע, כדי שגם PDF ששכבת הטקסט שלו מנוקדת יודגש.
-      final literal = buildLiteralPattern(query);
+      final literal = buildLiteralPattern(query, wholeWord: _wholeWord);
       _lastPdfHighlightSource = literal?.source ?? query;
       widget.textSearcher.startTextSearch(
         literal?.regExp ?? query,
@@ -534,13 +561,13 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
         order: ResultsOrder.catalogue,
       );
 
-      final pdfPath = widget.pdfFilePath;
+      final indexedFilePath = _indexedFilePath;
       final results =
           rawResults
               .where((r) {
                 if (!r.isPdf) return false;
-                if (pdfPath == null || pdfPath.isEmpty) return true;
-                return r.filePath == pdfPath;
+                if (indexedFilePath.isEmpty) return true;
+                return r.filePath == indexedFilePath;
               })
               .toList(growable: true)
             ..sort((a, b) {
@@ -556,7 +583,7 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
         _isSearching = false;
         if (results.isEmpty) {
           _searchErrorMessage = PdfBookSearchView.missingFromIndexNotice(
-            pdfFilePath: widget.pdfFilePath,
+            indexedFilePath: _indexedFilePath,
             indexInitialized: TantivyDataProvider.instance.isInitialized.value,
             indexedFilePaths: TantivyDataProvider.instance.indexedFilePaths,
           );
@@ -636,7 +663,10 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
                       : 'עמוד $item';
 
                   if (settingsState.replaceHolyNames) {
-                    text = utils.replaceHolyNames(text);
+                    text = utils.replaceHolyNames(
+                      text,
+                      style: settingsState.holyNameStyle,
+                    );
                   }
 
                   return NavTreeHeader(title: text);
@@ -676,6 +706,7 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
                     _isSimpleSearch
                         ? buildLiteralPattern(
                             widget.searchController.text,
+                            wholeWord: _wholeWord,
                           )?.regExp
                         : _lastAdvancedHighlightPattern,
                   );
@@ -684,13 +715,14 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
                 height: 50,
                 query: widget.searchController.text,
                 isSimpleSearch: _isSimpleSearch,
+                wholeWord: _wholeWord,
               ),
             );
           },
         ),
       ),
       isNoResults:
-          widget.searchController.text.isNotEmpty &&
+          _searchableQuery(widget.searchController.text) != null &&
           _searchResults.isEmpty &&
           !_isSearching,
       errorMessage: _searchErrorMessage,
@@ -721,7 +753,15 @@ class PdfBookSearchViewState extends State<PdfBookSearchView> {
         );
         _schedulePdfHighlight(null);
       },
-      additionalActions: const [],
+      searchFieldActions: [
+        if (_isSimpleSearch)
+          wholeWordSearchAction(
+            context: context,
+            wholeWord: _wholeWord,
+            onToggle: _toggleWholeWord,
+          ),
+      ],
+      searchFieldActionsKey: (_isSimpleSearch, _wholeWord),
       hintText: 'חפש כאן..',
       onAdvancedSearch: () async {
         final pdfBookBloc = context.read<PdfBookBloc>();
@@ -773,6 +813,7 @@ class SearchResultTile extends StatelessWidget {
     required this.height,
     required this.query,
     required this.isSimpleSearch,
+    required this.wholeWord,
     super.key,
   });
 
@@ -781,6 +822,7 @@ class SearchResultTile extends StatelessWidget {
   final double height;
   final String query;
   final bool isSimpleSearch;
+  final bool wholeWord;
 
   @override
   Widget build(BuildContext context) {
@@ -815,7 +857,7 @@ class SearchResultTile extends StatelessWidget {
 
     var html = text;
     if (settingsState.replaceHolyNames) {
-      html = utils.replaceHolyNames(html);
+      html = utils.replaceHolyNames(html, style: settingsState.holyNameStyle);
     }
 
     if (query.isEmpty) {
@@ -837,6 +879,7 @@ class SearchResultTile extends StatelessWidget {
         query: query,
         defaultStyle: defaultStyle,
         highlightStyle: highlightStyle,
+        wholeWord: wholeWord,
       );
 
       return Text.rich(

@@ -6,6 +6,7 @@ import 'package:otzaria/indexing/repository/indexing_repository.dart';
 import 'package:otzaria/search/bloc/search_event.dart';
 import 'package:otzaria/search/bloc/search_state.dart';
 import 'package:otzaria/search/models/search_configuration.dart';
+import 'package:otzaria/core/error_log_file.dart';
 import 'package:otzaria/core/ui_snack.dart';
 import 'package:otzaria/core/messages/library_messages.dart';
 import 'package:otzaria/data/data_providers/tantivy_data_provider.dart';
@@ -326,6 +327,16 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
       // (1) toast מיידי דרך UiSnack, וגם (2) שדה errorMessage ב-state כדי
       // שה-UI יציג שגיאה במקום "אין תוצאות" באופן מתמשך עד החיפוש הבא.
       debugPrint('❌ Search failed: $e\n$stackTrace');
+      // בלי רישום ליומן, כשל חיפוש (כמו אחרי יציאה משינה, issue #1012)
+      // אינו משאיר עקבות לאבחון — errors.txt נשאר ריק.
+      try {
+        ErrorLogFile.append(
+          title: 'כשל חיפוש',
+          error: e,
+          stackTrace: stackTrace,
+          details: {'query': state.searchQuery},
+        );
+      } catch (_) {}
       UiSnack.showError(LibraryMessages.searchError);
       emit(
         state.copyWith(
@@ -1237,7 +1248,9 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     required String indexedTitle,
   }) async {
     final isStableKey =
-        indexedFilePath.startsWith('id:') || indexedFilePath.startsWith('uid:');
+        indexedFilePath.startsWith('id:') ||
+        indexedFilePath.startsWith('uid:') ||
+        indexedFilePath.startsWith('ext:');
     final library = await DataRepository.instance.library;
     final book = _booksByIndexedFilePathFor(library)[indexedFilePath];
     if (book == null) return (book: null, isStale: isStableKey);
