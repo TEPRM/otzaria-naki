@@ -38,6 +38,7 @@ import 'package:otzaria/plugins/services/plugin_lazy_activation_service.dart';
 import 'package:otzaria/plugins/services/plugin_runtime_dispatcher.dart';
 import 'package:otzaria/plugins/storage/plugin_system_database.dart';
 import 'package:otzaria/plugins/view/plugin_drop_guard_script.dart';
+import 'package:otzaria/plugins/bridge/plugin_save_target.dart';
 import 'package:otzaria/plugins/services/plugin_webview_failure_log.dart';
 import 'package:otzaria/plugins/services/plugin_network_gate.dart';
 import 'package:otzaria/plugins/view/webview_environment_holder.dart';
@@ -48,6 +49,7 @@ import 'package:otzaria/find_ref/repository/find_ref_factory.dart';
 import 'package:otzaria/find_ref/repository/find_ref_repository.dart';
 import 'package:otzaria/utils/navigation/book_open_coordinator.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:otzaria/utils/file/file_picker_dialog_options.dart';
 import 'package:otzaria/settings/services/safer_mode_guard.dart';
 import 'package:otzaria/widgets/dialogs/dialogs_exports.dart';
 import 'package:otzaria/workspaces/bloc/workspace_bloc.dart';
@@ -525,6 +527,7 @@ class _BackgroundPluginRunner extends StatefulWidget {
 
 class _BackgroundPluginRunnerState extends State<_BackgroundPluginRunner> {
   static PackageInfo? _cachedPackageInfo;
+  static const _fileServerDenialLogInterval = Duration(minutes: 1);
 
   InAppWebViewController? _controller;
   late final PluginBridgeHandler _bridge;
@@ -533,11 +536,43 @@ class _BackgroundPluginRunnerState extends State<_BackgroundPluginRunner> {
   late final PluginSystemBloc _pluginSystemBloc;
   late final FindRefRepository _findRefRepository;
   late String _localHtmlPath;
+  DateTime? _lastFileServerDenialLogAt;
 
   /// נתיב שרת הקבצים הוא `/f/<pluginId>/<token>` — תוסף רקע מורשה רק בשלו.
   bool _isOwnFileServerPath(Uri uri) =>
       uri.pathSegments.length == 3 &&
       uri.pathSegments[1] == widget.plugin.pluginId;
+
+  /// מאפשרת רק קבצים והעלאה פעילה של התוסף עצמו.
+  bool _isOwnFileServerRequest(Uri uri) =>
+      _isOwnFileServerPath(uri) ||
+      PluginFileServer.instance.isUploadUriForPlugin(
+        uri,
+        widget.plugin.pluginId,
+      );
+
+  void _logFileServerDenial(Uri uri) {
+    final now = DateTime.now();
+    final lastLogAt = _lastFileServerDenialLogAt;
+    if (lastLogAt != null &&
+        now.difference(lastLogAt) < _fileServerDenialLogInterval) {
+      return;
+    }
+    _lastFileServerDenialLogAt = now;
+    final kind = uri.pathSegments.isEmpty
+        ? uri.path
+        : '/${uri.pathSegments.first}/…';
+    final message = 'בקשת התוסף לשרת הקבצים נחסמה בשער ה-WebView: $kind';
+    debugPrint('Background plugin [${widget.plugin.pluginId}]: $message');
+    // fire-and-forget, כמו כל כתיבה ללוג הריצה.
+    unawaited(
+      PluginSystemDatabase.instance.writeLog(
+        widget.plugin.pluginId,
+        'warn',
+        message,
+      ),
+    );
+  }
 
   Future<bool> _isNetworkUriAllowed(Uri uri) => isPluginNetworkAccessAllowed(
     uri: uri,
@@ -600,7 +635,16 @@ class _BackgroundPluginRunnerState extends State<_BackgroundPluginRunner> {
         final results = await findRefRepository.findRefs(reference);
         return results
             .map(
-              (r) => (title: r.title, index: r.segment.toInt(), isPdf: r.isPdf),
+              (r) => (
+                title: r.title,
+                index: r.segment.toInt(),
+                isPdf: r.isPdf,
+                bookId: r.bookId,
+                reference: r.reference,
+                bookPath: r.bookPath,
+                isSourceLine: r.isSourceLine,
+                isUserBook: r.isUserBook,
+              ),
             )
             .toList();
       },
@@ -666,7 +710,8 @@ class _BackgroundPluginRunnerState extends State<_BackgroundPluginRunner> {
         if (ctx == null) return null;
         if (!await verifySaferModePassword(ctx)) return null;
         return FilePicker.getDirectoryPath(
-          lockParentWindow: true,
+          windowsOptions: kModalWindowsOptions,
+          linuxOptions: kModalLinuxOptions,
           dialogTitle: title,
         );
       },
@@ -678,14 +723,44 @@ class _BackgroundPluginRunnerState extends State<_BackgroundPluginRunner> {
         if (!await verifySaferModePassword(ctx)) return null;
         final hasExtensions =
             allowedExtensions != null && allowedExtensions.isNotEmpty;
-        final result = await FilePicker.pickFiles(
+        final result = await FilePicker.pickFile(
           dialogTitle: title,
-          lockParentWindow: true,
+          windowsOptions: kModalWindowsOptions,
+          linuxOptions: kModalLinuxOptions,
           type: hasExtensions ? FileType.custom : FileType.any,
           allowedExtensions: hasExtensions ? allowedExtensions : null,
         );
-        return result?.files.single.path;
+        return result?.path;
       },
+      pickSaveLocation:
+          ({
+            required String suggestedName,
+            List<String>? allowedExtensions,
+            String? title,
+          }) async {
+            final ctx = navigatorKey.currentContext;
+            if (ctx == null) return null;
+            if (!await verifySaferModePassword(ctx)) return null;
+            final folder = await FilePicker.getDirectoryPath(
+              dialogTitle: title ?? 'בחירת תיקייה לשמירת הקובץ',
+              windowsOptions: kModalWindowsOptions,
+              linuxOptions: kModalLinuxOptions,
+            );
+            if (folder == null || !ctx.mounted) return null;
+            final typed = await showInputDialog(
+              context: ctx,
+              title: title ?? 'שמירת קובץ',
+              labelText: 'שם הקובץ',
+              initialValue: suggestedName,
+              confirmText: 'שמור',
+            );
+            if (typed == null) return null;
+            final fileName = pluginSaveFileName(
+              typed,
+              allowedExtensions?.firstOrNull,
+            );
+            return pluginSaveTargetPath(folder: folder, fileName: fileName);
+          },
     );
 
     _pluginRegistryRepository = pluginRegistryRepository;
@@ -807,6 +882,23 @@ class _BackgroundPluginRunnerState extends State<_BackgroundPluginRunner> {
         ),
         buildPluginDropGuardScript(),
       ]),
+      onShowFileChooser: (controller, showFileChooserRequest) async {
+        final ctx = navigatorKey.currentContext;
+        if (ctx == null) {
+          return ShowFileChooserResponse(
+            handledByClient: true,
+            filePaths: null,
+          );
+        }
+        final verified = await verifySaferModePassword(ctx);
+        if (!verified) {
+          return ShowFileChooserResponse(
+            handledByClient: true,
+            filePaths: null,
+          );
+        }
+        return null;
+      },
       onDownloadStarting: PluginDownloadHandler.onDownloadStarting,
       onPermissionRequest: (controller, request) =>
           PluginWebViewPermissionGate.respond(
@@ -890,9 +982,11 @@ class _BackgroundPluginRunnerState extends State<_BackgroundPluginRunner> {
           // להצהרה ב-allowlist; מאשרים רק נתיב של התוסף עצמו.
           if (uri.scheme == 'http' &&
               PluginFileServer.instance.isServerUri(uri)) {
-            return _isOwnFileServerPath(uri)
-                ? NavigationActionPolicy.ALLOW
-                : NavigationActionPolicy.CANCEL;
+            if (_isOwnFileServerRequest(uri)) {
+              return NavigationActionPolicy.ALLOW;
+            }
+            _logFileServerDenial(uri);
+            return NavigationActionPolicy.CANCEL;
           }
           if (uri.scheme == 'http' || uri.scheme == 'https') {
             if (await _isNetworkUriAllowed(uri)) {
@@ -931,9 +1025,12 @@ class _BackgroundPluginRunnerState extends State<_BackgroundPluginRunner> {
               _isDevServerUri(uri, widget.plugin.devRootPath)) {
             return null; // allow dev server + HMR requests
           }
+          // שרת הקבצים הפנימי (loopback): נתיב קובץ של התוסף, או נתיב ההעלאה
+          // (/w/) של העלאה פתוחה שלו — ראו [_isOwnFileServerRequest].
           if (uri.scheme == 'http' &&
               PluginFileServer.instance.isServerUri(uri)) {
-            if (_isOwnFileServerPath(uri)) return null;
+            if (_isOwnFileServerRequest(uri)) return null;
+            _logFileServerDenial(uri);
             return WebResourceResponse(
               statusCode: 403,
               reasonPhrase: 'Forbidden',

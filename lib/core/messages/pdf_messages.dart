@@ -7,6 +7,8 @@ abstract class PdfMessages {
   static const String textLocationNotFoundOpeningAtStart =
       'לא נמצא מיקום תואם בטקסט — הספר נפתח מתחילתו';
   static const String searchError = 'שגיאה בחיפוש';
+  static const String noTextLayer =
+      'ספר זה הוא סריקה בלבד ואינו מכיל טקסט, ולכן לא ניתן לחפש בתוכו';
   static const String bookNotInSearchIndex =
       'הספר אינו נמצא באינדקס החיפוש, ולכן חיפוש מתקדם אינו זמין בו. עדכון האינדקס מתבצע בהגדרות הספרייה.';
   static const String pageRangeRenderFailed = 'עיבוד טווח העמודים שנבחר נכשל';
@@ -16,6 +18,9 @@ abstract class PdfMessages {
   static const String pdfFileSaved = 'קובץ PDF נשמר בהצלחה';
   static const String fileLockedByAnotherApp =
       'לא ניתן לשמור את הקובץ כי הוא פתוח בתוכנה אחרת. יש לסגור אותו ולנסות שוב.';
+
+  static const String editableExportRestricted =
+      'ספר זה אינו ניתן לייצוא לפורמט הניתן לעריכה. ניתן להדפיסו או לשמרו כ-PDF.';
 
   static String fileExportFailed(Object error) => 'ייצוא הקובץ נכשל: $error';
 }

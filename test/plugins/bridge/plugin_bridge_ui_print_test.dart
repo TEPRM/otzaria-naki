@@ -74,7 +74,17 @@ InstalledPlugin _buildInstalledPlugin() {
 }
 
 void main() {
-  late List<({String pluginId, String instanceId, String jobName})> printed;
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late List<
+    ({
+      String pluginId,
+      String instanceId,
+      String jobName,
+      PluginPdfLayout? layout,
+    })
+  >
+  printed;
   late bool printResult;
   late bool userActivated;
   late List<String> savedNames;
@@ -108,14 +118,16 @@ void main() {
         showWarningDialog:
             ({required title, required content, required subtitle}) async =>
                 true,
-        printPluginPage: (pluginId, instanceId, {required jobName}) async {
-          printed.add((
-            pluginId: pluginId,
-            instanceId: instanceId,
-            jobName: jobName,
-          ));
-          return printResult;
-        },
+        printPluginPage:
+            (pluginId, instanceId, {required jobName, layout}) async {
+              printed.add((
+                pluginId: pluginId,
+                instanceId: instanceId,
+                jobName: jobName,
+                layout: layout,
+              ));
+              return printResult;
+            },
         capturePluginPagePdf: (pluginId, instanceId, {layout}) async {
           capturedLayouts.add(layout);
           return Uint8List.fromList(const [37, 80, 68, 70]);
@@ -215,6 +227,21 @@ void main() {
     expect(layout.printBackgrounds, isTrue);
   });
 
+  test(
+    'pageSize כמפה — מידות חופשיות במ"מ, למסמכים בגודל לא סטנדרטי',
+    () async {
+      await adapter.execute('ui', 'exportPdf', {
+        'pageSize': {'widthMm': 210.02, 'heightMm': 297.03},
+        'marginMm': 0,
+      });
+
+      final layout = capturedLayouts.single!;
+      expect(layout.pageWidthMm, 210.02);
+      expect(layout.pageHeightMm, 297.03);
+      expect(layout.marginsMm!.top, 0);
+    },
+  );
+
   test('marginMm כמפה לפי צד; צד חסר הוא אפס', () async {
     await adapter.execute('ui', 'exportPdf', {
       'marginMm': {'top': 20, 'bottom': 15.5},
@@ -229,9 +256,49 @@ void main() {
     expect(layout.marginsMm!.right, 0);
   });
 
+  test('ui.print בלי ארגומנטי עימוד — ברירות המחדל של המנוע', () async {
+    await adapter.execute('ui', 'print', {});
+    expect(printed.single.layout, isNull);
+  });
+
+  test('ui.print מקבל את אותם ארגומנטי עימוד כמו הייצוא', () async {
+    await adapter.execute('ui', 'print', {
+      'pageSize': 'a4',
+      'orientation': 'landscape',
+      'marginMm': {'top': 5},
+      'printBackgrounds': true,
+    });
+
+    final layout = printed.single.layout!;
+    expect(layout.pageWidthMm, 210);
+    expect(layout.pageHeightMm, 297);
+    expect(layout.landscape, isTrue);
+    expect(layout.marginsMm!.top, 5);
+    expect(layout.marginsMm!.right, 0);
+    expect(layout.printBackgrounds, isTrue);
+  });
+
+  test('ערך עימוד פסול ב-ui.print נדחה בלי לשלוח להדפסה', () async {
+    await expectLater(
+      adapter.execute('ui', 'print', {'pageSize': 'a3'}),
+      throwsA(predicate((e) => e.toString().contains('error.invalid_params'))),
+    );
+    expect(printed, isEmpty);
+  });
+
   test('ערכי עימוד פסולים נדחים בלי לפתוח דיאלוג', () async {
     for (final args in [
       {'pageSize': 'a3'},
+      {'pageSize': 42},
+      {
+        'pageSize': {'widthMm': 210},
+      },
+      {
+        'pageSize': {'widthMm': 0, 'heightMm': 297},
+      },
+      {
+        'pageSize': {'widthMm': 210, 'heightMm': 99999},
+      },
       {'orientation': 'diagonal'},
       {'marginMm': -1},
       {'marginMm': 500},
@@ -309,10 +376,11 @@ void main() {
             ({required title, required content, required subtitle}) async =>
                 true,
         hasUserActivation: (pluginId, instanceId) async => true,
-        printPluginPage: (pluginId, instanceId, {required jobName}) async {
-          await gate.future;
-          return true;
-        },
+        printPluginPage:
+            (pluginId, instanceId, {required jobName, layout}) async {
+              await gate.future;
+              return true;
+            },
       ),
       pluginRepository: _MockPluginRegistryRepository(),
     );

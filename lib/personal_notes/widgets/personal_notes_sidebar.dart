@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:otzaria/theme/app_surfaces.dart';
 import 'package:otzaria/theme/app_tokens.dart';
 import 'package:flutter/foundation.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
@@ -27,6 +28,7 @@ import 'package:otzaria/personal_notes/services/personal_note_draft_service.dart
 import 'package:otzaria/text_book/bloc/text_book_bloc.dart';
 import 'package:otzaria/text_book/bloc/text_book_state.dart';
 import 'package:otzaria/widgets/dialogs/dialogs_exports.dart';
+import 'package:otzaria/widgets/feedback/otzaria_empty_state.dart';
 import 'package:otzaria/widgets/feedback/scrollable_positioned_list_scrollbar.dart';
 import 'package:otzaria/settings/settings_exports.dart';
 
@@ -511,18 +513,10 @@ class PersonalNotesSidebarState extends State<PersonalNotesSidebar>
                 ? 'לא נמצאו הערות התואמות לחיפוש'
                 : 'אין עדיין הערות על ספר זה');
       items.add(
-        Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Center(
-            child: Text(
-              message,
-              style: TextStyle(
-                color: Theme.of(
-                  context,
-                ).colorScheme.onSurface.withValues(alpha: 0.6),
-              ),
-            ),
-          ),
+        OtzariaEmptyState(
+          isCompact: true,
+          icon: FluentIcons.note_24_regular,
+          title: message,
         ),
       );
     }
@@ -556,9 +550,7 @@ class PersonalNotesSidebarState extends State<PersonalNotesSidebar>
       margin: const EdgeInsets.all(8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Theme.of(
-          context,
-        ).colorScheme.primaryContainer.withValues(alpha: 0.3),
+        color: AppSurfaces.noteEditorBackground(context),
         borderRadius: AppTokens.borderRadiusAll,
         border: Border.all(
           color: Theme.of(context).colorScheme.primary,

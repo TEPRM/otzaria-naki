@@ -1,7 +1,9 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:otzaria/shortcuts/shortcut_helper.dart';
 import 'package:otzaria/settings/l10n/settings_l10n_exports.dart';
 import 'package:otzaria/tour/bloc/tour_cubit.dart';
 import 'package:otzaria/tour/models/live_tip.dart';
@@ -36,7 +38,11 @@ void main() {
 
   setUp(() async {
     await Settings.init(cacheProvider: MemorySettingsCache());
+    // הקיצורים מוצגים עם ⌘ ב-macOS; בלי הקיבוע הטסטים עוברים רק מחוץ ל-Mac.
+    ShortcutHelper.isMacForTesting = false;
   });
+
+  tearDown(() => ShortcutHelper.isMacForTesting = null);
 
   test('בונה סיור מלא עם 19 שלבים כאשר הספרייה טעונה', () {
     final steps = TourSteps.build(libraryLoaded: true);
@@ -593,6 +599,10 @@ void main() {
   });
 
   test('טיפ הקיצורים מתוזמן מההפעלה החמישית כשטיפ התיקיות כבר נפתר', () async {
+    // טיפ הקיצורים הוא desktopOnly, ובטסטים ברירת המחדל היא אנדרואיד.
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
     await Settings.setValue<String>(TourSteps.statusKey, TourSteps.completed);
     await Settings.setValue<int>(LiveTipStorage.launchCountKey, 4);
     await Settings.setValue<String>(
@@ -635,6 +645,26 @@ void main() {
     cubit.registerSession();
     await Future<void>.delayed(const Duration(milliseconds: 40));
 
+    expect(cubit.state.activeLiveTipId, LiveTipId.backupHint);
+    await cubit.close();
+  });
+
+  test('במובייל טיפ הקיצורים מסונן והטיפ הבא תוזמן במקומו', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    await Settings.setValue<String>(TourSteps.statusKey, TourSteps.completed);
+    await Settings.setValue<int>(LiveTipStorage.launchCountKey, 9);
+    await Settings.setValue<String>(
+      LiveTipStorage.resolvedTipsKey,
+      LiveTipStorage.encode({LiveTipId.customFoldersHint}),
+    );
+
+    final cubit = TourCubit(delayedTipSchedules: _fastSchedules);
+    cubit.registerSession();
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+
+    expect(cubit.state.activeLiveTipId, isNot(LiveTipId.shortcutsHint));
     expect(cubit.state.activeLiveTipId, LiveTipId.backupHint);
     await cubit.close();
   });

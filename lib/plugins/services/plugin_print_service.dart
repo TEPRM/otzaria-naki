@@ -5,7 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:printing/printing.dart';
 
-/// עימוד לייצוא PDF של דף תוסף (`ui.exportPdf`). המידות במילימטרים;
+/// עימוד ה-PDF של דף תוסף (`ui.exportPdf` / `ui.print`). המידות במילימטרים;
 /// שדה שלא סופק משאיר את ברירת המחדל של מנוע ההדפסה.
 class PluginPdfLayout {
   final double? pageWidthMm;
@@ -55,8 +55,13 @@ class PluginPrintService {
   const PluginPrintService();
 
   /// הפלטפורמות שבהן `createPdf` ממומש בצד הנייטיב של ה-WebView.
+  /// בלינוקס דרך טלאי ה-runtime של אוצריא; על libWPEWebKit לא-מטולא
+  /// הקריאה מחזירה ריק ונזרקת שגיאה שהתוסף נופל ממנה לרסטר מקומי.
   static bool get isSupported =>
-      Platform.isWindows || Platform.isMacOS || Platform.isIOS;
+      Platform.isWindows ||
+      Platform.isMacOS ||
+      Platform.isIOS ||
+      Platform.isLinux;
 
   /// מייצר PDF מהדף הנטען ב-[controller]. זורק אם הייצור נכשל או חזר ריק.
   Future<Uint8List> createPdf(
@@ -89,8 +94,9 @@ class PluginPrintService {
   Future<bool> printWebView(
     InAppWebViewController controller, {
     required String jobName,
+    PluginPdfLayout? layout,
   }) async {
-    final pdf = await createPdf(controller);
+    final pdf = await createPdf(controller, layout: layout);
     return Printing.layoutPdf(
       name: jobName,
       onLayout: (_) => pdf,

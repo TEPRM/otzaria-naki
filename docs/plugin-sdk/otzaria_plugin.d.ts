@@ -197,6 +197,54 @@ export interface BookMeta {
   external?: { provider: 'hebrewbooks' | 'otzar'; id: number | string };
 }
 
+/** ארגומנטים ל-`library.resolveRef`. */
+export interface ResolveRefArgs {
+  /**
+   * ההפניה כפי שהמשתמש כתב אותה, כולל שם הספר — למשל `"פסחים לד"` או
+   * `"שולחן ערוך אורח חיים תרנא"`. מחרוזת קצרה משני תווים מוחזרת ריקה.
+   */
+  ref: string;
+  /** ברירת מחדל 20. */
+  limit?: number;
+}
+
+/**
+ * התאמה יחידה של `library.resolveRef` — מיקום שנפתר, לפני שנפתח.
+ *
+ * התוצאות מדורגות: הראשונה היא ההתאמה הטובה ביותר לפי אותו דירוג שמסך
+ * "איתור מקורות" מציג.
+ */
+export interface ResolvedRefHit {
+  /**
+   * ה-id המספרי של הספר, לבניית קישור עומק `otzaria://open/book/<id>`.
+   *
+   * `null` כאשר אין id חד-משמעי — ספר אישי (`isUserBook`) או PDF ממערכת
+   * הקבצים. במקרה כזה אפשר לנווט עם `reader.openBookAtRef`, אך אין לבנות
+   * קישור עומק: `user_books.db` מקצה מזהים באותו טווח כמו ספריית הבסיס.
+   */
+  id?: number | null;
+  /** כותרת הספר — הזהות המקובלת ב-SDK, כמו `BookMeta.bookId`. */
+  bookId: string;
+  /** מזהה יציב; ראה `BookMeta.bookUid`. חסר כשאין `id`. */
+  bookUid?: string;
+  type?: BookType | null;
+  title: string;
+  /** ההפניה שנפתרה, לתצוגה — למשל `"בראשית פרק א"`. */
+  reference: string;
+  /** מיקום היעד: אינדקס שורה בספר טקסט, מספר עמוד ב-PDF. */
+  index: number;
+  isPdf: boolean;
+  /**
+   * `true` = נפתר לשורת מקור מדויקת (פסוק/סעיף) דרך אינדקס ההפניות;
+   * `false` = נפתר לכותרת בתוכן העניינים, כלומר לרמת פרק/דף בלבד.
+   */
+  isSourceLine: boolean;
+  /** ספר אישי מ-`user_books.db`. ראה האזהרה על `id`. */
+  isUserBook: boolean;
+  /** נתיב הקטגוריה המלא, למשל `"תנ״ך, תורה"`. ריק אם אינו ידוע. */
+  bookPath: string;
+}
+
 export interface SearchResult {
   /** `'text'` for a text book, `'pdf'` for a PDF book. */
   type: 'text' | 'pdf';
@@ -502,6 +550,27 @@ export interface SetActiveCommentatorsArgs {
   remove?: string[];
 }
 
+/** מפרש המשובץ בצורת הדף והנראות הזמנית שלו. */
+export interface PageShapeCommentatorState {
+  commentator: string;
+  visible: boolean;
+}
+
+/** פריסת המפרשים של צורת הדף בטאב הקריאה הנוכחי. */
+export interface PageShapeLayout {
+  available: string[];
+  left: PageShapeCommentatorState | null;
+  right: PageShapeCommentatorState[];
+  bottom: PageShapeCommentatorState | null;
+  bottomRight: PageShapeCommentatorState | null;
+}
+
+/** ארגומנטים ל-`reader.setPageShapeCommentatorVisibility`. */
+export interface SetPageShapeCommentatorVisibilityArgs {
+  commentator: string;
+  visible: boolean;
+}
+
 /** ארגומנטים ל-`reader.scrollToSection`. */
 export interface ScrollToSectionArgs {
   /** בטקסט — אינדקס שורה (מבוסס-0); ב-PDF — מספר עמוד (מבוסס-1). */
@@ -525,6 +594,42 @@ export interface HighlightCapabilities {
   contextMenu: string[];
 }
 
+/**
+ * שולחן עבודה — אוסף הכרטיסיות הפתוחות (`workspace.list`).
+ */
+export interface WorkspaceListEntry {
+  id: string;
+  name: string;
+  isActive: boolean;
+  /**
+   * מספר הכרטיסיות שה-API חושף — אותן כרטיסיות שב-`ReaderState.openTabs`.
+   * כרטיסיות של כלים ותוספים אינן נמנות. בשולחן הפעיל זו הספירה החיה.
+   */
+  tabCount: number;
+}
+
+/** השולחן הפעיל (`workspace.getActive`). `null` כשעדיין לא נטען שולחן. */
+export interface ActiveWorkspace {
+  id: string | null;
+  name: string | null;
+}
+
+/** ארגומנטים ל-`workspace.create`. */
+export interface WorkspaceCreateArgs {
+  /** עד 100 תווים; שם ריק נדחה ב-`error.invalid_params`. */
+  name: string;
+  /** מעבר לשולחן מיד לאחר היצירה. ברירת מחדל `false`. */
+  switchTo?: boolean;
+  /** החזרת שולחן קיים באותו שם במקום יצירת כפילות. ברירת מחדל `false`. */
+  reuseExisting?: boolean;
+}
+
+/** תוצאת `workspace.create`. `created: false` = הוחזר שולחן קיים. */
+export interface WorkspaceCreateResult {
+  id: string;
+  created: boolean;
+}
+
 /** סימנייה (`bookmarks.list`). */
 export interface BookmarkEntry extends BookIdentity {
   title: string;
@@ -535,6 +640,27 @@ export interface BookmarkEntry extends BookIdentity {
   targetKind: 'book' | 'commentators';
   /** ISO 8601; null בסימניות מגרסאות קודמות. */
   createdAt: string | null;
+}
+
+/**
+ * ארגומנטים ל-`reader.closeTab` ול-`reader.activateTab`.
+ *
+ * ה-index הוא המקום ב-`ReaderState.openTabs` — לא מקומה של הכרטיסייה בשורת
+ * הכרטיסיות. אינדקס מחוץ לתחום מוחזר כ-`error.invalid_params`.
+ */
+export interface ReaderTabIndexArgs {
+  index: number;
+}
+
+/**
+ * ארגומנטים ל-`ui.setUnsavedChanges`.
+ *
+ * כל עוד `hasChanges` דלוק, סגירת כרטיסיית התוסף עוברת דרך דיאלוג אישור.
+ * `message` (עד 200 תווים) מוצג בדיאלוג מתחת לשם הכרטיסיה.
+ */
+export interface UiSetUnsavedChangesArgs {
+  hasChanges: boolean;
+  message?: string;
 }
 
 /** ארגומנטים ל-`bookmarks.add`. הספר מזוהה ב-`id` או ב-`bookId`. */
@@ -1614,6 +1740,7 @@ export type OtzariaMethod =
   | 'app.unregisterShortcut'
   | 'app.updateShortcut'
   | 'library.findBooks'
+  | 'library.resolveRef'
   | 'library.getBookMetadata'
   | 'library.resolveBooks'
   | 'library.resolveCategoryPaths'
@@ -1643,13 +1770,21 @@ export type OtzariaMethod =
   | 'reader.respondExternalSearch'
   | 'reader.getCurrentState'
   | 'reader.getCurrentRef'
+  | 'reader.closeTab'
+  | 'reader.activateTab'
   | 'reader.getSelection'
   | 'reader.getActiveCommentators'
   | 'reader.setActiveCommentators'
+  | 'reader.getPageShapeLayout'
+  | 'reader.setPageShapeCommentatorVisibility'
   | 'reader.scrollToSection'
   | 'reader.getHighlightCapabilities'
   | 'reader.findTextOccurrences'
   | 'reader.getSectionTextMap'
+  | 'workspace.list'
+  | 'workspace.getActive'
+  | 'workspace.create'
+  | 'workspace.switch'
   | 'navigation.goTo'
   | 'notes.list'
   | 'notes.getBookNotesSummary'
@@ -1664,6 +1799,7 @@ export type OtzariaMethod =
   | 'ui.pickFolder'
   | 'ui.print'
   | 'ui.exportPdf'
+  | 'ui.setUnsavedChanges'
   | 'fs.extractZip'
   | 'fs.deleteFile'
   | 'fs.pickUserFile'

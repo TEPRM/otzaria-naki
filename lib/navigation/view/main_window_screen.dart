@@ -7,6 +7,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:otzaria_icons/otzaria_icons.dart';
+import 'package:otzaria/core/windowing/app_window_scope.dart';
+import 'package:otzaria/core/startup_timeline.dart';
+import 'package:otzaria/core/windowing/multi_window_service.dart';
+import 'package:otzaria/core/windowing/tab_drag_preview.dart';
 import 'package:otzaria/widgets/misc/rtl_icon.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:collection/collection.dart';
@@ -22,6 +26,8 @@ import 'package:otzaria/indexing/bloc/indexing_event.dart';
 import 'package:otzaria/indexing/bloc/indexing_state.dart';
 import 'package:otzaria/indexing/indexing_work_status.dart';
 import 'package:otzaria/indexing/repository/indexing_repository.dart';
+import 'package:otzaria/core/windowing/window_title_sync.dart';
+import 'package:otzaria/core/windowing/window_role.dart';
 import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
 import 'package:otzaria/navigation/bloc/navigation_event.dart';
 import 'package:otzaria/navigation/bloc/navigation_state.dart';
@@ -52,10 +58,11 @@ import 'package:otzaria/shortcuts/keyboard_shortcuts.dart';
 import 'package:otzaria/shortcuts/shortcut_helper.dart';
 import 'package:otzaria/shortcuts/shortcut_validator.dart';
 import 'dart:async';
+import 'dart:convert';
 import 'package:otzaria/update/my_update_widget.dart';
 import 'package:otzaria/tools/calendar/utils/calendar_cubit.dart';
 import 'package:otzaria/widgets/dialogs/ad_popup_dialog.dart';
-import 'package:window_manager/window_manager.dart';
+import 'package:otzaria/settings/services/safer_mode_guard.dart';
 import 'package:otzaria/main.dart' show appWindowListener, presentMainWindow;
 import 'package:otzaria/core/splash_screen.dart' show SplashIcon;
 import 'package:otzaria/navigation/view/custom_title_bar.dart';
@@ -80,6 +87,7 @@ import 'package:otzaria/library_update/library_update_work_status.dart';
 import 'package:otzaria/theme/app_surfaces.dart';
 import 'package:otzaria/utils/ui/fullscreen_helper.dart';
 import 'package:otzaria/widgets/dialogs/app_dialogs.dart';
+import 'package:otzaria/widgets/navigation/nav_rail_column.dart';
 import 'package:otzaria/widgets/navigation/nav_rail_item.dart';
 import 'package:otzaria/plugins/services/plugin_page_launcher.dart';
 import 'package:otzaria/plugins/services/plugin_runtime_dispatcher.dart';
@@ -231,6 +239,12 @@ Map<String, dynamic> hebrewBooksPathSettingsChangedPayload(String path) => {
   'key': SettingsRepository.keyHebrewBooksPath,
   'newValue': path,
 };
+
+/// האם למקד אוטומטית את שדה החיפוש בכניסה למסך הספרייה — במובייל המקלדת
+/// הייתה נפתחת בכל כניסה, כולל בחזרה מההגדרות, ומכסה חצי מסך.
+@visibleForTesting
+bool shouldAutofocusLibrarySearch(TargetPlatform platform) =>
+    platform != TargetPlatform.android && platform != TargetPlatform.iOS;
 
 /// אופן המעבר מהעמוד שה-PageController מציג כרגע אל עמוד היעד.
 enum PageTransitionKind { snap, slide, crossSlide }
@@ -554,9 +568,18 @@ class MainWindowScreenState extends State<MainWindowScreen>
     builtInToolsOrder: builtInToolsOrder,
   ).map((item) => item.toolId).toList();
 
+  /// האם לדלג על בניית קטלוג הספרייה בעלייה.
+  ///
+  /// ⚠️ רק בחלון משני שנפתח עם כרטיסיה: המשתמש רואה ספר, לא את הספרייה,
+  /// ובניית הקטלוג מעכבת את החשיפה בכ-700ms. `LibraryBrowser` טוען אותו
+  /// ב-`initState` שלו כשנכנסים אליו, ולכן שום דבר לא אובד.
+  bool get _skipsEagerLibraryLoad =>
+      WindowRole.isSecondary && WindowRole.openedWithTab;
+
   @override
   void initState() {
     super.initState();
+    StartupTimeline.instance.markOnce('mainScreenInit');
     _calendarCubit = CalendarCubit();
     _settingsScreenController = SettingsScreenController();
     _tourCubit = TourCubit();
@@ -574,7 +597,11 @@ class MainWindowScreenState extends State<MainWindowScreen>
     if (_lastScreen != Screen.reading) {
       _initialContentReady = true;
       _splashOverlayVisible = false;
-      context.read<LibraryBloc>().add(LoadLibrary());
+      // ⚠️ חלון שנפתח עם כרטיסיה מדלג: המסך עוד לא התחלף לקריאה, אבל
+      // הוא בדרך לשם, ובניית הקטלוג כאן רק מעכבת את החשיפה בכ-700ms.
+      if (!_skipsEagerLibraryLoad) {
+        context.read<LibraryBloc>().add(LoadLibrary());
+      }
     }
 
     PluginPageLauncher.instance.navigator = (pluginId) {
@@ -656,10 +683,10 @@ class MainWindowScreenState extends State<MainWindowScreen>
 
     // רשת ביטחון: אם תוכן הספר לא ייטען (bloc תקוע) — לא נשאיר את המשתמש
     // תקוע במסך הפתיחה. failsafe בלבד; מבוטל בזרימה תקינה וב-dispose.
-    _splashFailsafeTimer = Timer(
-      const Duration(seconds: 8),
-      _revealMainWindowOnce,
-    );
+    _splashFailsafeTimer = Timer(const Duration(seconds: 8), () {
+      StartupTimeline.instance.mark('reveal:failsafe');
+      _revealMainWindowOnce();
+    });
   }
 
   /// מתזמן את חשיפת החלון המלא, תוך מתן עדיפות לטעינת הספר הפעיל: אם נפתח ספר
@@ -680,6 +707,7 @@ class MainWindowScreenState extends State<MainWindowScreen>
     // WorkspaceBloc.ReplaceAllTabs), כך שב-post-frame הראשון currentTab עדיין
     // null. לא חושפים עדיין — ה-listener של TabsBloc יקרא לנו שוב.
     if (navigationState.currentScreen == Screen.reading && currentTab == null) {
+      StartupTimeline.instance.markOnce('reveal:tabsPending');
       return;
     }
 
@@ -695,10 +723,12 @@ class MainWindowScreenState extends State<MainWindowScreen>
         pendingPane.bloc.state is! TextBookError;
 
     if (!shouldWaitForBook) {
+      StartupTimeline.instance.mark('reveal:immediate');
       _revealMainWindowOnce();
       return;
     }
 
+    StartupTimeline.instance.mark('waitingForActiveBook');
     final bloc = pendingPane.bloc;
     late final StreamSubscription<TextBookState> sub;
     var done = false;
@@ -706,6 +736,7 @@ class MainWindowScreenState extends State<MainWindowScreen>
       if (done) return;
       done = true;
       sub.cancel();
+      StartupTimeline.instance.mark('activeBookLoaded');
       _revealMainWindowOnce();
     }
 
@@ -765,7 +796,7 @@ class MainWindowScreenState extends State<MainWindowScreen>
         _splashOverlayVisible = false;
         await presentMainWindow();
         await WidgetsBinding.instance.endOfFrame;
-        libraryBloc.add(LoadLibrary());
+        if (!_skipsEagerLibraryLoad) libraryBloc.add(LoadLibrary());
         return;
       }
       // במסך שאינו קריאה התוכן כבר נצבע מהפריים הראשון (ראה initState) ואין
@@ -779,7 +810,7 @@ class MainWindowScreenState extends State<MainWindowScreen>
       await WidgetsBinding.instance.endOfFrame;
       await presentMainWindow();
       await WidgetsBinding.instance.endOfFrame;
-      libraryBloc.add(LoadLibrary());
+      if (!_skipsEagerLibraryLoad) libraryBloc.add(LoadLibrary());
     }());
   }
 
@@ -831,6 +862,11 @@ class MainWindowScreenState extends State<MainWindowScreen>
     tryStartDeferredStartupWork(
       gate: _startupWorkGate,
       startBackgroundSync: _initializeBackgroundSync,
+      isLibraryInstalled: () {
+        final navigationState = context.read<NavigationBloc>().state;
+        return navigationState.hasCheckedLibrary &&
+            !navigationState.isLibraryEmpty;
+      },
       isAutoSyncEnabled: () =>
           Settings.getValue<bool>(SettingsRepository.keyAutoSync) ?? true,
       canUseSoftwareAndBookUpdates: () =>
@@ -951,6 +987,13 @@ class MainWindowScreenState extends State<MainWindowScreen>
     BuildContext context,
     library_model.Library library,
   ) async {
+    if (WindowRole.isSecondary) {
+      _startupWorkGate.markIndexingDecisionResolved(expectIndexing: false);
+      _tryStartDeferredStartupWork();
+      context.read<IndexingBloc>().add(CheckIndexStatus(library));
+      return;
+    }
+
     final autoUpdateIndex = context.read<SettingsBloc>().state.autoUpdateIndex;
 
     final requiresManualReindex = await _indexingRepository
@@ -971,7 +1014,9 @@ class MainWindowScreenState extends State<MainWindowScreen>
 
     switch (decision) {
       case StartupIndexingDecision.autoReindexThenStart:
-        await _indexingRepository.clearIndex();
+        if (!await _indexingRepository.clearIndex()) {
+          return;
+        }
         if (!mounted || !context.mounted) {
           return;
         }
@@ -1020,7 +1065,9 @@ class MainWindowScreenState extends State<MainWindowScreen>
         return;
       }
 
-      await _indexingRepository.clearIndex();
+      if (!await _indexingRepository.clearIndex()) {
+        return;
+      }
       if (!mounted || !context.mounted) {
         return;
       }
@@ -1124,11 +1171,16 @@ class MainWindowScreenState extends State<MainWindowScreen>
       _handleExternalActivationUriString(uriString);
 
   Future<void> _bringWindowToFront() async {
-    if (!kIsWeb &&
-        (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
-      await windowManager.show();
-      await windowManager.focus();
+    if (kIsWeb) return;
+    if (!Platform.isWindows && !Platform.isLinux && !Platform.isMacOS) return;
+    if (!mounted) return;
+    if (MultiWindowService.isSupported) {
+      await const MultiWindowService().raiseSelf();
+      return;
     }
+    final window = AppWindowScope.controllerOf(context);
+    await window.show();
+    await window.focus();
   }
 
   Future<void> _showPluginInstallDialog(PluginSystemState state) async {
@@ -1367,7 +1419,7 @@ class MainWindowScreenState extends State<MainWindowScreen>
           : SearchDefaults.withResultPreferences(
               SearchConfiguration(
                 searchMode: mode,
-                distance: mode == SearchMode.fuzzy ? 2 : 0,
+                distance: mode == SearchMode.fuzzy ? kMaxFuzzyDistance : 0,
               ),
             ),
     );
@@ -1551,15 +1603,19 @@ class MainWindowScreenState extends State<MainWindowScreen>
   }) {
     NavigationDestination buildNavDataDestination(int i) {
       final item = _navData[i];
+      final shortcut =
+          ShortcutValidator.getShortcutValue(item.shortcutKey) ?? '';
+      final icon = _navigationIcon(item.icon);
       return NavigationDestination(
         tooltip: '',
-        icon: Tooltip(
-          preferBelow: false,
-          message: ShortcutHelper.formatShortcutForDisplay(
-            ShortcutValidator.getShortcutValue(item.shortcutKey) ?? '',
-          ),
-          child: _navigationIcon(item.icon),
-        ),
+        // פעולה שהמשתמש ביטל את הקיצור שלה — בלי tooltip ריק.
+        icon: shortcut.isEmpty
+            ? icon
+            : Tooltip(
+                preferBelow: false,
+                message: ShortcutHelper.formatShortcutForDisplay(shortcut),
+                child: icon,
+              ),
         selectedIcon: _navigationIcon(item.iconFilled),
         label: context.settingsText(item.label),
       );
@@ -1752,9 +1808,11 @@ class MainWindowScreenState extends State<MainWindowScreen>
     }
 
     if (state.currentScreen == Screen.library) {
-      context.read<FocusRepository>().requestLibrarySearchFocus(
-        selectAll: true,
-      );
+      if (shouldAutofocusLibrarySearch(defaultTargetPlatform)) {
+        context.read<FocusRepository>().requestLibrarySearchFocus(
+          selectAll: true,
+        );
+      }
     } else if (state.currentScreen == Screen.reading) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
@@ -2729,32 +2787,10 @@ class MainWindowScreenState extends State<MainWindowScreen>
               if (previous.lineHeight != current.lineHeight) {
                 dispatch(SettingsRepository.keyLineHeight, current.lineHeight);
               }
-              if (previous.showTeamim != current.showTeamim) {
-                dispatch(SettingsRepository.keyShowTeamim, current.showTeamim);
-              }
-              if (previous.defaultRemoveNikud != current.defaultRemoveNikud) {
+              if (previous.textDisplayPolicy != current.textDisplayPolicy) {
                 dispatch(
-                  SettingsRepository.keyDefaultNikud,
-                  current.defaultRemoveNikud,
-                );
-              }
-              if (previous.removeNikudFromTanach !=
-                  current.removeNikudFromTanach) {
-                dispatch(
-                  SettingsRepository.keyRemoveNikudFromTanach,
-                  current.removeNikudFromTanach,
-                );
-              }
-              if (previous.replaceHolyNames != current.replaceHolyNames) {
-                dispatch(
-                  SettingsRepository.keyReplaceHolyNames,
-                  current.replaceHolyNames,
-                );
-              }
-              if (previous.holyNameStyle != current.holyNameStyle) {
-                dispatch(
-                  SettingsRepository.keyHolyNameStyle,
-                  current.holyNameStyle.storageKey,
+                  SettingsRepository.keyTextDisplayPolicy,
+                  jsonEncode(current.textDisplayPolicy.toJson()),
                 );
               }
               if (previous.libraryViewMode != current.libraryViewMode) {
@@ -2895,6 +2931,22 @@ class MainWindowScreenState extends State<MainWindowScreen>
             listenWhen: (previous, current) =>
                 !identical(previous.tabs, current.tabs),
             listener: (context, state) => _jumpListService.sync(state.tabs),
+          ),
+          // כותרת החלון עוקבת אחרי הכרטיסיה הפעילה, כמו בדפדפן.
+          //
+          // ⚠️ גם על החלפת כרטיסיה ולא רק על שינוי הרשימה: הכותרת מתארת את
+          // הכרטיסיה **הפעילה**, וזו משתנה בלי שהרשימה תיגע.
+          BlocListener<TabsBloc, TabsState>(
+            listenWhen: (previous, current) =>
+                !identical(previous.tabs, current.tabs) ||
+                previous.currentTabIndex != current.currentTabIndex ||
+                previous.currentTab?.title != current.currentTab?.title,
+            listener: (context, state) => unawaited(
+              WindowTitleSync.update(
+                state.currentTab?.title,
+                tabCount: state.tabs.length,
+              ),
+            ),
           ),
           // settings.changed עבור selectedCity ו-calendarType —
           // שדות אלה נמצאים ב-CalendarState ולא ב-SettingsState
@@ -3271,91 +3323,53 @@ class MainWindowScreenState extends State<MainWindowScreen>
                                                                                   final isToolsSelected =
                                                                                       !hideTools &&
                                                                                       _isToolsLauncherOpen;
-                                                                                  return LayoutBuilder(
-                                                                                    builder:
-                                                                                        (
-                                                                                          context,
-                                                                                          constraints,
-                                                                                        ) {
-                                                                                          const buttonHeight = 60.0;
-                                                                                          const minSpacerHeight = 20.0;
-                                                                                          final totalItems =
-                                                                                              (_navData.length -
-                                                                                                  (hideTools
-                                                                                                      ? 1
-                                                                                                      : 0)) +
-                                                                                              pinnedItems.length;
-                                                                                          final needsScroll =
-                                                                                              totalItems *
-                                                                                                      buttonHeight +
-                                                                                                  minSpacerHeight >
-                                                                                              constraints.maxHeight;
-
-                                                                                          final topItems =
-                                                                                              <
-                                                                                                Widget
-                                                                                              >[
-                                                                                                for (
-                                                                                                  int i = 0;
-                                                                                                  i <
-                                                                                                      _toolsNavIndex;
-                                                                                                  i++
-                                                                                                )
-                                                                                                  _buildNavRailItem(
-                                                                                                    context,
-                                                                                                    i,
-                                                                                                    state.currentScreen,
-                                                                                                    compact: isCompactRail,
-                                                                                                  ),
-                                                                                                if (!hideTools)
-                                                                                                  _buildNavRailItem(
-                                                                                                    context,
-                                                                                                    _toolsNavIndex,
-                                                                                                    state.currentScreen,
-                                                                                                    selectedOverride: isToolsSelected,
-                                                                                                    compact: isCompactRail,
-                                                                                                  ),
-                                                                                                for (
-                                                                                                  int i = 0;
-                                                                                                  i <
-                                                                                                      pinnedItems.length;
-                                                                                                  i++
-                                                                                                )
-                                                                                                  _buildPinnedItemNavRailItem(
-                                                                                                    context,
-                                                                                                    pinnedItems[i],
-                                                                                                    isSelected:
-                                                                                                        activePinnedIndex ==
-                                                                                                        i,
-                                                                                                    compact: isCompactRail,
-                                                                                                  ),
-                                                                                              ];
-                                                                                          final settingsItem = _buildNavRailItem(
+                                                                                  final topItems =
+                                                                                      <
+                                                                                        Widget
+                                                                                      >[
+                                                                                        for (
+                                                                                          int i = 0;
+                                                                                          i <
+                                                                                              _toolsNavIndex;
+                                                                                          i++
+                                                                                        )
+                                                                                          _buildNavRailItem(
                                                                                             context,
-                                                                                            _settingsNavIndex,
+                                                                                            i,
                                                                                             state.currentScreen,
                                                                                             compact: isCompactRail,
-                                                                                          );
-
-                                                                                          if (needsScroll) {
-                                                                                            return SingleChildScrollView(
-                                                                                              child: Column(
-                                                                                                children: [
-                                                                                                  ...topItems,
-                                                                                                  settingsItem,
-                                                                                                ],
-                                                                                              ),
-                                                                                            );
-                                                                                          }
-
-                                                                                          return Column(
-                                                                                            children: [
-                                                                                              ...topItems,
-                                                                                              const Spacer(),
-                                                                                              settingsItem,
-                                                                                            ],
-                                                                                          );
-                                                                                        },
+                                                                                          ),
+                                                                                        if (!hideTools)
+                                                                                          _buildNavRailItem(
+                                                                                            context,
+                                                                                            _toolsNavIndex,
+                                                                                            state.currentScreen,
+                                                                                            selectedOverride: isToolsSelected,
+                                                                                            compact: isCompactRail,
+                                                                                          ),
+                                                                                        for (
+                                                                                          int i = 0;
+                                                                                          i <
+                                                                                              pinnedItems.length;
+                                                                                          i++
+                                                                                        )
+                                                                                          _buildPinnedItemNavRailItem(
+                                                                                            context,
+                                                                                            pinnedItems[i],
+                                                                                            isSelected:
+                                                                                                activePinnedIndex ==
+                                                                                                i,
+                                                                                            compact: isCompactRail,
+                                                                                          ),
+                                                                                      ];
+                                                                                  return NavRailColumn(
+                                                                                    items: topItems,
+                                                                                    bottomItem: _buildNavRailItem(
+                                                                                      context,
+                                                                                      _settingsNavIndex,
+                                                                                      state.currentScreen,
+                                                                                      compact: isCompactRail,
+                                                                                    ),
                                                                                   );
                                                                                 },
                                                                           );
@@ -3396,7 +3410,12 @@ class MainWindowScreenState extends State<MainWindowScreen>
                                                           .readingTabsOnSide,
                                                     ),
                                               ),
-                                              Expanded(child: pageView),
+                                              Expanded(
+                                                child: RepaintBoundary(
+                                                  key: windowContentBoundaryKey,
+                                                  child: pageView,
+                                                ),
+                                              ),
                                             ],
                                           ),
                                         ),
@@ -3535,7 +3554,8 @@ class MainWindowScreenState extends State<MainWindowScreen>
     context.read<NavigationBloc>().add(const NavigateToScreen(Screen.settings));
   }
 
-  void _openErrorLogFile() {
+  Future<void> _openErrorLogFile() async {
+    if (!await verifySaferModePassword(context)) return;
     ErrorLogFile.ensureExists();
     final path = ErrorLogFile.resolvePath();
     if (Platform.isWindows) {
@@ -3758,7 +3778,8 @@ class MainWindowScreenState extends State<MainWindowScreen>
       );
     }
 
-    if (screen == Screen.library) {
+    if (screen == Screen.library &&
+        shouldAutofocusLibrarySearch(defaultTargetPlatform)) {
       context.read<FocusRepository>().requestLibrarySearchFocus(
         selectAll: true,
       );
@@ -3775,9 +3796,11 @@ class MainWindowScreenState extends State<MainWindowScreen>
     final item = _navData[index];
     final isSelected =
         selectedOverride ?? (_getActiveNavigationIndex(currentScreen) == index);
-    final tooltip = ShortcutHelper.formatShortcutForDisplay(
-      ShortcutValidator.getShortcutValue(item.shortcutKey) ?? '',
-    );
+    final shortcut = ShortcutValidator.getShortcutValue(item.shortcutKey) ?? '';
+    // פעולה שהמשתמש ביטל את הקיצור שלה — בלי tooltip ריק.
+    final tooltip = shortcut.isEmpty
+        ? null
+        : ShortcutHelper.formatShortcutForDisplay(shortcut);
 
     final step = _tourCubit.state.currentStep;
     final isTourHighlighted = _isTourNavigationItemHighlighted(

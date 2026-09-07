@@ -43,18 +43,21 @@ void main() {
 
       final actions = [
         ActionButtonData(
+          actionId: ToolbarActionId.plugin,
           widget: buildAction(OtzariaIcons.book_24_regular, 'ספר'),
           icon: OtzariaIcons.book_24_regular,
           tooltip: 'ספר',
           onPressed: () {},
         ),
         ActionButtonData(
+          actionId: ToolbarActionId.search,
           widget: buildAction(OtzariaIcons.search_24_regular, 'חיפוש'),
           icon: OtzariaIcons.search_24_regular,
           tooltip: 'חיפוש',
           onPressed: () {},
         ),
         ActionButtonData(
+          actionId: ToolbarActionId.viewMode,
           widget: buildAction(FluentIcons.settings_24_regular, 'הגדרות'),
           icon: FluentIcons.settings_24_regular,
           tooltip: 'הגדרות',
@@ -64,6 +67,7 @@ void main() {
 
       final alwaysInMenu = [
         ActionButtonData(
+          actionId: ToolbarActionId.openCommentatorsTab,
           widget: buildAction(FluentIcons.more_horizontal_24_regular, 'נוסף'),
           icon: FluentIcons.more_horizontal_24_regular,
           tooltip: 'נוסף',
@@ -93,9 +97,9 @@ void main() {
       );
 
       expect(find.byIcon(FluentIcons.more_vertical_24_regular), findsOneWidget);
-      expect(find.byIcon(OtzariaIcons.book_24_regular), findsOneWidget);
+      expect(find.byIcon(OtzariaIcons.book_24_regular), findsNothing);
       expect(find.byIcon(OtzariaIcons.search_24_regular), findsOneWidget);
-      expect(find.byIcon(FluentIcons.settings_24_regular), findsNothing);
+      expect(find.byIcon(FluentIcons.settings_24_regular), findsOneWidget);
     },
   );
 
@@ -116,6 +120,7 @@ void main() {
       bool enabled = true,
     }) {
       return ActionButtonData(
+        actionId: ToolbarActionId.plugin,
         widget: IconButton(
           onPressed: () {},
           icon: Icon(icon),
@@ -627,25 +632,83 @@ void main() {
     });
   });
 
-  group('maxToolbarButtonsForWidth', () {
-    test('מסך צר מאוד מחזיר 0 כפתורים (רק overflow)', () {
-      expect(maxToolbarButtonsForWidth(260), 0);
-      expect(maxToolbarButtonsForWidth(200), 0);
-    });
+  group('תת-תפריט בתפריט ה-"..."', () {
+    testWidgets('בחלון צר התת-תפריט נשאר בגבולות המסך', (tester) async {
+      tester.view.physicalSize = const Size(420, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
 
-    test('מסכי מובייל מציגים יותר כפתורים ככל שהרוחב גדל', () {
-      // ככל שהרוחב גדל, מספר הכפתורים לא יורד
-      final w360 = maxToolbarButtonsForWidth(360);
-      final w400 = maxToolbarButtonsForWidth(400);
-      final w500 = maxToolbarButtonsForWidth(500);
-      expect(w360, lessThanOrEqualTo(w400));
-      expect(w400, lessThanOrEqualTo(w500));
-      // 360px: (360-260)/44 = 2
-      expect(w360, 2);
-    });
+      const subLabels = [
+        'מפרשים בצד — אפשרות ארוכה',
+        'מפרשים מתחת לטקסט',
+        'כרטיסיית מפרשים נפרדת',
+      ];
+      final actions = [
+        ActionButtonData(
+          actionId: ToolbarActionId.viewMode,
+          widget: const SizedBox.shrink(),
+          icon: OtzariaIcons.book_24_regular,
+          tooltip: 'מצב תצוגה',
+          onPressed: () {},
+          submenuItems: [
+            for (final label in subLabels)
+              ActionButtonData(
+                widget: const SizedBox.shrink(),
+                icon: OtzariaIcons.book_24_regular,
+                tooltip: label,
+                onPressed: () {},
+              ),
+          ],
+        ),
+        ActionButtonData(
+          actionId: ToolbarActionId.search,
+          widget: const SizedBox.shrink(),
+          icon: OtzariaIcons.search_24_regular,
+          tooltip: 'חיפוש',
+          onPressed: () {},
+        ),
+      ];
 
-    test('מסך רחב מציג הרבה כפתורים', () {
-      expect(maxToolbarButtonsForWidth(1400), greaterThan(20));
+      await tester.pumpWidget(
+        withSettings(
+          MaterialApp(
+            home: Directionality(
+              textDirection: TextDirection.rtl,
+              child: Scaffold(
+                appBar: AppBar(
+                  actions: [
+                    ResponsiveActionBar(
+                      actions: actions,
+                      alwaysInMenu: const [],
+                      maxVisibleButtons: 0,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byIcon(FluentIcons.more_vertical_24_regular));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('מצב תצוגה'));
+      await tester.pumpAndSettle();
+
+      for (final label in subLabels) {
+        final rect = tester.getRect(find.text(label));
+        expect(
+          rect.left,
+          greaterThanOrEqualTo(0),
+          reason: 'הפריט "$label" נחתך בשמאל המסך',
+        );
+        expect(
+          rect.right,
+          lessThanOrEqualTo(420),
+          reason: 'הפריט "$label" נחתך בימין המסך',
+        );
+      }
     });
   });
 }

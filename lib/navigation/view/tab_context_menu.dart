@@ -1,8 +1,11 @@
+import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:otzaria/core/messages/library_messages.dart';
+import 'package:otzaria/core/messages/window_messages.dart';
 import 'package:otzaria/core/ui_snack.dart';
+import 'package:otzaria/core/windowing/multi_window_service.dart';
 import 'package:otzaria/history/bloc/history_bloc.dart';
 import 'package:otzaria/history/bloc/history_event.dart';
 import 'package:otzaria/settings/engine/settings_bloc.dart';
@@ -14,32 +17,71 @@ import 'package:otzaria/tabs/bloc/tabs_event.dart';
 import 'package:otzaria/tabs/bloc/tabs_state.dart';
 import 'package:otzaria/tabs/models/combined_tab.dart';
 import 'package:otzaria/tabs/models/tab.dart';
+import 'package:otzaria/tabs/models/searching_tab.dart';
 import 'package:otzaria/tabs/models/tool_tab.dart';
+import 'package:otzaria/tabs/utils/confirm_close_tabs.dart';
 import 'package:otzaria/widgets/misc/app_menu_exports.dart';
 import 'package:otzaria/workspaces/bloc/workspace_bloc.dart';
 import 'package:otzaria/workspaces/bloc/workspace_event.dart';
 
 /// סוגר כרטיסיה ורושם אותה בהיסטוריה.
-void closeTabWithHistory(BuildContext context, OpenedTab tab) {
-  context.read<HistoryBloc>().add(AddHistory(tab));
-  context.read<TabsBloc>().add(RemoveTab(tab));
+///
+/// כל פונקציות הסגירה כאן לוכדות את ה-blocs לפני ה-await של דיאלוג האישור,
+/// כי ה-context של תפריט ההקשר עלול להתפרק בזמן שהדיאלוג פתוח.
+Future<void> closeTabWithHistory(BuildContext context, OpenedTab tab) async {
+  final historyBloc = context.read<HistoryBloc>();
+  final tabsBloc = context.read<TabsBloc>();
+  if (!await confirmCloseTabs(context, [tab])) return;
+  historyBloc.add(AddHistory(tab));
+  tabsBloc.add(RemoveTab(tab));
 }
 
 /// סוגר חלונית אחת מלשונית מפוצלת; אחותה נשארת ככרטיסיה רגילה במקומה.
-void closePaneWithHistory(BuildContext context, OpenedTab pane) {
-  context.read<HistoryBloc>().add(AddHistory(pane));
-  context.read<TabsBloc>().add(ClosePane(pane));
+Future<void> closePaneWithHistory(
+  BuildContext context,
+  OpenedTab pane,
+) async {
+  final historyBloc = context.read<HistoryBloc>();
+  final tabsBloc = context.read<TabsBloc>();
+  if (!await confirmCloseTabs(context, [pane])) return;
+  historyBloc.add(AddHistory(pane));
+  tabsBloc.add(ClosePane(pane));
 }
 
 /// סוגר את כל הכרטיסיות שבבחירה המרובה בפעולה אחת.
-void closeSelectedTabsWithHistory(BuildContext context) {
+Future<void> closeSelectedTabsWithHistory(BuildContext context) async {
   final tabsBloc = context.read<TabsBloc>();
+  final historyBloc = context.read<HistoryBloc>();
   final tabsToClose = List<OpenedTab>.from(tabsBloc.state.selectedTabs);
   if (tabsToClose.isEmpty) return;
+  if (!await confirmCloseTabs(context, tabsToClose)) return;
   // אירוע קבוצתי אחד — אירועי AddHistory נפרדים מעובדים במקביל ועלולים
   // לדרוס זה את זה.
-  context.read<HistoryBloc>().add(AddHistoryForTabs(tabsToClose));
+  historyBloc.add(AddHistoryForTabs(tabsToClose));
   tabsBloc.add(RemoveTabs(tabsToClose));
+}
+
+/// סוגר את כל הכרטיסיות שאינן מוצמדות ורושם אותן בהיסטוריה.
+Future<void> closeAllTabsWithHistory(BuildContext context) async {
+  final tabsBloc = context.read<TabsBloc>();
+  final historyBloc = context.read<HistoryBloc>();
+  final closing = tabsBloc.state.tabs.where((t) => !t.isPinned).toList();
+  if (!await confirmCloseTabs(context, closing)) return;
+  historyBloc.add(
+    AddHistoryForTabs(closing.where((t) => t is! SearchingTab).toList()),
+  );
+  tabsBloc.add(CloseAllTabs());
+}
+
+/// סוגר את כל הכרטיסיות מלבד [keepTab].
+Future<void> closeOtherTabsConfirmed(
+  BuildContext context,
+  OpenedTab keepTab,
+) async {
+  final tabsBloc = context.read<TabsBloc>();
+  final closing = tabsBloc.state.tabs.where((t) => t != keepTab);
+  if (!await confirmCloseTabs(context, closing)) return;
+  tabsBloc.add(CloseOtherTabs(keepTab));
 }
 
 /// תפריט ההקשר של כרטיסיה, משותף לרצועה העליונה ולעמודה האנכית.
@@ -76,21 +118,40 @@ List<AppContextMenuEntry> buildTabContextMenuEntries(
       ),
     AppContextMenuEntry(
       label: context.settingsText('סגור הכל'),
-      onTap: () => context.read<TabsBloc>().add(CloseAllTabs()),
+      onTap: () => closeAllTabsWithHistory(context),
     ),
     AppContextMenuEntry(
       label: context.settingsText('סגור את האחרים'),
-      onTap: () {
-        final current = state.currentTab;
-        if (current != null) {
-          context.read<TabsBloc>().add(CloseOtherTabs(current));
-        }
-      },
+      onTap: () => closeOtherTabsConfirmed(context, tab),
     ),
     if (tab is! ToolTab || tab.isBuiltIn)
       AppContextMenuEntry(
         label: context.settingsText('שיכפול'),
         onTap: () => context.read<TabsBloc>().add(CloneTab(tab)),
+      ),
+    // הכרטיסיה עוברת לחלון חדש: היא נפתחת שם ונסגרת כאן. הסדר חשוב —
+    // פותחים תחילה, וסוגרים רק אחרי שהבקשה נמסרה ל-runner, כדי שכשל
+    // בפתיחה לא יאבד את הכרטיסיה.
+    if (MultiWindowService.isSupported)
+      AppContextMenuEntry(
+        label: context.settingsText('העבר לחלון חדש'),
+        onTap: () => _moveTabToNewWindow(context, tab),
+      ),
+    // תת-תפריט של החלונות הפתוחים האחרים, בדיוק כמו "הצג לצד". מופיע רק
+    // כשיש לאן להעביר — פריט מושבת לא היה מוסיף מידע.
+    if (MultiWindowService.isSupported &&
+        MultiWindowService.transferTargets.isNotEmpty)
+      AppContextMenuEntry(
+        label: context.settingsText('העבר לחלון קיים'),
+        children: [
+          for (final peer in MultiWindowService.transferTargets)
+            AppContextMenuEntry(
+              label: peer.tabCount > 1
+                  ? WindowMessages.peerWithTabs(peer.title, peer.tabCount)
+                  : peer.title,
+              onTap: () => _moveTabToExistingWindow(context, tab, peer.slot),
+            ),
+        ],
       ),
     const AppContextMenuEntry.divider(),
   ];
@@ -171,6 +232,66 @@ List<AppContextMenuEntry> buildTabContextMenuEntries(
   return entries;
 }
 
+/// בדיקות משותפות ל"העבר לחלון חדש" ול"העבר לחלון קיים".
+///
+/// ⚠️ שלוש ההגנות האלה היו קיימות בגרירה ולא בתפריט, אף ששני המסלולים
+/// מסתיימים באותו `RemoveTab`: כרטיסיה שאינה ניתנת להעברה, כרטיסיה אחרונה
+/// שמשאירה חלון ריק, ומצב ה-JS של תוסף שאובד בהעברה — בדיוק מה
+/// ש-[_moveTabToWorkspace] כבר שואל עליו.
+Future<bool> _confirmTabTransfer(
+  BuildContext context,
+  OpenedTab tab,
+  TabsState state,
+) async {
+  if (!MultiWindowService.canTransfer(tab)) {
+    UiSnack.showError(WindowMessages.cannotTransferTab);
+    return false;
+  }
+  if (state.tabs.length <= 1) {
+    UiSnack.show(WindowMessages.cannotTransferLastTab);
+    return false;
+  }
+  return confirmCloseTabs(context, [tab]);
+}
+
+Future<void> _moveTabToNewWindow(BuildContext context, OpenedTab tab) async {
+  final tabsBloc = context.read<TabsBloc>();
+  // ⚠️ נבדק **לפני** הפעולה ולא בדיעבד: `openWindow` ממתין עד 20 שניות,
+  // והמשתמש היה מקבל "אפשר לפתוח עד N חלונות" רק בסופן.
+  if (!await const MultiWindowService().canOpenAnotherWindow()) {
+    await const MultiWindowService().reportOpenWindowFailure();
+    return;
+  }
+  if (!context.mounted) return;
+  if (!await _confirmTabTransfer(context, tab, tabsBloc.state)) return;
+
+  final opened = await const MultiWindowService().openWindow(tab: tab);
+  if (opened) {
+    tabsBloc.add(RemoveTab(tab));
+  } else {
+    await const MultiWindowService().reportOpenWindowFailure();
+  }
+}
+
+Future<void> _moveTabToExistingWindow(
+  BuildContext context,
+  OpenedTab tab,
+  int slot,
+) async {
+  final tabsBloc = context.read<TabsBloc>();
+  if (!await _confirmTabTransfer(context, tab, tabsBloc.state)) return;
+
+  // ⚠️ ההסרה רק אחרי אישור מהיעד. הרשימה עשויה להיות מעט לא-עדכנית, וחלון
+  // שנסגר בדיוק עכשיו לא יאשר — ואז הכרטיסיה נשארת כאן במקום להיעלם משני
+  // הצדדים.
+  final sent = await const MultiWindowService().sendTabToWindow(slot, tab);
+  if (sent) {
+    tabsBloc.add(RemoveTab(tab));
+  } else {
+    UiSnack.showError(WindowMessages.transferFailed);
+  }
+}
+
 /// החלפה בין רצועת הכרטיסיות שבכותרת לעמודה האנכית שבצד.
 AppContextMenuEntry _buildTabsPlacementEntry(BuildContext context) {
   final onSide = context.read<SettingsBloc>().state.readingTabsOnSide;
@@ -249,19 +370,27 @@ AppContextMenuEntry _buildMoveToWorkspaceMenuEntry(
 }
 
 /// מעביר טאב לשולחן עבודה אחר
-void _moveTabToWorkspace(
+Future<void> _moveTabToWorkspace(
   BuildContext context,
   OpenedTab tab,
   String targetWorkspaceId,
-) {
+) async {
   final tabsBloc = context.read<TabsBloc>();
   final workspaceBloc = context.read<WorkspaceBloc>();
+  // ההעברה סוגרת את הכרטיסיה כאן; מצב ה-JS של תוסף אינו עובר איתה.
+  if (!await confirmCloseTabs(context, [tab])) return;
   final tabsState = tabsBloc.state;
   final workspaceState = workspaceBloc.state;
 
-  final targetWorkspace = workspaceState.workspaces.firstWhere(
+  // ⚠️ `firstWhereOrNull`: השולחן יכול להימחק בחלון אחר בין בניית התפריט
+  // לבחירה, ו-`firstWhere` זרק `StateError` באמצע הפעולה.
+  final targetWorkspace = workspaceState.workspaces.firstWhereOrNull(
     (w) => w.id == targetWorkspaceId,
   );
+  if (targetWorkspace == null) {
+    UiSnack.showError(LibraryMessages.workspaceNoLongerExists);
+    return;
+  }
 
   tabsBloc.add(RemoveTab(tab));
 
@@ -270,12 +399,20 @@ void _moveTabToWorkspace(
       ? 0
       : tabsState.currentTabIndex.clamp(0, currentTabs.length - 1);
 
+  // הסרת הטאב מזיזה את האינדקס, ולכן צד החלונית הפעילה תקף רק אם הטאב
+  // הפעיל אחרי ההסרה הוא אותו טאב עצמו. אחרת הוא מתייחס לטאב אחר.
+  final newActiveTab = currentTabs.isEmpty ? null : currentTabs[newActiveIndex];
+  final activePaneToKeep = identical(newActiveTab, tabsState.currentTab)
+      ? tabsState.activePaneSide
+      : null;
+
   workspaceBloc.add(
     MoveTabToWorkspace(
       tab: tab,
       targetWorkspaceId: targetWorkspaceId,
       currentTabs: currentTabs,
       currentTabIndex: newActiveIndex,
+      currentActivePane: activePaneToKeep,
     ),
   );
 

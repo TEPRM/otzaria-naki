@@ -1,6 +1,9 @@
 import 'package:bloc_concurrency/bloc_concurrency.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:otzaria/core/messages/window_messages.dart';
+import 'package:otzaria/core/ui_snack.dart';
+import 'package:otzaria/core/windowing/window_role.dart';
 import 'package:otzaria/indexing/bloc/indexing_event.dart';
 import 'package:otzaria/indexing/bloc/indexing_state.dart';
 import 'package:otzaria/indexing/models/indexing_run_result.dart';
@@ -13,16 +16,18 @@ import 'package:otzaria/models/books.dart';
 
 class IndexingBloc extends Bloc<IndexingEvent, IndexingState> {
   final IndexingRepository _repository;
-  final void Function(IndexingRunResult result) _reportFailures;
+  final void Function(IndexingRunResult result, Duration elapsed)
+  _reportFailures;
   int _nextWorkId = 0;
   int? _activeWorkId;
   bool _isPaused = false;
   bool _isEconomy = false;
   bool _isFinalizing = false;
+  double? _finalizingProgress;
 
   IndexingBloc(
     this._repository, {
-    void Function(IndexingRunResult result)? reportFailures,
+    void Function(IndexingRunResult result, Duration elapsed)? reportFailures,
   }) : _reportFailures = reportFailures ?? IndexingFailureReporter.write,
        super(IndexingInitial()) {
     on<IndexingWorkEvent>(_onIndexingWork, transformer: sequential());
@@ -33,6 +38,7 @@ class IndexingBloc extends Bloc<IndexingEvent, IndexingState> {
     on<SetEconomyIndexing>(_onSetEconomyIndexing, transformer: sequential());
     on<ActualIndexingStarted>(_onActualIndexingStarted);
     on<IndexingFinalizing>(_onFinalizing);
+    on<IndexingFinalizeProgress>(_onFinalizeProgress);
     on<UpdateIndexingProgress>(_onUpdateProgress);
     on<ClearIndex>(_onEraseIndex);
   }
@@ -60,13 +66,17 @@ class IndexingBloc extends Bloc<IndexingEvent, IndexingState> {
     isPaused: _isPaused,
     isEconomy: _isEconomy,
     isFinalizing: _isFinalizing,
+    finalizingProgress: _finalizingProgress,
   );
 
   Future<void> _onIndexingWork(
     IndexingWorkEvent event,
     Emitter<IndexingState> emit,
   ) async {
+    if (_rejectIndexMutationInSecondaryWindow(emit)) return;
+
     _isFinalizing = false;
+    _finalizingProgress = null;
     // ריצה חדשה מתחילה ללא השהיה; המצב החסכוני נשמר בין ריצות.
     if (_isPaused) {
       _isPaused = false;
@@ -110,6 +120,7 @@ class IndexingBloc extends Bloc<IndexingEvent, IndexingState> {
     Emitter<IndexingState> emit,
   ) async {
     final workId = ++_nextWorkId;
+    final runClock = Stopwatch()..start();
     _activeWorkId = workId;
 
     final totalCandidates = event.library
@@ -163,7 +174,7 @@ class IndexingBloc extends Bloc<IndexingEvent, IndexingState> {
         return;
       }
       _activeWorkId = null;
-      _reportRunFailures(result);
+      _reportRunFailures(result, runClock.elapsed);
       if (result.completed) {
         emit(IndexingComplete(failures: result.failures));
       } else {
@@ -190,6 +201,7 @@ class IndexingBloc extends Bloc<IndexingEvent, IndexingState> {
     Emitter<IndexingState> emit,
   ) async {
     final workId = ++_nextWorkId;
+    final runClock = Stopwatch()..start();
     _activeWorkId = workId;
 
     // Set initial state
@@ -211,6 +223,9 @@ class IndexingBloc extends Bloc<IndexingEvent, IndexingState> {
         onFinalizing: () {
           add(IndexingFinalizing(workId));
         },
+        onFinalizingProgress: (fraction) {
+          add(IndexingFinalizeProgress(workId, fraction));
+        },
         onProgress: (processed, total) {
           // Update progress through event
           add(
@@ -226,7 +241,7 @@ class IndexingBloc extends Bloc<IndexingEvent, IndexingState> {
         return;
       }
       _activeWorkId = null;
-      _reportRunFailures(result);
+      _reportRunFailures(result, runClock.elapsed);
       if (result.completed && totalBooks > 0) {
         emit(IndexingComplete(failures: result.failures));
       } else {
@@ -283,6 +298,23 @@ class IndexingBloc extends Bloc<IndexingEvent, IndexingState> {
     );
   }
 
+  void _onFinalizeProgress(
+    IndexingFinalizeProgress event,
+    Emitter<IndexingState> emit,
+  ) {
+    if (_activeWorkId != event.workId) return;
+    final currentState = state;
+    if (currentState is! IndexingInProgress) return;
+    _finalizingProgress = event.fraction;
+    emit(
+      _inProgress(
+        booksProcessed: currentState.booksProcessed,
+        totalBooks: currentState.totalBooks,
+        isCreatingIndex: currentState.isCreatingIndex,
+      ),
+    );
+  }
+
   /// מטפל באינדוקס של רשימת ספרים — חדשים (IndexSpecificBooks) או
   /// כאלה שתוכנם השתנה (ReindexChangedBooks, עם [reindex] פעיל).
   Future<void> _onBooksWork(
@@ -292,6 +324,7 @@ class IndexingBloc extends Bloc<IndexingEvent, IndexingState> {
     required bool reindex,
   }) async {
     final workId = ++_nextWorkId;
+    final runClock = Stopwatch()..start();
     _activeWorkId = workId;
 
     if (books.isEmpty) {
@@ -328,7 +361,7 @@ class IndexingBloc extends Bloc<IndexingEvent, IndexingState> {
         return;
       }
       _activeWorkId = null;
-      _reportRunFailures(result);
+      _reportRunFailures(result, runClock.elapsed);
       if (result.completed) {
         emit(IndexingComplete(failures: result.failures));
       } else {
@@ -349,8 +382,11 @@ class IndexingBloc extends Bloc<IndexingEvent, IndexingState> {
     }
   }
 
-  void _reportRunFailures(IndexingRunResult result) {
-    if (result.failures.isNotEmpty) _reportFailures(result);
+  void _reportRunFailures(IndexingRunResult result, Duration elapsed) {
+    if (result.failures.isNotEmpty ||
+        IndexingFailureReporter.isSlowRun(elapsed)) {
+      _reportFailures(result, elapsed);
+    }
   }
 
   Future<void> _onCheckIndexStatus(
@@ -440,9 +476,17 @@ class IndexingBloc extends Bloc<IndexingEvent, IndexingState> {
     ClearIndex event,
     Emitter<IndexingState> emit,
   ) async {
+    if (_rejectIndexMutationInSecondaryWindow(emit)) return;
     _activeWorkId = null;
-    await _repository.clearIndex();
+    if (!await _repository.clearIndex()) return;
     emit(IndexingInitial());
+  }
+
+  bool _rejectIndexMutationInSecondaryWindow(Emitter<IndexingState> emit) {
+    if (!WindowRole.isSecondary) return false;
+    UiSnack.show(WindowMessages.indexingOnlyInMainWindow);
+    emit(IndexingInitial());
+    return true;
   }
 
   /// Handles the UpdateIndexingProgress event

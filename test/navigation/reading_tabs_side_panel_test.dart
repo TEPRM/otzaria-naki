@@ -3,7 +3,9 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:otzaria/models/books.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:otzaria/history/bloc/history_bloc.dart';
 import 'package:otzaria/history/bloc/history_event.dart';
@@ -21,18 +23,32 @@ import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
 import 'package:otzaria/tabs/bloc/tabs_event.dart';
 import 'package:otzaria/tabs/bloc/tabs_state.dart';
 import 'package:otzaria/tabs/models/combined_tab.dart';
+import 'package:otzaria/tabs/models/pdf_tab.dart';
 import 'package:otzaria/tabs/models/tab.dart';
+import 'package:otzaria/tabs/models/text_tab.dart';
+import 'package:otzaria/text_book/bloc/text_book_bloc.dart';
+import 'package:otzaria/text_book/bloc/text_book_event.dart';
+import 'package:otzaria/text_book/bloc/text_book_state.dart';
 import 'package:otzaria/workspaces/bloc/workspace_bloc.dart';
 import 'package:otzaria/workspaces/bloc/workspace_state.dart';
+import '../helpers/memory_settings_cache.dart';
 
 class _StubTab extends OpenedTab {
   _StubTab(super.title);
+
+  /// stub חסר state — אין מה לשכפל.
+  @override
+  OpenedTab clone() => this;
 
   @override
   Map<String, dynamic> toJson() => {'type': '_StubTab', 'title': title};
 }
 
 void main() {
+  setUpAll(() async {
+    await Settings.init(cacheProvider: MemorySettingsCache());
+  });
+
   late _TestTabsBloc tabsBloc;
   late _TestSettingsBloc settingsBloc;
   late _TestHistoryBloc historyBloc;
@@ -172,6 +188,32 @@ void main() {
       find.byTooltip('כותרת ארוכה במיוחד שאינה נכנסת בעמודה צרה'),
       findsOneWidget,
     );
+  });
+
+  testWidgets('tooltip של טאב טקסט שטרם נבנה כולל את המיקום מה-DB', (
+    tester,
+  ) async {
+    await Settings.init(cacheProvider: MemorySettingsCache());
+    final original = TextBookTab.locationTitleResolver;
+    TextBookTab.locationTitleResolver = (_, _) async => 'פרק ב';
+    addTearDown(() => TextBookTab.locationTitleResolver = original);
+
+    TextBookTab makeTab() {
+      final tab = TextBookTab(
+        book: TextBook(title: 'ספר א'),
+        index: 0,
+        splitedView: false,
+        blocOverride: _StubTextBookBloc(),
+      );
+      addTearDown(tab.dispose);
+      return tab;
+    }
+
+    await pumpPanel(tester, width: 300, withTabs: [makeTab()]);
+    expect(find.byTooltip('ספר א, פרק ב'), findsOneWidget);
+
+    await pumpPanel(tester, collapsed: true, withTabs: [makeTab()]);
+    expect(find.byTooltip('ספר א, פרק ב'), findsOneWidget);
   });
 
   testWidgets('במצב מכווץ אין ידית לשינוי רוחב', (tester) async {
@@ -403,6 +445,43 @@ void main() {
     expect(tabsBloc.addedEvents.whereType<SetCurrentTab>(), isEmpty);
   });
 
+  testWidgets('נעצי כרטיסיות מוצמדות מיושרים גם כשהפעילה מציגה X', (
+    tester,
+  ) async {
+    final pdfTab = PdfBookTab(
+      book: PdfBook(title: 'ספר PDF', path: '/tmp/book.pdf'),
+      pageNumber: 1,
+    )..isPinned = true;
+    addTearDown(pdfTab.dispose);
+    final textTab = _StubTab('ספר ב')..isPinned = true;
+    await pumpPanel(tester, withTabs: [pdfTab, textTab]);
+
+    final pdfIcon = tester.getCenter(
+      find.byIcon(FluentIcons.document_pdf_16_regular),
+    );
+    final pdfTitle = tester.getCenter(find.text('ספר PDF'));
+    final textTitle = tester.getCenter(find.text('ספר ב'));
+    final pinFinder = find.byIcon(FluentIcons.pin_24_filled);
+    expect(pinFinder, findsNWidgets(2));
+    final pins = [
+      tester.getCenter(pinFinder.at(0)),
+      tester.getCenter(pinFinder.at(1)),
+    ];
+
+    // RTL: הפריט הראשון בשורה הוא הימני ביותר.
+    expect(pdfIcon.dx, greaterThan(pdfTitle.dx));
+    for (final pin in pins) {
+      expect(
+        pin.dx,
+        lessThan(pdfTitle.dx),
+        reason: 'הנעץ בקצה השמאלי, אחרי הכותרת (issue #1134)',
+      );
+      expect(pin.dx, lessThan(textTitle.dx));
+    }
+    // הנעצים של כרטיסיית PDF ושל כרטיסיית טקסט מיושרים באותו קו אנכי.
+    expect(pins[0].dx, closeTo(pins[1].dx, 0.5));
+  });
+
   testWidgets('לחיצה ימנית על כרטיסיה פותחת את תפריט ההקשר', (tester) async {
     await pumpPanel(tester);
 
@@ -418,6 +497,26 @@ void main() {
     await tester.tap(find.text('סגור הכל'));
     await tester.pumpAndSettle();
     expect(tabsBloc.addedEvents.whereType<CloseAllTabs>(), isNotEmpty);
+  });
+
+  testWidgets('"סגור את האחרים" שומר את הכרטיסייה שנלחצה, לא את הפעילה', (
+    tester,
+  ) async {
+    await pumpPanel(tester);
+
+    await tester.tapAt(
+      tester.getCenter(find.text('ספר ג')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('סגור את האחרים'));
+    await tester.pumpAndSettle();
+
+    expect(
+      tabsBloc.addedEvents.whereType<CloseOtherTabs>().single.keepTab,
+      same(tabs[2]),
+      reason: 'הכרטיסייה הפעילה היא "ספר א" — issue #1094',
+    );
   });
 
   testWidgets('במגע הכרטיסיות נגררות בלחיצה ארוכה', (tester) async {
@@ -581,4 +680,17 @@ class _TestHistoryBloc extends Cubit<HistoryState> implements HistoryBloc {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _StubTextBookBloc extends Bloc<TextBookEvent, TextBookState>
+    implements TextBookBloc {
+  _StubTextBookBloc()
+    : super(
+        TextBookInitial.named(TextBook(title: 'ספר א'), 0, false, const []),
+      ) {
+    on<TextBookEvent>((_, _) {});
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation i) => super.noSuchMethod(i);
 }

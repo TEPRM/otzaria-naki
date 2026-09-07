@@ -9,6 +9,24 @@ import 'package:otzaria/widgets/misc/app_popup_menu.dart';
 /// לחצן סרגל מפוצל בסגנון [BarButton]: החלק עם האייקון מפעיל את [onPressed],
 /// והחלק עם החץ פותח את [entries]. שני החלקים חולקים רקע ומופרדים בקו דק.
 class BarSplitButton<T> extends StatefulWidget {
+  static const double compactHeight = 36.0;
+  static const double regularHeight = 40.0;
+
+  static const double compactActionWidth = 34.0;
+  static const double regularActionWidth = 38.0;
+
+  static const double compactArrowWidth = 22.0;
+  static const double regularArrowWidth = 24.0;
+
+  static const double dividerWidth = 1.0;
+  static const double outerHorizontalPadding = 2.0;
+
+  static double toolbarWidth(bool compact) =>
+      (compact ? compactActionWidth : regularActionWidth) +
+      dividerWidth +
+      (compact ? compactArrowWidth : regularArrowWidth) +
+      outerHorizontalPadding * 2;
+
   final IconData icon;
 
   /// tooltip של החלק הראשי.
@@ -20,6 +38,9 @@ class BarSplitButton<T> extends StatefulWidget {
   /// פריטי התפריט שנפתח מהחץ. רשימה ריקה → החץ מושבת.
   final List<AppMenuEntry<T>> entries;
   final ValueChanged<T>? onSelected;
+
+  /// כשמוגדר, החץ מפעיל אותו (עם ההקשר של העוגן) במקום לפתוח את [entries].
+  final void Function(BuildContext anchorContext)? onArrowPressed;
 
   /// הפריט המסומן בתפריט (✓).
   final T? initialValue;
@@ -34,6 +55,7 @@ class BarSplitButton<T> extends StatefulWidget {
     required this.onPressed,
     required this.entries,
     required this.onSelected,
+    this.onArrowPressed,
     this.initialValue,
     this.menuTooltip = 'אפשרויות נוספות',
     this.compact = false,
@@ -50,6 +72,10 @@ class _BarSplitButtonState<T> extends State<BarSplitButton<T>> {
   Future<void> _openMenu() async {
     final anchorContext = _anchorKey.currentContext;
     if (anchorContext == null) return;
+    if (widget.onArrowPressed != null) {
+      widget.onArrowPressed!(anchorContext);
+      return;
+    }
     final selected = await showAnchoredAppMenu<T>(
       context: context,
       anchorContext: anchorContext,
@@ -73,15 +99,25 @@ class _BarSplitButtonState<T> extends State<BarSplitButton<T>> {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final actionEnabled = widget.onPressed != null;
-    final menuEnabled = widget.entries.isNotEmpty && widget.onSelected != null;
+    final menuEnabled =
+        widget.onArrowPressed != null ||
+        (widget.entries.isNotEmpty && widget.onSelected != null);
 
     Color foreground(bool enabled) => !enabled
         ? theme.disabledColor
         : (widget.selected ? cs.onSecondaryContainer : cs.onSurfaceVariant);
 
-    final double height = widget.compact ? 36 : 40;
-    final double actionWidth = widget.compact ? 34 : 38;
-    final double arrowWidth = widget.compact ? 22 : 24;
+    final double height = widget.compact
+        ? BarSplitButton.compactHeight
+        : BarSplitButton.regularHeight;
+
+    final double actionWidth = widget.compact
+        ? BarSplitButton.compactActionWidth
+        : BarSplitButton.regularActionWidth;
+
+    final double arrowWidth = widget.compact
+        ? BarSplitButton.compactArrowWidth
+        : BarSplitButton.regularArrowWidth;
     final radius = Radius.circular(height / 2);
     final direction = Directionality.of(context);
 
@@ -107,7 +143,9 @@ class _BarSplitButtonState<T> extends State<BarSplitButton<T>> {
     }
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 2),
+      padding: const EdgeInsets.symmetric(
+        horizontal: BarSplitButton.outerHorizontalPadding,
+      ),
       child: AnimatedContainer(
         key: _anchorKey,
         duration: AppTokens.animFast,
@@ -137,7 +175,7 @@ class _BarSplitButtonState<T> extends State<BarSplitButton<T>> {
                 ),
               ),
               Container(
-                width: 1,
+                width: BarSplitButton.dividerWidth,
                 height: height - 16,
                 color: cs.outlineVariant,
               ),

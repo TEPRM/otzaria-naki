@@ -1,3 +1,5 @@
+import 'package:otzaria/shortcuts/dynamic/dynamic_shortcut.dart';
+import 'package:otzaria/text_display/view/copy_as_menu.dart';
 import 'dart:async';
 import 'package:flutter/gestures.dart' show kPrimaryMouseButton;
 import 'package:flutter/cupertino.dart'
@@ -11,6 +13,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/search/models/search_configuration.dart';
 import 'package:otzaria/settings/settings_exports.dart';
 import 'package:otzaria/shortcuts/shortcut_helper.dart';
+import 'package:otzaria/shortcuts/shortcut_validator.dart';
 import 'package:otzaria/text_book/bloc/text_book_bloc.dart';
 import 'package:otzaria/text_book/bloc/text_book_state.dart';
 import 'package:otzaria/text_book/utils/reader_build_policy.dart';
@@ -41,8 +44,7 @@ import 'package:otzaria/widgets/misc/app_menu_exports.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:otzaria/utils/text/copy_utils.dart';
-import 'package:otzaria/utils/ui/context_menu_utils.dart'
-    show showCopyWithoutNikud;
+import 'package:otzaria/utils/ui/context_menu_utils.dart' show ContextMenuUtils;
 import 'package:otzaria/core/messages/text_book_messages.dart';
 import 'package:otzaria/core/ui_snack.dart';
 import 'package:otzaria/utils/text/global_search_helper.dart';
@@ -87,6 +89,7 @@ import 'package:otzaria/text_book/utils/numbered_note_markers.dart';
 import 'package:otzaria/text_book/utils/reading_segments.dart';
 import 'package:otzaria/text_book/utils/reading_segment_navigation.dart';
 import 'package:otzaria/text_book/view/widgets/continuous_reading_paragraph.dart';
+import 'package:otzaria/text_display/text_display_exports.dart';
 import 'package:otzaria/theme/theme_exports.dart';
 import 'package:otzaria/utils/text/html_link_handler.dart';
 import 'package:otzaria/widgets/misc/link_preview_overlay.dart';
@@ -132,7 +135,7 @@ Map<String, dynamic> buildPageShapePluginSelectionPayload({
 }
 
 /// הפעולה שיש לבצע על אירוע מקלדת בחלונית מפרש (בצורת הדף).
-enum CommentaryKeyAction { none, copy, addNote }
+enum CommentaryKeyAction { none, copy, addNote, reportError }
 
 /// מחליטה איזו פעולה לבצע על אירוע מקלדת בחלונית מפרש, ללא תופעות לוואי.
 ///
@@ -149,6 +152,8 @@ CommentaryKeyAction resolveCommentaryKeyAction({
   required bool hasSelection,
   required bool hasSelectedIndex,
   required String addNoteShortcut,
+  String reportErrorShortcut = '',
+  bool isReportBookUserBook = false,
   bool? isControlPressed,
   bool? isShiftPressed,
   bool? isAltPressed,
@@ -175,6 +180,19 @@ CommentaryKeyAction resolveCommentaryKeyAction({
   );
   if (matchesAddNote && hasSelectedIndex) {
     return CommentaryKeyAction.addNote;
+  }
+
+  if (!isReportBookUserBook &&
+      reportErrorShortcut.isNotEmpty &&
+      ShortcutHelper.matchesShortcut(
+        event,
+        reportErrorShortcut,
+        isControlPressed: isControlPressed,
+        isShiftPressed: isShiftPressed,
+        isAltPressed: isAltPressed,
+        isMetaPressed: isMetaPressed,
+      )) {
+    return CommentaryKeyAction.reportError;
   }
 
   return CommentaryKeyAction.none;
@@ -412,6 +430,10 @@ class SimpleTextViewer extends StatefulWidget {
   static bool get commentaryNoteHandledRecently =>
       _SimpleTextViewerState._commentaryNoteHandled;
 
+  /// כמו [commentaryNoteHandledRecently], עבור קיצור "דווח על טעות בספר".
+  static bool get commentaryReportHandledRecently =>
+      _SimpleTextViewerState._commentaryReportHandled;
+
   @override
   State<SimpleTextViewer> createState() => _SimpleTextViewerState();
 }
@@ -421,6 +443,8 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
   static bool _commentaryCopyHandled = false;
   // דגל סטטי: מונע מהטקסט הראשי לפתוח הערה כפולה אחרי שמפרש טיפל בקיצור
   static bool _commentaryNoteHandled = false;
+  // דגל סטטי: מונע מהטקסט הראשי לפתוח דיווח כפול אחרי שמפרש טיפל בקיצור
+  static bool _commentaryReportHandled = false;
   // מצביע סטטי: רק הפרשן האחרון שנבחר בו טקסט מטפל ב-Ctrl+C
   static _SimpleTextViewerState? _lastActiveCommentary;
 
@@ -527,7 +551,12 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
 
   /// סמני עוגן של מפרש-על (שער הציון וכד') בעמודת מפרש — מקור הקישורים הוא
   /// המפה שסופקה לחלונית, לא ה-state של הספר הראשי.
-  String _injectOwnAnchorMarkers(String rawLine, int lineIndex) {
+  String _injectOwnAnchorMarkers(
+    String rawLine,
+    int lineIndex,
+    TextBookLoaded state,
+  ) {
+    if (!state.commentaryDisplayProfile.showAnchorMarkers) return rawLine;
     final anchorLinks = _ownAnchorLinksAt(lineIndex);
     if (anchorLinks.isEmpty) return rawLine;
     return injectLinkAnchorMarkers(
@@ -554,6 +583,7 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
     ).isNotEmpty) {
       result = addNumberedNoteMarkerLinks(result, lineIndex: lineIndex);
     }
+    if (!state.bodyDisplayProfile.showAnchorMarkers) return result;
     // מהדורה חלופית: העוגנים ממופים לנוסח הראשי — במיקומים שגויים כאן.
     if (state.book.versionTitle != null) return result;
     final anchorLinks = (state.linksByLine[lineIndex + 1] ?? const <Link>[])
@@ -861,6 +891,10 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
         widget.positionsListener ?? ItemPositionsListener.create();
     _selectionFocusNode = FocusNode(debugLabel: 'SelectionAreaFocus');
     _resolvedKeyboardFocusNode;
+    final dynamicTab = widget.tab;
+    if (dynamicTab is TextBookTab) {
+      dynamicTab.dynamicCopyRequestNotifier.addListener(_onDynamicCopyRequest);
+    }
 
     // מאזין גלובלי לקיצורי מפרש (העתקה / הוספת הערה) ללא צורך בפוקוס
     if (!widget.isMainText) {
@@ -949,6 +983,13 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
   bool _handleCommentaryKeyEvent(KeyEvent event) {
     final addNoteShortcut =
         Settings.getValue<String>('key-shortcut-add-note') ?? 'ctrl+n';
+    final reportErrorShortcut =
+        ShortcutValidator.getShortcutValue(ShortcutValidator.reportErrorKey) ??
+        '';
+    final state = context.read<TextBookBloc>().state;
+    final isReportBookUserBook =
+        widget.reportBook?.isUserBook ??
+        (state is TextBookLoaded && state.book.isUserBook);
     final action = resolveCommentaryKeyAction(
       event: event,
       isActiveCommentary: _lastActiveCommentary == this,
@@ -956,7 +997,15 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
           _savedSelectedText != null && _savedSelectedText!.trim().isNotEmpty,
       hasSelectedIndex: _savedSelectedIndex != null,
       addNoteShortcut: addNoteShortcut,
+      reportErrorShortcut: reportErrorShortcut,
+      isReportBookUserBook: isReportBookUserBook,
     );
+
+    if (isReportBookUserBook &&
+        reportErrorShortcut.isNotEmpty &&
+        ShortcutHelper.matchesShortcut(event, reportErrorShortcut)) {
+      return true;
+    }
 
     switch (action) {
       case CommentaryKeyAction.copy:
@@ -980,6 +1029,13 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
         });
         _createNoteForCurrentLine(_savedSelectedIndex!);
         return true;
+      case CommentaryKeyAction.reportError:
+        _commentaryReportHandled = true;
+        Future.delayed(const Duration(milliseconds: 100), () {
+          _commentaryReportHandled = false;
+        });
+        _openErrorReportDialog(_savedSelectedText ?? '');
+        return true;
       case CommentaryKeyAction.none:
         return false;
     }
@@ -991,6 +1047,12 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
       _handlePluginHighlightReveal,
     );
     _disposed = true;
+    final dynamicTab = widget.tab;
+    if (dynamicTab is TextBookTab) {
+      dynamicTab.dynamicCopyRequestNotifier.removeListener(
+        _onDynamicCopyRequest,
+      );
+    }
     _cancelPendingPreview();
     if (widget.isMainText) LinkPreviewOverlay.dismiss();
     widget.selectionSyncController?.removeListener(
@@ -1247,27 +1309,20 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
     return segmentIndexForLine(state.readingSegments, lineIndex);
   }
 
-  /// מצב הניקוד של הטור. טור מפרש אינו תנ"ך, ולכן חל עליו מצב המפרשים
+  /// היעד של הטור. טור מפרש אינו תנ"ך, ולכן חל עליו פרופיל המפרשים
   /// ולא הפטור שהתנ"ך מקבל מהגדרת "הצג ניקוד בתנ"ך".
-  bool _removeNikud(TextBookLoaded state) =>
-      widget.isMainText ? state.removeNikud : state.commentaryRemoveNikud;
+  TextTarget get _textTarget =>
+      widget.isMainText ? TextTarget.body : TextTarget.commentary;
 
-  /// מצב הפיסוק של הטור, באותו היגיון של [_removeNikud].
-  bool _removePunctuation(TextBookLoaded state) => widget.isMainText
-      ? state.removePunctuation
-      : state.commentaryRemovePunctuation;
+  TextDisplayProfile _displayProfile(TextBookLoaded state) =>
+      state.displayProfile(target: _textTarget);
 
   RenderSettings _selectionRenderSettings({
     required TextBookLoaded state,
     required SettingsState settingsState,
-    required bool removeNikud,
   }) {
-    return RenderSettings(
-      removeNikud: removeNikud,
-      removePunctuation: _removePunctuation(state),
-      removeTeamim: !settingsState.showTeamim,
-      replaceHolyNames: settingsState.replaceHolyNames,
-      holyNameStyle: settingsState.holyNameStyle,
+    return RenderSettings.fromProfile(
+      _displayProfile(state),
       searchText: widget.isMainText ? state.searchText : '',
       searchOptions: widget.isMainText ? state.searchOptions : const {},
       alternativeWords: widget.isMainText ? state.alternativeWords : const {},
@@ -1343,12 +1398,10 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
     }
 
     final settingsState = context.read<SettingsBloc>().state;
-    final removeNikud = _removeNikud(textBookState);
     final sourceIndices = _selectionSourceIndices();
     final renderSettings = _selectionRenderSettings(
       state: textBookState,
       settingsState: settingsState,
-      removeNikud: removeNikud,
     );
     final window = buildSelectionWindow(
       visibleIndices: sourceIndices,
@@ -1765,17 +1818,7 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
             ),
         ]),
       );
-      // "העתק בלי ניקוד" (issue #851) — רק כשהבחירה מנוקדת; העותק בלבד
-      // מנוקה, התצוגה לא משתנה.
-      if (showCopyWithoutNikud(capturedText)) {
-        entries.add(
-          AppContextMenuEntry(
-            label: 'העתק בלי ניקוד',
-            icon: FluentIcons.text_clear_formatting_24_regular,
-            onTap: () => _copyFormattedText(capturedText, true),
-          ),
-        );
-      }
+      entries.add(_copyAsEntry(state, capturedText));
       entries.add(const AppContextMenuEntry.divider());
 
       entries.add(
@@ -1805,7 +1848,7 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
     if (widget.isMainText) {
       entries.add(
         AppContextMenuEntry(
-          label: 'מפרשים',
+          label: kParagraphCommentatorsMenuLabel,
           icon: OtzariaIcons.book_24_regular,
           enabled: state.availableCommentators.isNotEmpty,
           childrenBuilder: () => _buildCommentatorsMenuItems(state, index),
@@ -1886,12 +1929,7 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
           enabled: capturedText != null && capturedText.trim().isNotEmpty,
           onTap: () => _copyFormattedText(capturedText),
         ),
-        if (showCopyWithoutNikud(capturedText))
-          AppContextMenuEntry(
-            label: 'העתק בלי ניקוד',
-            icon: FluentIcons.text_clear_formatting_24_regular,
-            onTap: () => _copyFormattedText(capturedText, true),
-          ),
+        _copyAsEntry(state, capturedText),
       ],
       AppContextMenuEntry(
         label: 'העתק את כל הפסקה',
@@ -1912,7 +1950,6 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
         final selectionSettings = _selectionRenderSettings(
           state: state,
           settingsState: menuContext.read<SettingsBloc>().state,
-          removeNikud: _removeNikud(state),
         );
         if (!hasPluginSelection) {
           entries.addAll(
@@ -2124,8 +2161,8 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
     ];
   }
 
-  /// פריטי תת-התפריט "מפרשים" — זהים לתצוגה הרגילה, ומשנים את בחירת המפרשים
-  /// שמוצגת בלשונית המפרשים בחלונית הצד (לא את טורי צורת הדף).
+  /// פריטי תת-התפריט "מפרשים על פסקה זו" — זהים לתצוגה הרגילה, ומשנים את
+  /// בחירת המפרשים שבלשונית המפרשים בחלונית הצד (לא את טורי צורת הדף).
   List<AppContextMenuEntry> _buildCommentatorsMenuItems(
     TextBookLoaded state,
     int index,
@@ -2150,8 +2187,14 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
 
     return buildCommentatorsContextMenuChildren(
       activeCommentators: state.activeCommentators,
-      availableCommentators: state.availableCommentators,
+      availableCommentators: paragraphCommentators(
+        availableCommentators: state.availableCommentators,
+        content: widget.content,
+        paragraphIndex: index,
+        linksByLine: state.linksByLine,
+      ),
       commentatorGroups: state.commentatorGroups,
+      linksLoading: state.linksLoading,
       onOpenPane: showOpenPane && widget.onOpenCommentatorsPane != null
           ? () {
               selectClickedLine();
@@ -2347,7 +2390,10 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
   // }
 
   /// העתקת פסקה לפי אינדקס
-  Future<void> _copyParagraphByIndex(int index) async {
+  Future<void> _copyParagraphByIndex(
+    int index, {
+    TextDisplayProfile? profile,
+  }) async {
     if (index < 0 || index >= widget.content.length) return;
 
     final text = widget.content[index];
@@ -2356,10 +2402,18 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
     final settingsState = context.read<SettingsBloc>().state;
     final textBookState = context.read<TextBookBloc>().state;
 
-    // ההעתקה משקפת את התצוגה, ולכן עוברת באותו מסלול ניקוד.
-    final removeNikud =
-        textBookState is TextBookLoaded && _removeNikud(textBookState);
-    final processedText = removeNikud ? utils.removeVolwels(text) : text;
+    // ההעתקה משקפת את התצוגה — פרופיל ערוץ ההעתקה של הטור (או פרופיל
+    // מפורש מ"העתק כ..." / קיצור דינמי).
+    final processedText = textBookState is TextBookLoaded
+        ? applyTextDisplayProfile(
+            text,
+            profile ??
+                textBookState.displayProfile(
+                  target: _textTarget,
+                  channel: TextChannel.copy,
+                ),
+          )
+        : text;
 
     final plainText = utils.stripHtmlIfNeeded(processedText);
 
@@ -2395,11 +2449,11 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
       );
     }
 
+    // שם הוי"ה כבר הוחלף לפי פרופיל ההעתקה — לא להחיל שוב.
     final copyContent = CopyUtils.applyCopyPreferencesForClipboard(
       plainText: finalText,
       htmlText: finalHtmlText,
-      replaceHolyNames: settingsState.replaceHolyNames,
-      holyNameStyle: settingsState.holyNameStyle,
+      replaceHolyNames: false,
     );
 
     final item = DataWriterItem();
@@ -2420,9 +2474,48 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
   }
 
   /// העתקת טקסט מעוצב
+  /// "העתק כ..." — וריאציות ההעתקה מפרופיל ערוץ ההעתקה של הטור.
+  AppContextMenuEntry _copyAsEntry(TextBookLoaded state, String? selectedText) {
+    final hasSelection = selectedText != null && selectedText.trim().isNotEmpty;
+    return AppContextMenuEntry(
+      label: 'העתק כ...',
+      icon: FluentIcons.text_clear_formatting_24_regular,
+      enabled: hasSelection,
+      children: buildCopyAsMenuEntries(
+        base: state.displayProfile(
+          target: _textTarget,
+          channel: TextChannel.copy,
+        ),
+        hasSelection: hasSelection,
+        onCopy: (profile) => _copyFormattedText(selectedText, false, profile),
+      ),
+    );
+  }
+
+  /// בקשת העתקה מקיצור דינמי — רק הטור שיעדו תואם מטפל בה.
+  void _onDynamicCopyRequest() {
+    final tab = widget.tab;
+    if (tab is! TextBookTab || !mounted) return;
+    final request = tab.dynamicCopyRequestNotifier.value;
+    if (request == null || request.target != _textTarget) return;
+    tab.dynamicCopyRequestNotifier.value = null;
+    switch (request.kind) {
+      case DynamicShortcutKind.copySelectionWith:
+        _copyFormattedText(null, false, request.profile);
+      case DynamicShortcutKind.copyParagraphWith:
+        final index = _savedSelectedIndex;
+        if (index != null) {
+          _copyParagraphByIndex(index, profile: request.profile);
+        }
+      case DynamicShortcutKind.setTextDisplay:
+        break;
+    }
+  }
+
   Future<void> _copyFormattedText([
     String? capturedText,
     bool removeNikud = false,
+    TextDisplayProfile? profile,
   ]) async {
     // מפרש כבר טיפל בהעתקה - לא נדרוס
     if (widget.isMainText && _commentaryCopyHandled) return;
@@ -2452,6 +2545,7 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
             ? widget.content
             : null,
         removeNikud: removeNikud,
+        copyProfile: profile,
       );
     } catch (e) {
       if (mounted) {
@@ -2626,6 +2720,9 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
                                 ? ScrollablePositionedListScrollbar(
                                     scrollController: _scrollController,
                                     itemPositionsListener: _positionsListener,
+                                    offsetController: widget.isMainText
+                                        ? state.scrollOffsetController
+                                        : widget.scrollOffsetController,
                                     itemCount: itemCount,
                                     labelForIndex: widget.labelForIndex,
                                     child: SmoothWheelScroll(
@@ -2884,13 +2981,19 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
                 : _savedSelectedText?.trim().isNotEmpty == true
                 ? _savedSelectedText
                 : savedTextAtBuild;
-            return _buildContextMenu(
-              state,
-              primaryLineIndex,
-              menuCtx,
-              tapPos,
-              currentSelectedText,
-            );
+            return [
+              ...ContextMenuUtils.buildInlineLinkContextMenuEntries(
+                menuCtx,
+                tapPos,
+              ),
+              ..._buildContextMenu(
+                state,
+                primaryLineIndex,
+                menuCtx,
+                tapPos,
+                currentSelectedText,
+              ),
+            ];
           },
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 200),
@@ -2916,7 +3019,7 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
                 if (widget.isMainText) {
                   data = _injectPreviewMarkers(data, primaryLineIndex, state);
                 } else if (hasOwnAnchors) {
-                  data = _injectOwnAnchorMarkers(data, primaryLineIndex);
+                  data = _injectOwnAnchorMarkers(data, primaryLineIndex, state);
                 }
 
                 // הדגשת טקסט ממוקד: highlightText מופעל רק בשורה permanentHighlightLine
@@ -2970,12 +3073,8 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
                       : null,
                   highlightSourceText: widget.isMainText ? data : null,
                   widgetKey: ValueKey('html_simple_text_$primaryLineIndex'),
-                  settings: RenderSettings(
-                    removeNikud: _removeNikud(state),
-                    removePunctuation: _removePunctuation(state),
-                    removeTeamim: !settingsState.showTeamim,
-                    replaceHolyNames: settingsState.replaceHolyNames,
-                    holyNameStyle: settingsState.holyNameStyle,
+                  settings: RenderSettings.fromProfile(
+                    _displayProfile(state),
                     searchText: searchText,
                     highlightYellowBackground:
                         widget.isMainText &&
@@ -3118,6 +3217,8 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
             decoration: TextDecoration.underline,
           ),
           anchorActiveBackground: colorScheme.primaryContainer,
+          onMiddleClickUrl: (url) =>
+              HtmlLinkHandler.openLinkInBackground(context, url),
           onTapUrl: (url) async {
             if (url.startsWith('otzaria://anchor')) {
               return _handlePreviewTap(url);
@@ -3259,12 +3360,8 @@ class _SimpleTextViewerState extends State<SimpleTextViewer> {
         ? state.searchMode
         : SearchMode.exact;
 
-    final renderSettings = RenderSettings(
-      removeNikud: _removeNikud(state),
-      removePunctuation: _removePunctuation(state),
-      removeTeamim: !settingsState.showTeamim,
-      replaceHolyNames: settingsState.replaceHolyNames,
-      holyNameStyle: settingsState.holyNameStyle,
+    final renderSettings = RenderSettings.fromProfile(
+      _displayProfile(state),
       searchText: searchText,
       searchOptions: useStateSearchSettings ? state.searchOptions : const {},
       alternativeWords: useStateSearchSettings

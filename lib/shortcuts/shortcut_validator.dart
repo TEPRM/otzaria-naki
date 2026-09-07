@@ -21,6 +21,9 @@ class ShortcutValidator {
   static const String openAdvancedSearchKey =
       'key-shortcut-open-advanced-search';
 
+  /// דיווח על טעות בספר — פועל רק כשיש בחירה בטקסט או קטע נבחר.
+  static const String reportErrorKey = 'key-shortcut-report-error';
+
   static const Set<Set<String>> _compatibleShortcutGroups = {
     {'key-shortcut-add-note', 'key-shortcut-calendar-toggle-events'},
     {
@@ -139,6 +142,18 @@ class ShortcutValidator {
   static Map<String, PluginShortcutTarget> get pluginShortcuts =>
       _pluginShortcuts;
 
+  /// קיצורים דינמיים (פעולה + פרמטרים שהמשתמש הגדיר) — מפתח סינתטי →
+  /// תווית וערך המקש. נדחף מ-DynamicShortcutRegistry.
+  static Map<String, ({String label, String key})> _dynamicShortcuts = const {};
+
+  static void registerDynamicShortcuts(
+    Map<String, ({String label, String key})> shortcuts,
+  ) {
+    _dynamicShortcuts = Map.unmodifiable(shortcuts);
+  }
+
+  static Iterable<String> get dynamicShortcutKeys => _dynamicShortcuts.keys;
+
   /// המפתחות של קיצורי המקלדת שהתוספים הצהירו עליהם כעת.
   static Iterable<String> get declaredPluginShortcutKeys =>
       _pluginShortcuts.keys;
@@ -148,6 +163,7 @@ class ShortcutValidator {
     ..._baseShortcutKeys,
     ..._pluginShortcutNames.keys,
     ..._pluginShortcuts.keys,
+    ..._dynamicShortcuts.keys,
   ];
 
   static const List<String> _baseShortcutKeys = [
@@ -188,6 +204,7 @@ class ShortcutValidator {
     'key-shortcut-next-segment',
     'key-shortcut-prev-toc',
     'key-shortcut-next-toc',
+    reportErrorKey,
     // פתיחת כלים — אופציונלי, ללא ברירת מחדל (ראה openToolShortcutKeys).
     'key-shortcut-open-tool-calendar',
     'key-shortcut-open-tool-shamor-zachor',
@@ -241,6 +258,7 @@ class ShortcutValidator {
     'key-shortcut-next-segment': 'alt+arrowdown',
     'key-shortcut-prev-toc': 'alt+pageup',
     'key-shortcut-next-toc': 'alt+pagedown',
+    reportErrorKey: 'ctrl+shift+r',
     'key-shortcut-open-tool-calendar': '',
     'key-shortcut-open-tool-shamor-zachor': '',
     'key-shortcut-open-tool-measurements': '',
@@ -259,6 +277,7 @@ class ShortcutValidator {
     ..._baseShortcutNames,
     ..._pluginShortcutNames,
     for (final entry in _pluginShortcuts.entries) entry.key: entry.value.label,
+    for (final entry in _dynamicShortcuts.entries) entry.key: entry.value.label,
   };
 
   static const Map<String, String> _baseShortcutNames = {
@@ -298,6 +317,7 @@ class ShortcutValidator {
     'key-shortcut-next-segment': 'הקטע הבא',
     'key-shortcut-prev-toc': 'הדף/פרק הקודם',
     'key-shortcut-next-toc': 'הדף/פרק הבא',
+    reportErrorKey: 'דווח על טעות בספר',
     'key-shortcut-open-tool-calendar': 'פתיחת לוח שנה',
     'key-shortcut-open-tool-shamor-zachor': 'פתיחת שמור וזכור',
     'key-shortcut-open-tool-measurements': 'פתיחת מדות ושיעורים',
@@ -376,21 +396,27 @@ class ShortcutValidator {
     return matchingKeys.length > 1 && !_isCompatibleGroup(matchingKeys);
   }
 
-  /// מחזיר את ערך הקיצור הנוכחי עבור [settingKey] או את ברירת המחדל שלו.
+  /// מחזיר את ערך הקיצור הנוכחי עבור [settingKey], את ברירת המחדל שלו, או
+  /// `null` כשהמשתמש ביטל את הקיצור במפורש.
   /// עבור קיצורי תוספים ברירת המחדל היא הקיצור שהתוסף הצהיר עליו — אלא אם
-  /// המשתמש ביטל אותו במפורש, או שהוא מתנגש עם קיצור קיים (ואז התוסף מפנה
-  /// את מקומו ונהיה לא-מוגדר).
+  /// הוא מתנגש עם קיצור קיים (ואז התוסף מפנה את מקומו ונהיה לא-מוגדר).
   static String? getShortcutValue(String settingKey) {
     final normalizedKey = canonicalSettingKey(settingKey);
+    // קיצור דינמי שומר את המקש בתוך הרשומה שלו, לא במפתח הגדרות נפרד.
+    final dynamic = _dynamicShortcuts[normalizedKey];
+    if (dynamic != null) {
+      final value = _normalizedShortcutValue(dynamic.key);
+      return value.isEmpty ? null : value;
+    }
     final directValue = Settings.getValue<String>(normalizedKey);
     final declared = _pluginShortcuts[normalizedKey];
     if (directValue != null && directValue.isNotEmpty) {
       return _normalizedShortcutValue(directValue);
     }
 
-    // קיצור תוסף שהוגדר לו במפורש ערך ריק (ביטול) — נשאר לא-מוגדר כדי
-    // לחזור לרשימת "פעולות זמינות לקיצור", במקום ליפול לברירת המחדל.
-    if (declared != null && directValue != null) {
+    // ערך ריק שנשמר במפורש = ביטול הקיצור. נשאר לא-מוגדר כדי לחזור לרשימת
+    // "פעולות זמינות לקיצור", במקום ליפול לברירת המחדל.
+    if (directValue != null) {
       return null;
     }
 
@@ -437,10 +463,6 @@ class ShortcutValidator {
     }
     return false;
   }
-
-  /// האם [settingKey] הוא קיצור שתוסף הצהיר עליו (ולא פעולה מובנית).
-  static bool isPluginShortcutKey(String settingKey) =>
-      _pluginShortcuts.containsKey(canonicalSettingKey(settingKey));
 
   static bool canShareShortcut(String firstKey, String secondKey) {
     final normalizedFirst = canonicalSettingKey(firstKey);

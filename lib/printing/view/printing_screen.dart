@@ -8,9 +8,12 @@ import 'package:flutter/material.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_settings_screens/flutter_settings_screens.dart';
+import 'package:otzaria/settings/engine/settings_repository.dart';
 import 'package:otzaria/settings/services/safer_mode_guard.dart';
 import 'package:otzaria/core/messages/pdf_messages.dart';
+import 'package:otzaria/core/messages/window_messages.dart';
 import 'package:otzaria/core/ui_snack.dart';
+import 'package:otzaria/core/windowing/window_role.dart';
 import 'package:otzaria/theme/theme_exports.dart';
 import 'package:otzaria/models/links.dart';
 import 'package:otzaria/personal_notes/models/personal_note.dart';
@@ -19,6 +22,7 @@ import 'package:otzaria/printing/print_content_models.dart';
 import 'package:otzaria/printing/serial_latest_runner.dart';
 import 'package:otzaria/printing/printing_helpers.dart';
 import 'package:otzaria/printing/pdf_text_rasterizer.dart';
+import 'package:otzaria/printing/export_restriction_service.dart';
 import 'package:otzaria/printing/word_export_service.dart';
 import 'package:otzaria/utils/file/save_file_with_extension.dart';
 import 'package:otzaria/utils/text/text_manipulation.dart';
@@ -34,6 +38,7 @@ import 'package:otzaria/models/books.dart';
 import 'package:otzaria/data/data_providers/database_library_provider.dart';
 import 'package:otzaria/data/data_providers/library_provider_manager.dart';
 import 'package:otzaria/printing/view/widgets/printing_widgets.dart';
+import 'package:otzaria/text_display/text_display_exports.dart';
 
 enum _AnchorKind { header, altHeader, line }
 
@@ -62,6 +67,10 @@ class PrintingScreen extends StatefulWidget {
   final List<String> activeCommentators;
   final bool removeNikud;
   final bool removeTaamim;
+
+  /// פרופיל ערוץ הייצוא של הספר. כשמסופק — קובע את ברירת המחדל של הניקוד
+  /// והטעמים ואת טיפול שם הוי"ה, במקום [removeNikud]/[removeTaamim] וההגדרות.
+  final TextDisplayProfile? displayProfile;
   final int startLine;
   final List<TocEntry> tableOfContents;
   final int? initialPage;
@@ -85,6 +94,7 @@ class PrintingScreen extends StatefulWidget {
     this.startLine = 0,
     this.removeNikud = false,
     this.removeTaamim = false,
+    this.displayProfile,
     this.tableOfContents = const [],
     this.initialPage,
     this.isBookView = false,
@@ -188,7 +198,24 @@ class _PrintingScreenState extends State<PrintingScreen> {
   static const _destinationKey = 'key-print-destination';
   late _PrintDestination _destination;
 
-  bool get _supportsWord => widget.createPdfOverride == null;
+  bool get _supportsWord =>
+      widget.createPdfOverride == null && !_editableExportRestricted;
+
+  /// ספר שהוגבל לייצוא לפורמט קל לעריכה — גם כשהוא מגיע רק כמפרש שנכלל בפלט.
+  bool get _editableExportRestricted =>
+      ExportRestrictionService.blocksEditableExport(
+        documentTitle: widget.documentTitle ?? widget.bookId,
+        commentariesIncluded:
+            widget.prebuiltBlocks != null || _includeCommentaries,
+        commentators: widget.activeCommentators,
+      );
+
+  /// מחזיר את היעד ל-PDF כשייצוא Word חדל להיות זמין (למשל בהכללת מפרש מוגבל).
+  void _syncDestinationWithWordSupport() {
+    if (_destination == _PrintDestination.word && !_supportsWord) {
+      _destination = _PrintDestination.pdf;
+    }
+  }
 
   void _setDestination(_PrintDestination value) {
     setState(() => _destination = value);
@@ -212,10 +239,15 @@ class _PrintingScreenState extends State<PrintingScreen> {
     if (_destination == _PrintDestination.word && !_supportsWord) {
       _destination = _PrintDestination.pdf;
     }
+    // הרשימה נטענת מ-assets ולכן עשויה עוד לא להיות זמינה כאן.
+    ExportRestrictionService.ensureLoaded().then((_) {
+      if (mounted) setState(_syncDestinationWithWordSupport);
+    });
 
     // אתחול הגדרות ניקוד וטעמים לפי תצוגת הספר
-    _removeNikud = widget.removeNikud;
-    _removeTaamim = widget.removeTaamim;
+    final profile = widget.displayProfile;
+    _removeNikud = profile?.removeNikud ?? widget.removeNikud;
+    _removeTaamim = profile?.removeTeamim ?? widget.removeTaamim;
 
     // במצב PDF חיצוני (כמו "צורת הדף") אין טווח שורות/כותרות.
     if (widget.createPdfOverride != null) {
@@ -668,7 +700,7 @@ class _PrintingScreenState extends State<PrintingScreen> {
     if (widget.createPdfOverride != null) {
       return 'override|${orientation.name}|${format.width}x${format.height}';
     }
-    final holyNames = Settings.getValue<bool>('key-replace-holy-names') ?? true;
+    final holyNames = _shouldReplaceHolyNames;
     return [
       orientation.name,
       format.width,
@@ -876,8 +908,7 @@ class _PrintingScreenState extends State<PrintingScreen> {
       format = format.landscape;
     }
 
-    final shouldReplaceHolyNames =
-        Settings.getValue<bool>('key-replace-holy-names') ?? true;
+    final shouldReplaceHolyNames = _shouldReplaceHolyNames;
 
     // חלוקה גולמית לשורות בלבד. הטרנספורמציות היקרות (הסרת ניקוד/טעמים/HTML
     // והחלפת שמות קודש) מוחלות פר-שורה על הטווח הנבחר ב-_buildPrintBlocks —
@@ -927,9 +958,19 @@ class _PrintingScreenState extends State<PrintingScreen> {
     );
   }
 
-  HolyNameStyle get _holyNameStyle => HolyNameStyle.fromStorage(
-    Settings.getValue<String>('key-holy-name-style'),
-  );
+  TextDisplayProfile get _exportProfile =>
+      widget.displayProfile ??
+      SettingsRepository().loadTextDisplayPolicy().resolve(
+        const TextDisplaySlot(
+          target: TextTarget.body,
+          view: TextView.regular,
+          channel: TextChannel.export,
+        ),
+      );
+
+  HolyNameStyle get _holyNameStyle => _exportProfile.holyNameStyle;
+
+  bool get _shouldReplaceHolyNames => _exportProfile.replaceHolyNames;
 
   /// מסיר ניקוד/טעמים ומחליף שמות קודש לפי בחירת המשתמש.
   String _applyTextTransforms(String input, bool shouldReplaceHolyNames) {
@@ -953,8 +994,7 @@ class _PrintingScreenState extends State<PrintingScreen> {
 
   /// ממיר בלוקים מוכנים לייצוג הפנימי, תוך החלת הסרת ניקוד/טעמים ושמות קודש.
   List<Map<String, String>> _mapPrebuiltBlocks(List<PrintBlock> source) {
-    final shouldReplaceHolyNames =
-        Settings.getValue<bool>('key-replace-holy-names') ?? true;
+    final shouldReplaceHolyNames = _shouldReplaceHolyNames;
     final result = <Map<String, String>>[];
     for (final block in source) {
       switch (block.kind) {
@@ -1373,8 +1413,7 @@ class _PrintingScreenState extends State<PrintingScreen> {
 
   Future<PreparedPrintDocument> _prepareWordDocument() async {
     if (widget.prebuiltBlocks != null) {
-      final shouldReplaceHolyNames =
-          Settings.getValue<bool>('key-replace-holy-names') ?? true;
+      final shouldReplaceHolyNames = _shouldReplaceHolyNames;
       final blocks = widget.prebuiltBlocks!
           .map((block) {
             switch (block.kind) {
@@ -1403,8 +1442,7 @@ class _PrintingScreenState extends State<PrintingScreen> {
     }
     String dataString = await _dataFuture;
 
-    final shouldReplaceHolyNames =
-        Settings.getValue<bool>('key-replace-holy-names') ?? true;
+    final shouldReplaceHolyNames = _shouldReplaceHolyNames;
     dataString = _applyTextTransforms(dataString, shouldReplaceHolyNames);
 
     // שומרים את תגיות ה-HTML — WordExportService ממיר אותן לעיצוב במסמך
@@ -1533,6 +1571,15 @@ class _PrintingScreenState extends State<PrintingScreen> {
   Future<void> _performDestinationAction(BuildContext context) async {
     switch (_destination) {
       case _PrintDestination.printer:
+        // ⚠️ פלאגין ההדפסה נרשם בחלון הראשון בלבד (החלטה מתועדת
+        // ב-`docs/multi-window.md`: הרישום שלו אינו בטוח פעמיים בתהליך).
+        // בלי ההודעה הזו לחיצה על "הדפס" בחלון משני נכשלה ב-
+        // `MissingPluginException` ולא קרה שום דבר נראה. שמירה ל-PDF/Word
+        // כן עובדת בכל חלון, וזו החלופה.
+        if (WindowRole.isSecondary) {
+          UiSnack.show(WindowMessages.printOnlyInMainWindow);
+          return;
+        }
         final printed = await Printing.layoutPdf(
           usePrinterSettings: true,
           onLayout: _createOutputPdf,
@@ -1544,6 +1591,10 @@ class _PrintingScreenState extends State<PrintingScreen> {
       case _PrintDestination.pdf:
         await _saveToFile(_ExportFormat.pdf);
       case _PrintDestination.word:
+        if (_editableExportRestricted) {
+          UiSnack.showError(PdfMessages.editableExportRestricted);
+          return;
+        }
         await _saveToFile(_ExportFormat.word);
     }
   }
@@ -2024,6 +2075,7 @@ class _PrintingScreenState extends State<PrintingScreen> {
                                               onChanged: (value) {
                                                 setState(() {
                                                   _includeCommentaries = value;
+                                                  _syncDestinationWithWordSupport();
                                                   _refreshPreview();
                                                 });
                                               },

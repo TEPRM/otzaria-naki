@@ -4,6 +4,7 @@ import 'dart:isolate';
 import 'package:flutter/foundation.dart'
     show ValueNotifier, debugPrint, visibleForTesting;
 import 'package:sentry_flutter/sentry_flutter.dart';
+import 'package:otzaria/data/cache/books_cache.dart';
 import 'package:otzaria/data/constants/database_constants.dart';
 import 'package:otzaria/data/data_providers/book_database_resolver.dart';
 import 'package:otzaria/data/data_providers/book_composite_key.dart';
@@ -1017,6 +1018,62 @@ Future<Map<int, String>> _runInlineSectionMarkersInIsolate({
   );
 }
 
+/// דיבורי-המתחיל של ספר, ממופתחים לפי `lineIndex` — הצורה המודפסת
+/// (`dhDisplay`) מטבלת `line_dh`. מסד ישן, בלי הטבלה או בלי העמודה, נותן
+/// מפה ריקה.
+Map<int, String> _loadDibburHamatchilInIsolate({
+  required String dbPath,
+  required String bookTitle,
+}) {
+  sqlite3.Database? db;
+  try {
+    db = sqlite3.sqlite3.open(dbPath, mode: sqlite3.OpenMode.readOnly);
+
+    final hasDisplayColumn = db
+        .select("PRAGMA table_info('line_dh')")
+        .any((row) => row['name'] == 'dhDisplay');
+    if (!hasDisplayColumn) return const {};
+
+    final bookResults = db.select(
+      'SELECT id FROM book WHERE title = ? LIMIT 1',
+      [bookTitle],
+    ).toMapList();
+    if (bookResults.isEmpty) return const {};
+    final bookId = bookResults.first['id'] as int;
+
+    final rows = db.select(
+      'SELECT lineIndex, dhDisplay FROM line_dh WHERE bookId = ? '
+      'ORDER BY lineIndex',
+      [bookId],
+    ).toMapList();
+    final dibburim = <int, String>{};
+    for (final row in rows) {
+      final lineIndex = row['lineIndex'];
+      final display = row['dhDisplay'];
+      if (lineIndex is int && display is String && display.isNotEmpty) {
+        dibburim[lineIndex] = display;
+      }
+    }
+    return dibburim;
+  } finally {
+    db?.close();
+  }
+}
+
+/// Top-level wrapper עבור טעינת דיבורי-המתחיל ב-isolate.
+/// ראה ההסבר ב-[_runAlternativeStructuresInIsolate].
+Future<Map<int, String>> _runDibburHamatchilInIsolate({
+  required String dbPath,
+  required String bookTitle,
+}) {
+  return Isolate.run(
+    () => _loadDibburHamatchilInIsolate(
+      dbPath: dbPath,
+      bookTitle: bookTitle,
+    ),
+  );
+}
+
 /// Top-level wrapper עבור טעינת קישורי ספר ב-isolate.
 /// ראה ההסבר ב-[_runAlternativeStructuresInIsolate].
 Future<List<Map<String, Object?>>> _runBookLinksInIsolate({
@@ -1410,6 +1467,14 @@ class DatabaseLibraryProvider implements LibraryProvider {
   }
 
   @visibleForTesting
+  static Map<int, String> loadDibburHamatchilForTesting({
+    required String dbPath,
+    required String bookTitle,
+  }) {
+    return _loadDibburHamatchilInIsolate(dbPath: dbPath, bookTitle: bookTitle);
+  }
+
+  @visibleForTesting
   static List<Map<String, dynamic>> loadBookLinksRowsInRangeForTesting({
     required String dbPath,
     required String title,
@@ -1677,7 +1742,15 @@ class DatabaseLibraryProvider implements LibraryProvider {
     try {
       final hasTalmudBavliDirectory =
           await _bundledTalmudBavliDirectoryExists();
+      // נצפה *לפני* השליפה: clear() שיקרה במהלכה פוסל את הזריעה.
+      final booksCacheGeneration = BooksCache.instance.generation;
       final dbBooks = await _sqliteProvider.repository!.getAllBooks();
+      // אותן שורות שהקאש המשותף צריך — זריעה כאן חוסכת סריקה שנייה של
+      // טבלת `book` (7,300+ ספרים).
+      BooksCache.instance.seedFromBooks(
+        dbBooks,
+        generation: booksCacheGeneration,
+      );
       final categories = await _sqliteProvider.repository!.getAllCategories();
       debugPrint('💾 Database found ${dbBooks.length} books');
 
@@ -2766,8 +2839,15 @@ class DatabaseLibraryProvider implements LibraryProvider {
             defaultValue: false,
           ) ??
           false;
+      final configuredFolders = CustomFoldersManager.loadFolders(
+        Settings.getValue<String>(SettingsRepository.keyCustomFolders),
+      );
       final mergeOverridesByFolderName = _mergeOverridesByFolderName(
+        configuredFolders,
         mergeDefault,
+      );
+      final hiddenFolderNames = CustomFoldersManager.hiddenFolderNames(
+        configuredFolders,
       );
 
       // ילדים ישירים של "ספרים אישיים" — אלו התיקיות שהמשתמש בחר בדיאלוג
@@ -2836,6 +2916,7 @@ class DatabaseLibraryProvider implements LibraryProvider {
       }
 
       for (final pickedFolder in pickedFolders) {
+        if (hiddenFolderNames.contains(pickedFolder.title)) continue;
         final merged =
             mergeOverridesByFolderName[pickedFolder.title] ?? mergeDefault;
 
@@ -2950,10 +3031,10 @@ class DatabaseLibraryProvider implements LibraryProvider {
 
   /// מצב המיזוג לפי קטגוריית-השורש. תיקיות בעלות אותו שם חולקות קטגוריה,
   /// ולכן כשמצביהן האפקטיביים חלוקים חוזרים לברירת המחדל הגלובלית.
-  Map<String, bool> _mergeOverridesByFolderName(bool mergeDefault) {
-    final folders = CustomFoldersManager.loadFolders(
-      Settings.getValue<String>(SettingsRepository.keyCustomFolders),
-    );
+  Map<String, bool> _mergeOverridesByFolderName(
+    List<CustomFolder> folders,
+    bool mergeDefault,
+  ) {
     final result = <String, bool>{};
     final conflicting = <String>{};
     for (final folder in folders) {
@@ -3591,6 +3672,27 @@ class DatabaseLibraryProvider implements LibraryProvider {
       debugPrint(
         '⚠️ Error in getInlineSectionMarkersByLineIndex "$bookTitle": $e',
       );
+      return const {};
+    }
+  }
+
+  /// דיבורי-המתחיל של ספר (`line_dh`, מגרסת ספרייה 25), ממופתחים לפי
+  /// `lineIndex` של שורת הפירוש: הצורה המודפסת של הדיבור, לתצוגה כתת-כותרת
+  /// בעץ הניווט. לספר בלי אינדקס, או במסד ישן, מוחזרת מפה ריקה.
+  Future<Map<int, String>> getDibburHamatchilByLineIndex(
+    String bookTitle,
+  ) async {
+    if (!_sqliteProvider.isInitialized || _sqliteProvider.repository == null) {
+      return const {};
+    }
+
+    try {
+      return await _runDibburHamatchilInIsolate(
+        dbPath: _sqliteProvider.dbPath,
+        bookTitle: bookTitle,
+      );
+    } catch (e) {
+      debugPrint('⚠️ Error in getDibburHamatchilByLineIndex "$bookTitle": $e');
       return const {};
     }
   }

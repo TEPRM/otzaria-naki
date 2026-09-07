@@ -41,8 +41,57 @@ on:
     types: [published]
 
 jobs:
+  # שדות new_version ו-hotfix בהרצה ידנית: מריצים את סקריפט הגרסה, דוחפים
+  # לענף שממנו הופעל ה-workflow, וכל שאר ה-jobs נבנים מה-sha החדש.
+  bump_version:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.push.outputs.sha || github.sha }}
+    steps:
+      - name: Validate requested version
+        if: github.event_name == 'workflow_dispatch' && (inputs.new_version != '' || inputs.hotfix != '0')
+        env:
+          NEW_VERSION: ${{ inputs.new_version }}
+          HOTFIX: ${{ inputs.hotfix }}
+        run: |
+          if [ -z "$NEW_VERSION" ]; then
+            echo "::error::hotfix מחייב הזנת new_version"
+            exit 1
+          fi
+          if ! printf '%s' "$NEW_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::new_version חייב להיות בפורמט major.minor.patch, התקבל '$NEW_VERSION'"
+            exit 1
+          fi
+          if ! printf '%s' "$HOTFIX" | grep -Eq '^(0|[1-9][0-9]?)$'; then
+            echo "::error::hotfix חייב להיות מספר שלם בין 0 ל-99, התקבל '$HOTFIX'"
+            exit 1
+          fi
+
+      - name: Clone branch
+        if: github.event_name == 'workflow_dispatch' && inputs.new_version != ''
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Run version script and push
+        id: push
+        if: github.event_name == 'workflow_dispatch' && inputs.new_version != ''
+        env:
+          NEW_VERSION: ${{ inputs.new_version }}
+          HOTFIX: ${{ inputs.hotfix }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '{\n  "version": "%s",\n  "hotfix": %s\n}\n' "$NEW_VERSION" "$HOTFIX" > tool/version/version.json
+          bash tool/version/update_version.sh
+          git push origin "HEAD:$BRANCH"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   check_version:
     if: github.event_name != 'release' && github.event_name != 'pull_request'
+    needs: [bump_version]
     runs-on: ubuntu-latest
     outputs:
       is_version: ${{ steps.check.outputs.is_version }}
@@ -117,9 +166,9 @@ jobs:
       #     path: |
       #       ${{ env.CARGO_HOME }}\registry
       #       ${{ env.CARGO_HOME }}\git
-      #     key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      #     key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('pubspec.yaml') }}
       #     restore-keys: |
-      #       ${{ runner.os }}-cargo-
+      #       ${{ runner.os }}-${{ runner.arch }}-cargo-
 
       # - name: Add cargo to PATH & verify toolchain
       #   shell: pwsh
@@ -302,6 +351,12 @@ jobs:
             Write-Host "✗ Commit message is not a version tag"
             echo "is_version=false" >> $env:GITHUB_OUTPUT
           }
+
+      # תוספים מצורפים למתקין — הרשימה ב-lib/plugins/services/bundled_plugin_ids.dart
+      # (רשימה ריקה = השלב לא עושה דבר). ראה docs/bundled_plugins.md.
+      - name: Download bundled plugins for installers
+        shell: pwsh
+        run: .\installer\download_bundled_plugins.ps1 -Platform windows
 
       - name: Download library assets for full installer
         if: true
@@ -799,10 +854,12 @@ jobs:
           path: |
             ${{ env.CARGO_HOME }}/registry
             ${{ env.CARGO_HOME }}/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # אין Cargo.lock ב-repo (מנוע החיפוש מגיע כחבילת pub), לכן hashFiles עליו
+          # מחזיר ריק והמפתח נשאר קבוע — ומפתח מטמון שנשמר לא מתעדכן לעולם.
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('pubspec.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
-      
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
+
       - name: Install Linux build dependencies
         shell: bash
         run: |
@@ -1085,7 +1142,9 @@ jobs:
 
           # 1. הרץ את פקודת הבנייה, אבל תפוס את הכישלון כדי שנוכל לתקן אחריו
           echo "Attempting to build with flutter_distributor, it might fail..."
-          flutter_distributor release --name=production --jobs=release-linux-deb || true
+          # --skip-clean: בלעדיו ה-distributor מריץ flutter clean ובונה מאפס
+          # (Rust + CMake) את מה שכבר נבנה בשלב הקודם — ~9 דקות לפח.
+          flutter_distributor release --name=production --jobs=release-linux-deb --skip-clean || true
 
           # 2. שני מסלולים: אם ה-distributor הצליח (Depends תקין) — נפרק את ה-deb
           # שיצר כדי להזריק את ה-WPE runtime; אם נכשל — נשאר עץ מפורק עם control.
@@ -1140,6 +1199,11 @@ jobs:
           [ -n "$DEB_LIB_SO" ] || { echo "::error::libWPEWebKit-2.0 לא נמצא בעץ ה-deb"; exit 1; }
           bash /tmp/bundle_wpe.sh "$(dirname "$DEB_LIB_SO")"
 
+          # ארכיוני התוספים המצורפים — ליד ה-executable (ההורה של lib ב-bundle).
+          if [ -d installer/bundled_plugins ]; then
+            cp -r installer/bundled_plugins "$(dirname "$DEB_LIB_SO")/../bundled_plugins"
+          fi
+
           # AppStream metainfo — בלעדיו GNOME Software מציג גלגל-שיניים גנרי
           # במסך ההתקנה. (ל-rpm זה מגיע נטיבית דרך make_config.yaml.)
           mkdir -p "$DEB_DIR/usr/share/metainfo"
@@ -1169,7 +1233,8 @@ jobs:
 
           # 1. הרץ את פקודת הבנייה הבעייתית, ותפוס את הכישלון
           echo "Attempting to build with flutter_distributor, expecting it to fail..."
-          flutter_distributor release --name=production --jobs=release-linux-rpm || true
+          # --skip-clean: ראה ההסבר בשלב ה-deb — בלעדיו זו בנייה מלאה נוספת.
+          flutter_distributor release --name=production --jobs=release-linux-rpm --skip-clean || true
 
           # 2. מצא את קובץ ה-spec הפגום שהכלי יצר
           SPEC_FILE=$(find dist -type f -name "*.spec" | head -n 1)
@@ -1204,6 +1269,11 @@ jobs:
           RPM_LIB_SO=$(find "$RPM_TOP_DIR_ABS/BUILD" -name 'libWPEWebKit-2.0.so*' -print -quit)
           [ -n "$RPM_LIB_SO" ] || { echo "::error::libWPEWebKit-2.0 לא נמצא בעץ ה-rpm (BUILD)"; exit 1; }
           bash /tmp/bundle_wpe.sh "$(dirname "$RPM_LIB_SO")"
+
+          # ארכיוני התוספים המצורפים — ליד ה-executable (ההורה של lib ב-bundle).
+          if [ -d installer/bundled_plugins ]; then
+            cp -r installer/bundled_plugins "$(dirname "$RPM_LIB_SO")/../bundled_plugins"
+          fi
 
           echo "Re-packaging using absolute top directory: $RPM_TOP_DIR_ABS"
           rpmbuild --define "_topdir $RPM_TOP_DIR_ABS" -bb "$SPEC_FILE"
@@ -1492,9 +1562,10 @@ jobs:
             ${{ env.CARGO_HOME }}/registry
             ${{ env.CARGO_HOME }}/git
             ${{ env.RUSTUP_HOME }}
-          key: ${{ runner.os }}-rust-android-${{ hashFiles('**/Cargo.lock') }}
+          # אין Cargo.lock ב-repo — ראה ההסבר בשלב המקביל ב-build_linux.
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-android-${{ hashFiles('pubspec.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-rust-android-
+            ${{ runner.os }}-${{ runner.arch }}-rust-android-
 
       - name: Pre-install Android Rust targets (with retry)
         run: |
@@ -1551,9 +1622,9 @@ jobs:
         with:
           path: |
             ~/.pub-cache
-          key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pub-${{ hashFiles('pubspec.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-pub-
+            ${{ runner.os }}-${{ runner.arch }}-pub-
       
       - name: Create Google Calendar Credentials
         shell: bash
@@ -1767,9 +1838,13 @@ jobs:
           path: |
             ${{ env.CARGO_HOME }}/registry
             ${{ env.CARGO_HOME }}/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # אין Cargo.lock ב-repo — ראה ההסבר בשלב המקביל ב-build_linux.
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('pubspec.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
+
+      - name: Fetch biographies data
+        uses: ./.github/actions/fetch-biographies
 
       - name: Fetch biographies data
         uses: ./.github/actions/fetch-biographies
@@ -1832,6 +1907,42 @@ jobs:
             echo "Warning: No .app bundle found in build/macos/Build/Products/Release"
             find build/macos/Build/Products/Release -maxdepth 2 | head -20
           fi
+
+      # תוספים מצורפים — הרשימה ב-lib/plugins/services/bundled_plugin_ids.dart
+      # (רשימה ריקה = השלב לא עושה דבר). ראה docs/bundled_plugins.md.
+      - name: Download bundled plugins for macOS bundles
+        shell: bash
+        run: bash installer/download_bundled_plugins.sh macos
+
+      # רץ לפני יצירת ה-DMG — כך הארכיונים מגיעים גם ל-zip העדכון ולחבילת
+      # ה-FULL, שמעתיקים את אותו .app. Contents/Resources היא מקום הנתונים
+      # ב-bundle, הנתיב ש-AppPaths.getBundledPluginsPath מחפש במק.
+      - name: Bundle plugins into the app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d installer/bundled_plugins ]; then
+            echo "No bundled plugins - skipping."
+            exit 0
+          fi
+          APP_PATH=$(find build/macos/Build/Products/Release -maxdepth 1 -name "*.app" | head -1)
+          [ -n "$APP_PATH" ] || { echo "::error::No .app bundle found for plugin bundling"; exit 1; }
+          cp -R installer/bundled_plugins "$APP_PATH/Contents/Resources/bundled_plugins"
+
+      # כל שינוי בתוכן ה-bundle מבטל את חותם _CodeSignature, ואז Gatekeeper
+      # מכריז אצל המשתמש "האפליקציה פגומה". חייב לרוץ לפני ה-DMG וה-zip-ים.
+      - name: Re-sign and verify the app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH=$(find build/macos/Build/Products/Release -maxdepth 1 -name "*.app" | head -1)
+          [ -n "$APP_PATH" ] || { echo "::error::No .app bundle found for re-signing"; exit 1; }
+          # אותה חתימה ad-hoc שה-Xcode עושה (CODE_SIGN_IDENTITY = "-"); בלי
+          # --entitlements החתימה מחדש מוחקת את ההרשאות שהבינארי קיבל.
+          codesign --force --sign - \
+            --entitlements macos/Runner/Release.entitlements \
+            "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
       - name: Create DMG installer
         run: |
@@ -1927,7 +2038,10 @@ jobs:
           Start the app using Run Otzaria.command so the app can detect the bundled library folder.
           EOF
 
-          ditto -c -k --sequesterRsrc --keepParent "$BUNDLE_ROOT" otzaria-macos-full.zip
+          # zip הביא את החבילה ל-2.5GB, מעל מגבלת 2 GiB לקובץ ב-GitHub Releases.
+          tar -C full_installer -cf - otzaria-macos-full | zstd -19 -T0 --long=27 -o otzaria-macos-full.tar.zst
+          [ "$(stat -f '%z' otzaria-macos-full.tar.zst)" -lt 2147483648 ] \
+            || { echo "::error::otzaria-macos-full.tar.zst exceeds GitHub's 2 GiB release-asset limit"; exit 1; }
 
       - name: Upload macOS DMG
         if: always()
@@ -1951,11 +2065,11 @@ jobs:
         with:
           retention-days: 3
           name: otzaria-macos-full
-          path: otzaria-macos-full.zip
+          path: otzaria-macos-full.tar.zst
 
   build_windows_indexed_full:
     if: github.event_name != 'release' && github.event_name != 'pull_request'
-    needs: [build_windows, build_linux]
+    needs: [bump_version, build_windows, build_linux]
     runs-on: windows-latest
 
     steps:
@@ -2011,6 +2125,10 @@ jobs:
 
           Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' `
             -OutFile installer\MicrosoftEdgeWebview2Setup.exe
+
+      - name: Download bundled plugins for installer (indexed FULL)
+        shell: pwsh
+        run: .\installer\download_bundled_plugins.ps1 -Platform windows
 
       - name: Build indexed FULL bootstrap installer
         shell: pwsh
@@ -2184,7 +2302,7 @@ jobs:
 
           # Linux FULL bundle
           if [ -d "artifacts/otzaria-linux-full" ]; then
-            cp artifacts/otzaria-linux-full/*.tar.gz release-files/ || true
+            cp artifacts/otzaria-linux-full/*.tar.zst release-files/ || true
           fi
 
           # Cross-platform indexed FULL library (multipart; every part is below 2 GiB)
@@ -2214,7 +2332,7 @@ jobs:
 
           # macOS FULL bundle
           if [ -d "artifacts/otzaria-macos-full" ]; then
-            cp artifacts/otzaria-macos-full/*.zip release-files/ || true
+            cp artifacts/otzaria-macos-full/*.tar.zst release-files/ || true
           fi
           
           # List files for debugging
@@ -2224,6 +2342,7 @@ jobs:
       - name: Generate release notes
         env:
           RELEASE_TITLE: ${{ steps.version.outputs.title }}
+          BUILD_SHA: ${{ needs.bump_version.outputs.sha }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           PRERELEASE: ${{ steps.version.outputs.prerelease }}
           COMMIT_MESSAGE: ${{ steps.commit.outputs.message }}
@@ -2296,7 +2415,7 @@ jobs:
               *.apk)
                 android_apk+=("$file")
                 ;;
-              *linux-full*.tar.gz|*linux-full*.tar.*)
+              *linux-full*.tar.*)
                 linux_full+=("$file")
                 ;;
               *.deb)
@@ -2311,7 +2430,7 @@ jobs:
               *.dmg)
                 mac_dmg+=("$file")
                 ;;
-              *macos-full*.zip)
+              *macos-full*.tar.*)
                 mac_full+=("$file")
                 ;;
               *)
@@ -2429,7 +2548,7 @@ jobs:
             if [ ${#linux_full[@]} -gt 0 ]; then
               printf "### גרסת ספרייה מלאה\n\n" >> release-body.md
               emit_link_group "חבילה מלאה ללינוקס" "${linux_full[@]}"
-              printf "\n" >> release-body.md
+              printf "\nחילוץ: %star --zstd -xf <הקובץ>%s ואז %s./run-otzaria.sh%s.\n\n" '`' '`' '`' '`' >> release-body.md
             fi
 
           fi
@@ -2446,7 +2565,7 @@ jobs:
             if [ ${#mac_full[@]} -gt 0 ]; then
               printf "### גרסת ספרייה מלאה\n\n" >> release-body.md
               emit_link_group "חבילה מלאה למק" "${mac_full[@]}"
-              printf "\n" >> release-body.md
+              printf "\nחילוץ בטרמינל: %star --zstd -xf <הקובץ>%s (אם חסר zstd: %sbrew install zstd%s) ואז %sRun Otzaria.command%s.\n\n" '`' '`' '`' '`' '`' '`' >> release-body.md
             fi
           fi
 
@@ -2454,7 +2573,7 @@ jobs:
           <details>
           <summary>מידע טכני</summary>
 
-          - נבנה מ־commit ${GITHUB_SHA::7}
+          - נבנה מ־commit ${BUILD_SHA::7}
           - תיאור commit: ${safe_commit_message}
           - ענף: ${{ github.ref_name }}
 
@@ -2512,8 +2631,10 @@ jobs:
 
   trigger_google_play_deploy:
     if: "!cancelled() && needs.check_version.outputs.is_version == 'true' && needs.build_android.result == 'success' && github.event_name != 'release' && github.event_name != 'pull_request'"
-    needs: [check_version, build_android]
+    needs: [bump_version, check_version, build_android]
     uses: ./.github/workflows/deploy-google-play.yml
+    with:
+      ref: ${{ needs.bump_version.outputs.sha }}
     secrets: inherit
 
   # --- הכרזה על גרסה שפורסמה ---

@@ -7,9 +7,11 @@ import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:collection/collection.dart';
 import 'package:otzaria/core/messages/messages_exports.dart';
 import 'package:otzaria/core/ui_snack.dart';
 import 'package:otzaria/models/books.dart';
+import 'package:otzaria/search/models/search_configuration.dart';
 import 'package:otzaria/tabs/models/text_tab.dart';
 import 'package:otzaria/text_book/view/combined_view/combined_book_screen.dart';
 import 'package:otzaria/text_book/bloc/text_book_event.dart';
@@ -22,6 +24,8 @@ import 'package:pdfrx/pdfrx.dart';
 import 'package:otzaria/utils/file/page_converter.dart';
 import 'package:otzaria/utils/navigation/talmud_bavli_open_format.dart';
 import 'package:otzaria/widgets/dialogs/password_dialog.dart';
+import 'package:otzaria/pdf_book/view/pdf_book_screen.dart'
+    show kPdfImageCacheMinBytesPerPane;
 import 'package:otzaria/pdf_book/view/pdf_scrollbar.dart';
 import 'package:otzaria/widgets/widgets_exports.dart';
 
@@ -45,6 +49,15 @@ class BookPreviewPanel extends StatefulWidget {
   /// טקסט להדגשה בסעיף היעד (שאילתת החיפוש שבוצעה).
   final String? searchText;
 
+  /// פרמטרי החיפוש שהניבו את התוצאה. בלעדיהם ההדגשה מכירה רק את השאילתה
+  /// המילולית, ותוצאה שהותאמה דרך קידומת או מרחק מוצגת בלי הדגשה (issue #1147).
+  final Map<String, Map<String, bool>> searchOptions;
+  final Map<int, List<String>> alternativeWords;
+  final Map<String, String> spacingValues;
+  final SearchMode searchMode;
+  final int searchDistance;
+  final SearchMatchPolicy matchPolicy;
+
   const BookPreviewPanel({
     super.key,
     this.book,
@@ -52,10 +65,67 @@ class BookPreviewPanel extends StatefulWidget {
     this.initialTextIndex,
     this.initialPdfPage,
     this.searchText,
+    this.searchOptions = const {},
+    this.alternativeWords = const {},
+    this.spacingValues = const {},
+    this.searchMode = SearchMode.exact,
+    this.searchDistance = 0,
+    this.matchPolicy = SearchMatchPolicy.standard,
   });
 
   @override
   State<BookPreviewPanel> createState() => _BookPreviewPanelState();
+}
+
+/// האם פרמטרי החיפוש של התצוגה המקדימה השתנו. ההשוואה עמוקה: המפות נבנות
+/// מחדש בכל רינדור, והשוואת זהות הייתה בונה את הטאב מחדש בלי סוף.
+@visibleForTesting
+bool previewSearchParametersChanged(
+  BookPreviewPanel oldWidget,
+  BookPreviewPanel newWidget,
+) {
+  const equality = DeepCollectionEquality();
+  return oldWidget.searchText != newWidget.searchText ||
+      oldWidget.searchMode != newWidget.searchMode ||
+      oldWidget.searchDistance != newWidget.searchDistance ||
+      oldWidget.matchPolicy != newWidget.matchPolicy ||
+      !equality.equals(oldWidget.searchOptions, newWidget.searchOptions) ||
+      !equality.equals(
+        oldWidget.alternativeWords,
+        newWidget.alternativeWords,
+      ) ||
+      !equality.equals(oldWidget.spacingValues, newWidget.spacingValues);
+}
+
+/// טאב הטקסט שהתצוגה המקדימה מרנדרת. חשוף לבדיקה כדי לנעול את העברת
+/// פרמטרי החיפוש — הם קובעים אילו תוצאות מודגשות, ולא רק מה נמצא.
+@visibleForTesting
+TextBookTab buildPreviewTextTab({
+  required TextBook book,
+  required int? targetIndex,
+  String? searchText,
+  Map<String, Map<String, bool>> searchOptions = const {},
+  Map<int, List<String>> alternativeWords = const {},
+  Map<String, String> spacingValues = const {},
+  SearchMode searchMode = SearchMode.exact,
+  int searchDistance = 0,
+  SearchMatchPolicy matchPolicy = SearchMatchPolicy.standard,
+}) {
+  final hasTarget = targetIndex != null;
+  return TextBookTab(
+    book: book,
+    index: targetIndex ?? 0,
+    searchText: hasTarget ? (searchText ?? '') : '',
+    searchOptions: hasTarget ? searchOptions : const {},
+    alternativeWords: hasTarget ? alternativeWords : const {},
+    spacingValues: hasTarget ? spacingValues : const {},
+    searchMode: hasTarget ? searchMode : SearchMode.exact,
+    searchDistance: hasTarget ? searchDistance : 0,
+    matchPolicy: hasTarget ? matchPolicy : SearchMatchPolicy.standard,
+    initialSearchResultLines: hasTarget ? {targetIndex} : null,
+    openLeftPane: false,
+    splitedView: Settings.getValue<bool>('key-splited-view') ?? true,
+  );
 }
 
 class _BookPreviewPanelState extends State<BookPreviewPanel> {
@@ -85,6 +155,14 @@ class _BookPreviewPanelState extends State<BookPreviewPanel> {
       if (widget.book != null) {
         _createNewTab();
       }
+      return;
+    }
+
+    // אותה תוצאה, פרמטרי חיפוש אחרים: שינוי מצב/מרחק/אפשרויות והרצה חוזרת
+    // של אותה שאילתה אינם סוגרים את החלונית, והטאב היה מדגיש לפי הישנים.
+    if (previewSearchParametersChanged(oldWidget, widget)) {
+      _disposeCurrentTab();
+      _createNewTab();
       return;
     }
 
@@ -196,16 +274,18 @@ class _BookPreviewPanelState extends State<BookPreviewPanel> {
   }
 
   void _createTextTab(TextBook textBook) {
-    final targetIndex = widget.initialTextIndex;
     setState(() {
       _isPdfViewerReady = false;
-      _currentTextTab = TextBookTab(
+      _currentTextTab = buildPreviewTextTab(
         book: textBook,
-        index: targetIndex ?? 0,
-        searchText: targetIndex != null ? (widget.searchText ?? '') : '',
-        initialSearchResultLines: targetIndex != null ? {targetIndex} : null,
-        openLeftPane: false,
-        splitedView: Settings.getValue<bool>('key-splited-view') ?? true,
+        targetIndex: widget.initialTextIndex,
+        searchText: widget.searchText,
+        searchOptions: widget.searchOptions,
+        alternativeWords: widget.alternativeWords,
+        spacingValues: widget.spacingValues,
+        searchMode: widget.searchMode,
+        searchDistance: widget.searchDistance,
+        matchPolicy: widget.matchPolicy,
       );
     });
   }
@@ -443,7 +523,7 @@ class _BookPreviewPanelState extends State<BookPreviewPanel> {
     return BlocBuilder<SettingsBloc, SettingsState>(
       buildWhen: (p, c) =>
           p.compactMenuMode != c.compactMenuMode ||
-          p.defaultRemoveNikud != c.defaultRemoveNikud,
+          p.textDisplayPolicy != c.textDisplayPolicy,
       builder: (context, settingsState) {
         final compact = settingsState.compactMenuMode;
         return Stack(
@@ -544,6 +624,9 @@ class _BookPreviewPanelState extends State<BookPreviewPanel> {
           controller: _pdfController!,
           params: PdfViewerParams(
             backgroundColor: Theme.of(context).colorScheme.surface,
+            // התצוגה המקדימה חיה לצד טאבי הקריאה — מקבלת את רצפת התקציב שלהם
+            // ולא את 100MB ברירת המחדל של pdfrx.
+            maxImageBytesCachedOnMemory: kPdfImageCacheMinBytesPerPane,
             zoomStepsDelegateProvider:
                 const PdfViewerZoomStepsDelegateProviderSmart(),
             sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(

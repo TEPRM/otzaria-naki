@@ -4,7 +4,10 @@ import 'dart:typed_data';
 // dart:io מגדיר Link משלו (קישור בקובץ־מערכת) שמתנגש ב-Link של הקישורים.
 import 'dart:io' hide Link;
 import 'dart:math' as math;
+import 'package:collection/collection.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:otzaria/utils/file/file_picker_dialog_options.dart';
+import 'package:otzaria/widgets/dialogs/input_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path/path.dart' as p;
@@ -26,6 +29,7 @@ import 'package:otzaria/migration/models/alt_toc_structure.dart';
 import 'package:otzaria/text_book/text_book_repository.dart';
 import 'package:otzaria/personal_notes/repository/personal_notes_repository.dart';
 import 'package:otzaria/personal_notes/models/personal_note.dart';
+import 'package:otzaria/settings/services/safer_mode_guard.dart';
 import 'package:otzaria/core/connectivity_status_service.dart';
 import 'package:otzaria/core/ui_snack.dart';
 import 'package:otzaria/models/books.dart';
@@ -36,13 +40,16 @@ import 'package:otzaria/text_book/utils/commentator_group_builder.dart';
 import 'package:otzaria/library/models/library.dart';
 import 'package:otzaria/search/search_repository.dart';
 import 'package:otzaria/plugins/bridge/plugin_search_api.dart';
+import 'package:otzaria/plugins/bridge/plugin_save_target.dart';
 import 'package:otzaria_search_engine/otzaria_search_engine.dart'
     show SearchStreamUpdate;
 import 'package:otzaria/utils/file/text_encoding.dart';
 import 'package:otzaria/utils/navigation/book_open_coordinator.dart';
 import 'package:otzaria/utils/text/text_manipulation.dart';
 import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
+import 'package:otzaria/tabs/bloc/tabs_event.dart';
 import 'package:otzaria/tabs/models/combined_tab.dart';
+import 'package:otzaria/tabs/utils/confirm_close_tabs.dart';
 import 'package:otzaria/plugins/services/plugin_external_search_service.dart';
 import 'package:otzaria/plugins/services/plugin_in_book_search_service.dart';
 import 'package:otzaria/plugins/services/plugin_reader_actions.dart';
@@ -57,6 +64,7 @@ import 'package:otzaria/tools/tools_launcher_controller.dart';
 import 'package:otzaria/tabs/models/text_tab.dart';
 import 'package:otzaria/tabs/models/pdf_tab.dart';
 import 'package:otzaria/text_book/bloc/text_book_state.dart';
+import 'package:otzaria/text_display/models/text_display_slot.dart';
 import 'package:otzaria/text_book/bloc/text_book_event.dart';
 import 'package:otzaria/history/bloc/history_bloc.dart';
 import 'package:otzaria/settings/services/custom_folders/bloc/custom_folders_bloc.dart';
@@ -74,6 +82,9 @@ import 'package:timezone/timezone.dart' as tz;
 import 'package:otzaria/settings/engine/settings_repository.dart';
 import 'package:otzaria/settings/l10n/settings_language.dart';
 import 'package:otzaria/workspaces/bloc/workspace_bloc.dart';
+import 'package:otzaria/workspaces/bloc/workspace_event.dart';
+import 'package:otzaria/workspaces/bloc/workspace_state.dart';
+import 'package:otzaria/workspaces/workspace.dart';
 import 'package:otzaria/plugins/database/plugin_database_service.dart';
 import 'package:otzaria/plugins/utils/reader_location_resolver.dart';
 import 'package:otzaria/plugins/utils/plugin_icon_resolver.dart';
@@ -82,6 +93,7 @@ import 'package:otzaria/plugins/models/plugin_toolbar_item.dart';
 import 'package:otzaria/plugins/models/plugin_when_condition.dart';
 import 'package:otzaria/plugins/services/context_menu_registry.dart';
 import 'package:otzaria/plugins/services/plugin_toolbar_registry.dart';
+import 'package:otzaria/plugins/services/plugin_unsaved_changes_registry.dart';
 import 'package:otzaria/plugins/services/plugin_page_launcher.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:otzaria/plugins/services/plugin_print_service.dart';
@@ -419,9 +431,25 @@ class PluginBridgeDependencies {
   /// פותר הפניה חופשית (שם ספר + ref, למשל "תלמוד ירושלמי עירובין פ\"ו ה\"ז")
   /// למיקום, דרך מנוע `find_ref` המודע-להקשר. מחזיר התאמות עם מיקום ה-index.
   /// אופציונלי — אם לא סופק, `openBookAtRef` נופל להתאמת TOC מקומית בלבד.
-  final Future<List<({String title, int index, bool isPdf})>> Function(
-    String reference,
-  )?
+  ///
+  /// `bookId` הוא ה-id המספרי ב-DB (‎-1 ל-PDF ממערכת הקבצים), ותקף רק כאשר
+  /// `isUserBook` כבוי: `user_books.db` מקצה מזהים באותו טווח כמו `seforim.db`,
+  /// ולכן id של ספר אישי אינו חד-משמעי מחוץ להקשרו.
+  final Future<
+    List<
+      ({
+        String title,
+        int index,
+        bool isPdf,
+        int bookId,
+        String reference,
+        String bookPath,
+        bool isSourceLine,
+        bool isUserBook,
+      })
+    >
+  >
+  Function(String reference)?
   resolveReference;
 
   /// פותר הפניה לרמת שורה (פסוק/סעיף) דרך ה-heRef הפר-שורתי — מדויק מתחת
@@ -480,6 +508,7 @@ class PluginBridgeDependencies {
     String pluginId,
     String instanceId, {
     required String jobName,
+    PluginPdfLayout? layout,
   })?
   printPluginPage;
 
@@ -658,6 +687,14 @@ class PluginBridgeAdapter {
   final Map<PluginBookIdentityKey, String> _bookContentCache = {};
   static const int _bookContentCacheMaxEntries = 4;
 
+  /// אורך מקסימלי לשם שולחן עבודה שתוסף יוצר — השם מוצג בממשק המשתמש.
+  static const int _workspaceNameMaxLength = 100;
+
+  /// חסם ההמתנה לפעולת שולחן עבודה שעוברת דרך ה-WorkspaceBloc.
+  static const Duration _workspaceActionTimeout = Duration(seconds: 5);
+
+  static Future<void> _workspaceActionQueue = Future.value();
+
   Library? _bookIndexLibrary;
   Map<int, List<Book>> _booksById = const {};
   Map<String, List<Book>> _booksByTitle = const {};
@@ -697,6 +734,7 @@ class PluginBridgeAdapter {
     final key = (pluginId: plugin.pluginId, instanceId: instanceId);
     ContextMenuRegistry.instance.removeInstance(key);
     PluginToolbarRegistry.instance.removeInstance(key);
+    PluginUnsavedChangesRegistry.instance.removeInstance(key);
     _highlightRegistry.removeInstance(key);
     for (final cancel in _activeSearchStreams.values) {
       unawaited(cancel());
@@ -772,6 +810,10 @@ class PluginBridgeAdapter {
         return await _handleSearch(action, args, eventSink: eventSink);
       case 'reader':
         return await _handleReader(action, args);
+      case 'workspace':
+        return await _enqueueWorkspaceAction(
+          () => _handleWorkspace(action, args),
+        );
       case 'navigation':
         return await _handleNavigation(action, args);
       case 'notes':
@@ -1004,6 +1046,48 @@ class PluginBridgeAdapter {
               },
             )
             .toList();
+      case 'resolveRef':
+        // spec: resolveRef({ ref, limit? }) -> [{ id, bookId, bookUid, type,
+        // title, reference, index, isPdf, isSourceLine, bookPath }]
+        //
+        // מריץ את מנוע `find_ref` המלא — אותו מנוע שמאחורי "איתור מקורות" —
+        // ומחזיר את התוצאה במקום לפתוח אותה. זו הצורה השאילתתית של
+        // `reader.openBookAtRef`, לתוספים שבונים קישור או הצעת השלמה.
+        {
+          final ref = args['ref']?.toString().trim() ?? '';
+          final limit = (args['limit'] as num?)?.toInt() ?? 20;
+          // סף של שני תווים — כמו ב-FindRefBloc; מחרוזת קצרה מזו מתאימה
+          // לחצי הספרייה ורק מבזבזת סריקה.
+          if (ref.length < 2 || limit <= 0) return <dynamic>[];
+          final resolve = _dependencies.resolveReference;
+          if (resolve == null) return <dynamic>[];
+          final hits = await resolve(ref);
+          final books = library.getAllBooks();
+          return hits.take(limit).map((h) {
+            // ה-id המספרי חד-משמעי רק בספרי הספרייה: `user_books.db`
+            // מקצה מזהים באותו טווח, ולכן id של ספר אישי אינו מזהה
+            // ספר יחיד. מוחזר null כדי שצרכן לא יבנה עליו קישור עומק.
+            final identity = (h.isUserBook || h.bookId < 0)
+                ? null
+                : books.firstWhereOrNull(
+                    (b) => b is TextBook && !b.isUserBook && b.id == h.bookId,
+                  );
+            return {
+              'id': identity?.id,
+              'bookId': h.title,
+              if (identity != null)
+                'bookUid': PluginBookIdentity.uidOf(identity),
+              if (identity != null) 'type': PluginBookIdentity.typeOf(identity),
+              'title': h.title,
+              'reference': h.reference,
+              'index': h.index,
+              'isPdf': h.isPdf,
+              'isSourceLine': h.isSourceLine,
+              'isUserBook': h.isUserBook,
+              'bookPath': h.bookPath,
+            };
+          }).toList();
+        }
       case 'getBookMetadata':
         // spec: accepts id, bookId (= title in otzaria), type — all optional,
         // all supplied fields must match the same book.
@@ -2245,7 +2329,7 @@ class PluginBridgeAdapter {
         }
       case 'getCurrentState':
         final tabsState = _dependencies.tabsBloc.state;
-        final tabs = tabsState.tabs.where((tab) => tab is! ToolTab).toList();
+        final tabs = _pluginVisibleTabs();
         final panes = tabs.map(_paneForPlugins).toList();
         // Use the same resolver as getCurrentRef for consistent currentRef values
         final snapshots = await Future.wait(panes.map(resolveReaderLocation));
@@ -2309,6 +2393,34 @@ class PluginBridgeAdapter {
           'currentRef': currentSnapshot?.currentRef,
           'openTabs': openTabs,
         };
+      case 'closeTab':
+        // spec: closeTab({ index }) — האינדקס הוא ברשימה ש-getCurrentState
+        // מחזיר, לא ב-TabsBloc. הטאב עצמו נמסר לאירוע, ולכן אין המרת אינדקס.
+        {
+          final target = _pluginVisibleTabAt(args);
+          final unsaved = unsavedPluginTabs([target]);
+          if (unsaved.isNotEmpty) {
+            final confirmed = await _dependencies.showWarningDialog(
+              title: unsavedChangesDialogTitle,
+              content: unsavedChangesDialogContent(unsaved),
+              subtitle: unsavedChangesDialogSubtitle,
+            );
+            if (!confirmed) return false;
+          }
+          _dependencies.tabsBloc.add(RemoveTab(target));
+          return true;
+        }
+      case 'activateTab':
+        // spec: activateTab({ index }) — כאן דרוש דווקא האינדקס הגולמי, ולכן
+        // הוא נגזר מזהות הטאב ולא מהאינדקס שהתוסף מסר.
+        {
+          final tabsBloc = _dependencies.tabsBloc;
+          final rawIndex = tabsBloc.state.tabs.indexOf(
+            _pluginVisibleTabAt(args),
+          );
+          tabsBloc.add(SetCurrentTab(rawIndex));
+          return true;
+        }
       case 'getCurrentRef':
         final snapshot = await resolveReaderLocation(
           _dependencies.tabsBloc.state.readingPane,
@@ -2331,6 +2443,10 @@ class PluginBridgeAdapter {
       case 'setActiveCommentators':
         // spec: setActiveCommentators({ add?, remove? })
         return _setActiveCommentators(args);
+      case 'getPageShapeLayout':
+        return _getPageShapeLayout();
+      case 'setPageShapeCommentatorVisibility':
+        return _setPageShapeCommentatorVisibility(args);
       case 'getHighlightCapabilities':
         // spec: getHighlightCapabilities() -> { surface, highlights,
         //   selection, contextMenu }
@@ -2727,19 +2843,7 @@ class PluginBridgeAdapter {
           : null;
       return (
         rawText: state.content[sectionIndex],
-        settings: RenderSettings(
-          removeNikud: state.removeNikud,
-          removePunctuation: state.removePunctuation,
-          removeTeamim:
-              !(Settings.getValue<bool>(SettingsRepository.keyShowTeamim) ??
-                  true),
-          replaceHolyNames:
-              Settings.getValue<bool>(SettingsRepository.keyReplaceHolyNames) ??
-              false,
-          holyNameStyle: HolyNameStyle.fromStorage(
-            Settings.getValue<String>(SettingsRepository.keyHolyNameStyle),
-          ),
-        ),
+        settings: RenderSettings.fromProfile(state.bodyDisplayProfile),
         currentRef: snapshot?.currentRef,
       );
     }
@@ -2772,15 +2876,9 @@ class PluginBridgeAdapter {
     }
     return (
       rawText: range.lines.first,
-      settings: RenderSettings(
-        removeTeamim:
-            !(Settings.getValue<bool>(SettingsRepository.keyShowTeamim) ??
-                true),
-        replaceHolyNames:
-            Settings.getValue<bool>(SettingsRepository.keyReplaceHolyNames) ??
-            false,
-        holyNameStyle: HolyNameStyle.fromStorage(
-          Settings.getValue<String>(SettingsRepository.keyHolyNameStyle),
+      settings: RenderSettings.fromProfile(
+        SettingsRepository().loadTextDisplayPolicy().resolve(
+          TextDisplaySlot.root,
         ),
       ),
       currentRef: null,
@@ -2891,6 +2989,145 @@ class PluginBridgeAdapter {
           ? const {}
           : Map<String, dynamic>.from(overrides as Map),
     );
+  }
+
+  // ----------------------------------------------------------------
+  // workspace.*
+  // ----------------------------------------------------------------
+  Future<dynamic> _handleWorkspace(
+    String action,
+    Map<String, dynamic> args,
+  ) async {
+    final bloc = _dependencies.workspaceBloc;
+    switch (action) {
+      case 'list':
+        final activeId = bloc.state.activeWorkspaceId;
+        return bloc.state.workspaces
+            .map(
+              (workspace) => {
+                'id': workspace.id,
+                'name': workspace.name,
+                'isActive': workspace.id == activeId,
+                // בשולחן הפעיל הטאבים חיים ב-TabsBloc ונשמרים אליו רק במעבר,
+                // ולכן הספירה שלו חייבת לבוא משם ולא מהעותק השמור.
+                'tabCount': workspace.id == activeId
+                    ? _pluginVisibleTabs().length
+                    : workspace.tabs.where(_isPluginVisibleTab).length,
+              },
+            )
+            .toList();
+      case 'getActive':
+        final active = bloc.state.activeWorkspace;
+        return {'id': active?.id, 'name': active?.name};
+      case 'create':
+        final name = (args['name'] as String?)?.trim() ?? '';
+        if (name.isEmpty) {
+          throw Exception('error.invalid_params: name required');
+        }
+        if (name.length > _workspaceNameMaxLength) {
+          throw Exception(
+            'error.invalid_params: name exceeds '
+            '$_workspaceNameMaxLength characters',
+          );
+        }
+        final switchTo = args['switchTo'] as bool? ?? false;
+        final reuseExisting = args['reuseExisting'] as bool? ?? false;
+        if (reuseExisting) {
+          for (final workspace in bloc.state.workspaces) {
+            if (workspace.name.trim() != name) continue;
+            if (switchTo && !await _switchWorkspace(workspace.id)) {
+              throw Exception('error.internal: failed to switch workspace');
+            }
+            return {'id': workspace.id, 'created': false};
+          }
+        }
+        final created = await _createWorkspace(name);
+        if (created == null) {
+          throw Exception('error.internal: failed to create workspace');
+        }
+        if (switchTo && !await _switchWorkspace(created.id)) {
+          throw Exception('error.internal: failed to switch workspace');
+        }
+        return {'id': created.id, 'created': true};
+      case 'switch':
+        final id = (args['id'] as String?)?.trim() ?? '';
+        if (id.isEmpty) {
+          throw Exception('error.invalid_params: id required');
+        }
+        // שולחן שאינו קיים אינו שגיאת ארגומנט: תוסף שמסנכרן בין מחשבים מקבל
+        // מזהה מהצד השני ונופל בחזרה ל-create לפי השם.
+        if (!bloc.state.workspaces.any((workspace) => workspace.id == id)) {
+          return false;
+        }
+        return await _switchWorkspace(id);
+      default:
+        throw Exception(
+          'error.unknown_method: Unknown workspace action: $action',
+        );
+    }
+  }
+
+  /// יוצר שולחן עבודה חדש ומחזיר אותו. ה-`AddWorkspace` אינו מחזיר את המזהה
+  /// שנוצר, ולכן מאתרים אותו במצב הראשון שבו נוסף שולחן שלא היה קודם.
+  Future<Workspace?> _createWorkspace(String name) async {
+    final bloc = _dependencies.workspaceBloc;
+    final knownIds = bloc.state.workspaces
+        .map((workspace) => workspace.id)
+        .toSet();
+    bool hasNew(WorkspaceState state) =>
+        state.workspaces.any((workspace) => !knownIds.contains(workspace.id));
+    final state = await _awaitWorkspaceState(
+      hasNew,
+      () => bloc.add(
+        AddWorkspace(name: name, tabs: const [], currentTabIndex: 0),
+      ),
+    );
+    if (state == null) return null;
+    return state.workspaces.lastWhere(
+      (workspace) => !knownIds.contains(workspace.id),
+    );
+  }
+
+  /// מעבר לשולחן [id] באותו רצף שהדיאלוג מבצע
+  /// (`lib/workspaces/view/workspace_switcher_dialog.dart`): הטאבים הנוכחיים
+  /// נמסרים לאירוע כי ה-UI הוא מקור האמת עליהם — בלעדיהם המעבר מוחק אותם.
+  /// נמסרת רשימת הטאבים **המלאה**, כולל `ToolTab`, ולא הרשימה שהתוסף רואה.
+  Future<bool> _switchWorkspace(String id) async {
+    final bloc = _dependencies.workspaceBloc;
+    if (bloc.state.activeWorkspaceId == id) return true;
+    final tabsState = _dependencies.tabsBloc.state;
+    final state = await _awaitWorkspaceState(
+      (workspaceState) => workspaceState.activeWorkspaceId == id,
+      () => bloc.add(
+        SwitchToWorkspace(
+          targetWorkspaceId: id,
+          currentTabsToSave: tabsState.tabs,
+          currentTabIndexToSave: tabsState.currentTabIndex,
+        ),
+      ),
+    );
+    return state != null;
+  }
+
+  /// מפעיל [trigger] וממתין למצב הראשון שמקיים [test]. פעולות שולחן עבודה
+  /// עוברות דרך אירוע ואינן מחזירות ערך, ולכן ה-API ממתין למצב במקום להניח
+  /// שהאירוע כבר טופל. מחזיר `null` על שגיאה מהבלוק או על פסק זמן.
+  Future<WorkspaceState?> _awaitWorkspaceState(
+    bool Function(WorkspaceState state) test,
+    void Function() trigger,
+  ) async {
+    final bloc = _dependencies.workspaceBloc;
+    final settled = bloc.stream.firstWhere(
+      (state) => test(state) || state.error != null,
+      orElse: () => bloc.state,
+    );
+    trigger();
+    try {
+      final state = await settled.timeout(_workspaceActionTimeout);
+      return test(state) ? state : null;
+    } on TimeoutException {
+      return null;
+    }
   }
 
   // ----------------------------------------------------------------
@@ -3048,6 +3285,19 @@ class PluginBridgeAdapter {
           subtitle: args['subtitle'] as String? ?? '',
         );
         return {'confirmed': result};
+      case 'setUnsavedChanges':
+        // spec: setUnsavedChanges({ hasChanges, message? }) — סגירת הכרטיסיה
+        // תעבור דרך דיאלוג אישור כל עוד הדגל דלוק.
+        final hasChanges = args['hasChanges'];
+        if (hasChanges is! bool) {
+          throw Exception('error.invalid_params: hasChanges must be boolean');
+        }
+        PluginUnsavedChangesRegistry.instance.set(
+          (pluginId: plugin.pluginId, instanceId: instanceId),
+          hasChanges: hasChanges,
+          message: args['message'] as String?,
+        );
+        return true;
       case 'pickFolder':
         // פותח דיאלוג בחירת תיקייה. הנתיב שנבחר נרשם כתיקייה מאושרת לתוסף —
         // מכאן ואילך מותר לו לכתוב/למחוק בתוכה (download.destPath, fs.*).
@@ -3064,8 +3314,13 @@ class PluginBridgeAdapter {
         _grantedFolders.add(p.normalize(p.absolute(path)));
         return {'path': path};
       case 'print':
+        final context = navigatorKey.currentContext;
+        if (context != null && !await verifySaferModePassword(context)) {
+          return {'printed': false};
+        }
         final printer = _dependencies.printPluginPage ?? _defaultPrintPage;
         final jobName = (args['jobName'] as String?)?.trim();
+        final printLayout = _parsePdfLayout(args);
         return await _runUserGatedDialog(() async {
           final printed = await printer(
             plugin.pluginId,
@@ -3073,6 +3328,7 @@ class PluginBridgeAdapter {
             jobName: jobName == null || jobName.isEmpty
                 ? plugin.manifest.toolTabTitle
                 : jobName,
+            layout: printLayout,
           );
           return {'printed': printed};
         });
@@ -3081,7 +3337,7 @@ class PluginBridgeAdapter {
             _dependencies.capturePluginPagePdf ?? _defaultCapturePagePdf;
         final saver =
             _dependencies.pickSaveLocation ?? _defaultPickSaveLocation;
-        final suggested = _suggestedSaveName(
+        final suggested = pluginSaveFileName(
           args['fileName'] as String?,
           'pdf',
         );
@@ -3100,7 +3356,7 @@ class PluginBridgeAdapter {
           if (chosen == null || chosen.isEmpty) {
             return {'saved': false, 'name': null};
           }
-          // file_picker בווינדוס אינו משלים את הסיומת שנבחרה בדיאלוג.
+          // בורר המיקום ניתן להזרקה, וחוזהו אינו מבטיח שהסיומת תושלם.
           final target = chosen.toLowerCase().endsWith('.pdf')
               ? chosen
               : '$chosen.pdf';
@@ -3148,8 +3404,17 @@ class PluginBridgeAdapter {
   }
 
   /// בורר התיקיות המוגדר כברירת מחדל — דיאלוג המערכת דרך [FilePicker].
-  Future<String?> _defaultPickFolder({String? title}) =>
-      FilePicker.getDirectoryPath(lockParentWindow: true, dialogTitle: title);
+  Future<String?> _defaultPickFolder({String? title}) async {
+    final context = navigatorKey.currentContext;
+    if (context != null && !await verifySaferModePassword(context)) {
+      return null;
+    }
+    return FilePicker.getDirectoryPath(
+      windowsOptions: kModalWindowsOptions,
+      linuxOptions: kModalLinuxOptions,
+      dialogTitle: title,
+    );
+  }
 
   /// דיאלוג הדפסה/שמירה פתוח כרגע עבור המופע הזה. שער חד-בו-זמנית: בלעדיו
   /// לולאה בתוסף מערימה דיאלוגים מודאליים עד שהחלון אינו שמיש.
@@ -3216,9 +3481,11 @@ class PluginBridgeAdapter {
     String pluginId,
     String instanceId, {
     required String jobName,
+    PluginPdfLayout? layout,
   }) => const PluginPrintService().printWebView(
     _requireController(pluginId, instanceId),
     jobName: jobName,
+    layout: layout,
   );
 
   Future<Uint8List> _defaultCapturePagePdf(
@@ -3230,7 +3497,7 @@ class PluginBridgeAdapter {
     layout: layout,
   );
 
-  /// גדלי דף נתמכים ב-`ui.exportPdf`, במילימטרים (רוחב, גובה) לאורך.
+  /// גדלי דף נתמכים ב-`ui.exportPdf` וב-`ui.print`, במילימטרים (רוחב, גובה) לאורך.
   static const _pdfPageSizesMm = <String, (double, double)>{
     'a4': (210, 297),
     'a5': (148, 210),
@@ -3238,14 +3505,21 @@ class PluginBridgeAdapter {
     'legal': (215.9, 355.6),
   };
 
-  /// מפרש את ארגומנטי העימוד של `ui.exportPdf`: `pageSize`, `orientation`,
-  /// `marginMm` (מספר או מפה לפי צד) ו-`printBackgrounds`. null כשלא סופק דבר.
+  /// גבולות שפיות למידות דף חופשיות ב-`pageSize` (מ"מ). התחתון מתחת ל-0.5
+  /// אינץ' (12.7 מ"מ) והעליון מעל 200 אינץ' — מסמכי DOCX חוקיים לא ייחסמו,
+  /// ורק תשובה שאינה מידה (אפס, שלילי, אלפי מ"מ) נדחית.
+  static const _minPageMm = 10.0;
+  static const _maxPageMm = 5080.0;
+
+  /// מפרש את ארגומנטי העימוד של `ui.exportPdf` ו-`ui.print`: `pageSize` (שם קבוע או מפה
+  /// `{widthMm, heightMm}` למידות חופשיות), `orientation`, `marginMm` (מספר
+  /// או מפה לפי צד) ו-`printBackgrounds`. null כשלא סופק דבר.
   PluginPdfLayout? _parsePdfLayout(Map<String, dynamic> args) {
-    final sizeName = (args['pageSize'] as String?)?.trim().toLowerCase();
+    final sizeArg = args['pageSize'];
     final orientation = (args['orientation'] as String?)?.trim().toLowerCase();
     final margin = args['marginMm'];
     final backgrounds = args['printBackgrounds'];
-    if (sizeName == null &&
+    if (sizeArg == null &&
         orientation == null &&
         margin == null &&
         backgrounds == null) {
@@ -3253,14 +3527,33 @@ class PluginBridgeAdapter {
     }
 
     (double, double)? size;
-    if (sizeName != null) {
-      size = _pdfPageSizesMm[sizeName];
+    if (sizeArg is String) {
+      size = _pdfPageSizesMm[sizeArg.trim().toLowerCase()];
       if (size == null) {
         throw Exception(
           'error.invalid_params: unknown pageSize (supported: '
-          '${_pdfPageSizesMm.keys.join(', ')})',
+          '${_pdfPageSizesMm.keys.join(', ')}, or {widthMm, heightMm})',
         );
       }
+    } else if (sizeArg is Map) {
+      double dimMm(Object? v, String name) {
+        if (v is! num || v.isNaN || v < _minPageMm || v > _maxPageMm) {
+          throw Exception(
+            'error.invalid_params: $name must be $_minPageMm-$_maxPageMm (mm)',
+          );
+        }
+        return v.toDouble();
+      }
+
+      size = (
+        dimMm(sizeArg['widthMm'], 'pageSize.widthMm'),
+        dimMm(sizeArg['heightMm'], 'pageSize.heightMm'),
+      );
+    } else if (sizeArg != null) {
+      throw Exception(
+        'error.invalid_params: pageSize must be a preset name or a '
+        '{widthMm, heightMm} map',
+      );
     }
 
     bool? landscape;
@@ -3534,15 +3827,20 @@ class PluginBridgeAdapter {
     List<String>? allowedExtensions,
     String? title,
   }) async {
+    final context = navigatorKey.currentContext;
+    if (context != null && !await verifySaferModePassword(context)) {
+      return null;
+    }
     final hasExtensions =
         allowedExtensions != null && allowedExtensions.isNotEmpty;
-    final result = await FilePicker.pickFiles(
+    final result = await FilePicker.pickFile(
       dialogTitle: title,
-      lockParentWindow: true,
+      windowsOptions: kModalWindowsOptions,
+      linuxOptions: kModalLinuxOptions,
       type: hasExtensions ? FileType.custom : FileType.any,
       allowedExtensions: hasExtensions ? allowedExtensions : null,
     );
-    return result?.files.single.path;
+    return result?.path;
   }
 
   /// `fs.pickUserFile` — פותח דיאלוג בחירת קובץ, רושם אותו כקובץ מאושר ומחזיר
@@ -3694,7 +3992,7 @@ class PluginBridgeAdapter {
               RegExp(r'^\.?[a-z0-9]{1,10}$').hasMatch(rawExtension)
           ? rawExtension.replaceAll('.', '')
           : null;
-      final suggested = _suggestedSaveName(
+      final suggested = pluginSaveFileName(
         args['suggestedName'] as String?,
         extension,
       );
@@ -3735,37 +4033,62 @@ class PluginBridgeAdapter {
     }
   }
 
-  /// שם ברירת מחדל לדיאלוג. תווים שאינם חוקיים בשם קובץ מוסרים כאן ולא
-  /// נסמכים על הדיאלוג, שמתנהג שונה בכל פלטפורמה.
-  String _suggestedSaveName(String? requested, String? extension) {
-    final cleaned = (requested ?? '')
-        .replaceAll(RegExp(r'[\\/:*?"<>|]'), '')
-        .trim();
-    final base = cleaned.isEmpty ? 'מסמך' : cleaned;
-    if (extension == null || extension.isEmpty) return base;
-    return base.toLowerCase().endsWith('.$extension')
-        ? base
-        : '$base.$extension';
+  Future<T> _enqueueWorkspaceAction<T>(Future<T> Function() action) {
+    final result = _workspaceActionQueue.then((_) => action());
+    _workspaceActionQueue = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
   }
 
+  /// „שמור בשם” בשני שלבים: בחירת תיקייה דרך דיאלוג המערכת, ואז שם הקובץ
+  /// בדיאלוג של התוכנה. **אינו נוגע ביעד** — הכתיבה כולה ב-[_atomicWrite].
+  ///
+  /// `FilePicker.saveFile` אינו משמש כאן: מאז 12.0 הוא כותב תמיד את הבייטים
+  /// שקיבל, ולכן בחירת קובץ קיים הייתה מרוקנת אותו עוד לפני הכתיבה האמיתית.
+  /// כשיתווסף אפסטרים בורר-מיקום שאינו כותב, המימוש הזה מתקפל בחזרה אליו:
+  /// https://github.com/vicajilau/flutter_file_picker/issues/2156
   Future<String?> _defaultPickSaveLocation({
     required String suggestedName,
     List<String>? allowedExtensions,
     String? title,
-  }) {
-    final hasExtensions =
-        allowedExtensions != null && allowedExtensions.isNotEmpty;
-    // bytes ריק בכוונה: הדיאלוג משמש כאן כבורר נתיב בלבד. file_picker מדלג על
-    // הכתיבה כשהמערך ריק, והכתיבה עצמה נעשית ב-_atomicWrite. אם גרסה עתידית
-    // תכתוב בכל זאת, ה-rename שאחריה עדיין מביא את היעד למצב הנכון.
-    return FilePicker.saveFile(
-      dialogTitle: title,
-      fileName: suggestedName,
-      lockParentWindow: true,
-      type: hasExtensions ? FileType.custom : FileType.any,
-      allowedExtensions: hasExtensions ? allowedExtensions : null,
-      bytes: Uint8List(0),
+  }) async {
+    final context = navigatorKey.currentContext;
+    if (context != null && !await verifySaferModePassword(context)) {
+      return null;
+    }
+    final folder = await FilePicker.getDirectoryPath(
+      dialogTitle: title ?? 'בחירת תיקייה לשמירת הקובץ',
+      windowsOptions: kModalWindowsOptions,
+      linuxOptions: kModalLinuxOptions,
     );
+    if (folder == null) return null;
+
+    final dialogContext = navigatorKey.currentContext;
+    if (dialogContext == null || !dialogContext.mounted) return null;
+    final typed = await showInputDialog(
+      context: dialogContext,
+      title: title ?? 'שמירת קובץ',
+      labelText: 'שם הקובץ',
+      initialValue: suggestedName,
+      confirmText: 'שמור',
+    );
+    if (typed == null) return null;
+
+    final fileName = pluginSaveFileName(typed, allowedExtensions?.firstOrNull);
+    final target = pluginSaveTargetPath(folder: folder, fileName: fileName);
+    if (target == null) return null;
+
+    if (File(target).existsSync()) {
+      final replace = await _dependencies.showWarningDialog(
+        title: 'הקובץ כבר קיים',
+        content: 'הקובץ „$fileName” כבר קיים בתיקייה שנבחרה.',
+        subtitle: 'התוכן הקיים יוחלף.',
+      );
+      if (!replace) return null;
+    }
+    return target;
   }
 
   /// מעתיק את ההעלאה ליעד: staging באותה תיקייה, ואז rename.
@@ -5200,6 +5523,44 @@ class PluginBridgeAdapter {
     };
   }
 
+  Map<String, dynamic>? _getPageShapeLayout() {
+    final pane = _dependencies.tabsBloc.state.readingPane;
+    if (pane is! TextBookTab) return null;
+    final state = pane.bloc.state;
+    if (state is! TextBookLoaded || !state.showPageShapeView) return null;
+    return pane.pageShapePluginController.layout?.toJson();
+  }
+
+  Map<String, dynamic>? _setPageShapeCommentatorVisibility(
+    Map<String, dynamic> args,
+  ) {
+    final rawCommentator = args['commentator'];
+    if (rawCommentator is! String || rawCommentator.trim().isEmpty) {
+      throw Exception('error.invalid_params: commentator is required');
+    }
+    final visible = args['visible'];
+    if (visible is! bool) {
+      throw Exception('error.invalid_params: visible must be a boolean');
+    }
+
+    final pane = _dependencies.tabsBloc.state.readingPane;
+    if (pane is! TextBookTab) return null;
+    final state = pane.bloc.state;
+    if (state is! TextBookLoaded || !state.showPageShapeView) return null;
+
+    final commentator = rawCommentator.trim();
+    final layout = pane.pageShapePluginController.layout;
+    if (layout == null) return null;
+    if (!layout.contains(commentator)) {
+      throw Exception(
+        'error.not_found: commentator is not assigned to a page-shape column',
+      );
+    }
+    return pane.pageShapePluginController
+        .setCommentatorVisibility(commentator, visible)
+        ?.toJson();
+  }
+
   List<String> _commentatorNames(Object? raw) {
     if (raw == null) return const [];
     if (raw is! List) {
@@ -5241,6 +5602,35 @@ class PluginBridgeAdapter {
       'selection': false,
       'contextMenu': const <String>[],
     };
+  }
+
+  /// טאב שה-API חושף לתוסף. טאבי הכלים (ToolTab) מסוננים, ולכן אינדקס
+  /// ברשימה שהתוסף רואה **אינו** האינדקס ב-tabsBloc.state.tabs.
+  static bool _isPluginVisibleTab(OpenedTab tab) => tab is! ToolTab;
+
+  /// הטאבים שה-API חושף, בסדר שבו התוסף מקבל אותם. כל פעולה לפי אינדקס
+  /// שהתוסף מסר חייבת לעבור דרך כאן — אינדקס גולמי יפגע בטאב הלא נכון.
+  List<OpenedTab> _pluginVisibleTabs() =>
+      _dependencies.tabsBloc.state.tabs.where(_isPluginVisibleTab).toList();
+
+  /// הטאב שבאינדקס `index` **ברשימה שהתוסף רואה** ([_pluginVisibleTabs]).
+  /// אינדקס חסר או מחוץ לתחום נדחה כשגיאת ארגומנטים ולא כחריגה.
+  OpenedTab _pluginVisibleTabAt(Map<String, dynamic> args) {
+    final rawIndex = args['index'];
+    if (rawIndex is! num ||
+        !rawIndex.isFinite ||
+        rawIndex != rawIndex.truncateToDouble()) {
+      throw Exception('error.invalid_params: index must be an integer');
+    }
+    final index = rawIndex.toInt();
+    final tabs = _pluginVisibleTabs();
+    if (index < 0 || index >= tabs.length) {
+      throw Exception(
+        'error.invalid_params: index $index out of range '
+        '(${tabs.length} open tabs)',
+      );
+    }
+    return tabs[index];
   }
 
   OpenedTab _paneForPlugins(OpenedTab tab) {
@@ -5297,19 +5687,7 @@ class PluginBridgeAdapter {
       bookTitle: currentTab.title,
       sectionIndex: sectionIndex,
       rawText: state.content[sectionIndex],
-      settings: RenderSettings(
-        removeNikud: state.removeNikud,
-        removePunctuation: state.removePunctuation,
-        removeTeamim:
-            !(Settings.getValue<bool>(SettingsRepository.keyShowTeamim) ??
-                true),
-        replaceHolyNames:
-            Settings.getValue<bool>(SettingsRepository.keyReplaceHolyNames) ??
-            false,
-        holyNameStyle: HolyNameStyle.fromStorage(
-          Settings.getValue<String>(SettingsRepository.keyHolyNameStyle),
-        ),
-      ),
+      settings: RenderSettings.fromProfile(state.bodyDisplayProfile),
       renderedStartUtf16: start,
       renderedEndUtf16: end,
       currentRef: currentRef,

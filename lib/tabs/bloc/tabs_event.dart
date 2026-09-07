@@ -16,10 +16,17 @@ class AddTab extends TabsEvent {
   // אחרת – נוסף בסוף רשימת הטאבים, כברירת מחדל לפתיחת ספר חדש.
   final bool insertAdjacent;
 
-  const AddTab(this.tab, {this.insertAdjacent = false});
+  /// פתיחה ברקע ("פתח בכרטיסייה חדשה"): הטאב נוסף אך המשתמש נשאר על הנוכחי.
+  final bool inBackground;
+
+  const AddTab(
+    this.tab, {
+    this.insertAdjacent = false,
+    this.inBackground = false,
+  });
 
   @override
-  List<Object?> get props => [tab, insertAdjacent];
+  List<Object?> get props => [tab, insertAdjacent, inBackground];
 }
 
 class OpenOrFocusTab extends TabsEvent {
@@ -32,11 +39,15 @@ class OpenOrFocusTab extends TabsEvent {
   /// רק את הספר, ולכן רוצים שהטאב הקיים ייגלל לאותו מיקום.
   final bool navigateToPositionIfReused;
 
+  /// פתיחה ברקע: תמיד טאב חדש (בלי מיקוד טאב קיים), והמשתמש נשאר על הנוכחי.
+  final bool inBackground;
+
   const OpenOrFocusTab(
     this.tab, {
     this.targetTitle,
     this.insertAdjacent = false,
     this.navigateToPositionIfReused = false,
+    this.inBackground = false,
   });
 
   @override
@@ -45,6 +56,7 @@ class OpenOrFocusTab extends TabsEvent {
     targetTitle,
     insertAdjacent,
     navigateToPositionIfReused,
+    inBackground,
   ];
 }
 
@@ -63,10 +75,14 @@ class ReplaceAllTabs extends TabsEvent {
   final List<OpenedTab> tabs;
   final int currentTabIndex;
 
-  const ReplaceAllTabs(this.tabs, this.currentTabIndex);
+  /// צד החלונית הפעילה בטאב שב-[currentTabIndex] (`'right'`/`'left'`),
+  /// או `null` כשאין — ואז החלונית הפעילה נופלת ל-`panes.first`.
+  final String? activePane;
+
+  const ReplaceAllTabs(this.tabs, this.currentTabIndex, {this.activePane});
 
   @override
-  List<Object?> get props => [tabs, currentTabIndex];
+  List<Object?> get props => [tabs, currentTabIndex, activePane];
 }
 
 class SaveTabs extends TabsEvent {
@@ -154,6 +170,26 @@ class SetCurrentTab extends TabsEvent {
 }
 
 class CloseAllTabs extends TabsEvent {}
+
+/// חלון שהוחזר לשימוש מאמץ כרטיסיה שנגררה אליו, במקום כל מה שהיה בו.
+///
+/// ⚠️ **אירוע אחד, ולא [CloseAllTabs] ואחריו [AddTab].** הצמד יצר מצב
+/// ביניים של אפס כרטיסיות, ו-`ReadingScreen` מאזין בדיוק למעבר הזה
+/// (`previous.hasOpenTabs && !current.hasOpenTabs`) כדי לנווט למסך
+/// הספרייה — כלומר החלון נחת בספרייה ולא על הכרטיסיה שנגררה אליו.
+///
+/// זה קרה **רק** בחלון שכבר היה פתוח ונסגר: פתיחה ראשונה עוברת בנקודת
+/// הכניסה של החלון המשני ואין בה כרטיסיות קודמות, ולכן אין מעבר.
+///
+/// הכרטיסיות המוצמדות נשמרות, בדיוק כמו ב-[CloseAllTabs].
+class AdoptTab extends TabsEvent {
+  const AdoptTab(this.tab);
+
+  final OpenedTab tab;
+
+  @override
+  List<Object?> get props => [tab];
+}
 
 class CloseOtherTabs extends TabsEvent {
   final OpenedTab keepTab;

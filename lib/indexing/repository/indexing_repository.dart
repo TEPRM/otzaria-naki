@@ -3,17 +3,22 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart' hide Category;
 import 'package:otzaria/core/messages/library_messages.dart';
+import 'package:otzaria/core/messages/window_messages.dart';
 import 'package:otzaria/core/ui_snack.dart';
+import 'package:otzaria/core/windowing/window_role.dart';
 import 'package:otzaria/data/cache/generation_cache.dart';
 import 'package:otzaria/data/data_providers/tantivy_data_provider.dart';
 import 'package:otzaria/data/data_providers/sqlite_data_provider.dart';
 import 'package:otzaria/data/data_providers/user_books_database_holder.dart';
 import 'package:otzaria/find_ref/repository/reference_books_cache.dart';
+import 'package:otzaria/core/app_paths.dart';
+import 'package:otzaria/indexing/services/index_merge_progress.dart';
 import 'package:otzaria/indexing/utils/book_facet_metadata_cache.dart';
 import 'package:otzaria/indexing/utils/pdf_extraction_prefetcher.dart';
 import 'package:otzaria/indexing/models/catalogue_order_resolver.dart';
 import 'package:otzaria/indexing/models/indexing_run_result.dart';
 import 'package:otzaria/migration/database/repository/seforim_repository.dart';
+import 'package:otzaria/pdf_book/utils/pdf_viewer_activity.dart';
 import 'package:otzaria/library/models/library.dart';
 import 'package:otzaria/models/books.dart';
 import 'package:otzaria/search/book_facet.dart';
@@ -107,6 +112,9 @@ class IndexingRepository {
           when rangeError.invalidValue == -1 && rangeError.end == 3 =>
         IndexingFailureKind.pdfUnsupported,
       final TimeoutException _ => IndexingFailureKind.timeout,
+      EncryptedDocumentException _ => IndexingFailureKind.passwordProtected,
+      CorruptedDocumentException _ || UnsupportedDocumentFormatException _ =>
+        IndexingFailureKind.unreadableDocument,
       _
           when normalized.contains('no password supplied') ||
               normalized.contains('password required') ||
@@ -247,15 +255,24 @@ class IndexingRepository {
   /// [library] The library containing books to index
   /// [onProgress] Callback function to report progress
   /// [onFinalizing] נקרא כשכל הספרים אונדקסו והמנוע ניגש לאחד את קבצי
-  /// האינדקס — שלב ארוך וללא התקדמות מדידה.
+  /// האינדקס.
+  /// [onFinalizingProgress] מדווח את התקדמות האיחוד כשבר בין 0 ל-1.
   /// מבצע אינדוקס ומחזיר תוצאה מפורטת, כולל ביטול וכשלים פר-ספר.
   Future<IndexingRunResult> indexAllBooks(
     Library library, {
     void Function()? onActualIndexingStarted,
     required void Function(int processed, int total) onProgress,
     void Function()? onFinalizing,
+    void Function(double fraction)? onFinalizingProgress,
     bool includePdfBooks = true,
   }) async {
+    if (WindowRole.isSecondary) {
+      return const IndexingRunResult.cancelled(
+        processedBooks: 0,
+        totalBooks: 0,
+        indexedBooks: 0,
+      );
+    }
     if (await _blockIndexingOnTempFallback()) {
       return const IndexingRunResult.cancelled(
         processedBooks: 0,
@@ -388,7 +405,7 @@ class IndexingRepository {
             errors++;
             final failure = _classifyFailure(readyBook, e, stackTrace);
             failures.add(failure);
-            final handled = await _markPermanentPdfFailure(
+            final handled = await _markPermanentFailure(
               readyBook,
               failure,
               catalogueOrder,
@@ -486,13 +503,11 @@ class IndexingRepository {
           }
 
           processedBooks++;
-          // commit רק כשבאמת נוספו מסמכים מאז ה-commit הקודם: הסף הישן
-          // (processedBooks % 25) ספר גם ספרים מדולגים, כך שסריקה של
-          // ספרייה כמעט-מאונדקסת ביצעה מאות commit-ים ריקים — כל אחד
-          // מסריאל סגמנטים וטוען reader מחדש לחינם. הסף 100 נבחר לפי
-          // הלוגים (~680ms ל-commit; כל 25 ספרים ⇒ ‏9% מזמן האינדוקס) —
-          // ה-commit הוא רק נקודת שמירה להתאוששות, לא נדרש תכוף יותר.
-          if (indexedSinceCommit >= 100) {
+          // כל commit יוצר סגמנט לכל thread של המנוע, וכולם ממוזגים
+          // בסוף ב-optimize סדרתי אחד — כך שסף נמוך מייקר את הסיום פי
+          // כמה. ה-commit הוא רק נקודת שמירה להתאוששות: קריסה מאבדת את
+          // הספרים שאונדקסו מאז האחרון, ולכן הסף חוסם גם מלמעלה.
+          if (indexedSinceCommit >= 200) {
             commitStopwatch
               ..reset()
               ..start();
@@ -527,7 +542,7 @@ class IndexingRepository {
           failures.add(failure);
           processedBooks++;
           onProgress(processedBooks, totalBooks);
-          final handled = await _markPermanentPdfFailure(
+          final handled = await _markPermanentFailure(
             book,
             failure,
             catalogueOrder,
@@ -564,7 +579,18 @@ class IndexingRepository {
         debugPrint('💾 commit סופי: ${commitStopwatch.elapsedMilliseconds}ms');
         _stampCatalogueOrderAfterCommit();
         final optimizeStopwatch = Stopwatch()..start();
-        await optimizeIndexBestEffort(index.optimize);
+        final mergeProgress = onFinalizingProgress == null
+            ? null
+            : IndexMergeProgress.start(
+                _tantivyDataProvider.activeIndexPath ??
+                    await AppPaths.getIndexPath(),
+                onFinalizingProgress,
+              );
+        try {
+          await optimizeIndexBestEffort(index.optimize);
+        } finally {
+          mergeProgress?.stop();
+        }
         debugPrint('⚙️ optimize: ${optimizeStopwatch.elapsedMilliseconds}ms');
         debugPrint('⏱️ סה"כ אינדוקס: ${totalStopwatch.elapsed}');
       }
@@ -608,7 +634,7 @@ class IndexingRepository {
     // (UTF-8 כפי שמאוחסן ב-SQLite) ונמסר ל-addTextBookBytes — בלי פענוח
     // ל-String וקידוד חוזר על הגשר (~180ms/MB שנמדדו בלוגים).
     final loadStopwatch = Stopwatch()..start();
-    final source = await _loadTextBookSource(book);
+    final source = await loadTextBookSource(book);
     final bytes = source.bytes;
     final text = source.text;
     loadStopwatch.stop();
@@ -842,13 +868,15 @@ class IndexingRepository {
     );
   }
 
-  Future<bool> _markPermanentPdfFailure(
+  /// כשל קבוע מקבל סמן ריק באינדקס, אחרת הספר "חסר" לנצח ומפעיל ריצת
+  /// אינדוקס מלאה בכל עלייה.
+  Future<bool> _markPermanentFailure(
     Book book,
     IndexingFailure failure,
     CatalogueOrderResolver catalogueOrder,
     List<IndexingFailure> failures,
   ) async {
-    if (book is! PdfBook || failure.isRetryable) return false;
+    if (failure.isRetryable) return false;
     if (!_tantivyDataProvider.isIndexing.value) return false;
 
     try {
@@ -860,7 +888,7 @@ class IndexingRepository {
       failures.add(
         IndexingFailure(
           bookTitle: book.title,
-          bookPath: book.path,
+          bookPath: buildIndexedBookFilePath(book),
           kind: IndexingFailureKind.engineWrite,
           error: error.toString(),
           stackTrace: stackTrace.toString(),
@@ -958,6 +986,8 @@ class IndexingRepository {
     final file = File(book.path);
     if (!await file.exists()) return empty;
 
+    // הקורא קודם — טאב שממתין לעמוד היעד לא יחכה בתור מאחורי האינדוקס.
+    await PdfViewerActivity.instance.waitUntilIdle();
     final document = await PdfDocument.openFile(
       book.path,
     ).timeout(const Duration(seconds: 60));
@@ -976,6 +1006,7 @@ class IndexingRepository {
       final pageCount = document.pages.length;
       for (int i = 0; i < pageCount; i++) {
         if (!_tantivyDataProvider.isIndexing.value) return empty;
+        await PdfViewerActivity.instance.waitUntilIdle();
 
         final pageText = await document.pages[i].loadText().timeout(
           const Duration(seconds: 5),
@@ -1114,7 +1145,8 @@ class IndexingRepository {
   /// (בלי פענוח/קידוד על ה-UI isolate), וירידה לטקסט מפוענח ומנוקה רק
   /// כשחייבים (תמונות מוטמעות, פורמט מומר, ספר בלי categoryId). משותף
   /// לאינדוקס ולאימות הטריות — כך שתי החתימות מחושבות על אותו קלט בדיוק.
-  Future<({Uint8List? bytes, String? text})> _loadTextBookSource(
+  @visibleForTesting
+  Future<({Uint8List? bytes, String? text})> loadTextBookSource(
     TextBook book,
   ) async {
     Uint8List? bytes;
@@ -1360,7 +1392,7 @@ class IndexingRepository {
     // אותו מקור בדיוק שמסלול האינדוקס חתם: במקרה הנפוץ bytes גולמיים
     // מה-DB עוברים כמות שהם, וה-UI isolate לא מפענח, מקודד או מגבב דבר —
     // הגיבוב רץ על ה-thread pool של המנוע.
-    final source = await _loadTextBookSource(textBook);
+    final source = await loadTextBookSource(textBook);
     final text = source.text;
     final bytes =
         source.bytes ??
@@ -1389,6 +1421,13 @@ class IndexingRepository {
     void Function()? onActualIndexingStarted,
     required void Function(int processed, int total) onProgress,
   }) async {
+    if (WindowRole.isSecondary) {
+      return IndexingRunResult.cancelled(
+        processedBooks: 0,
+        totalBooks: books.length,
+        indexedBooks: 0,
+      );
+    }
     if (books.isEmpty) {
       return const IndexingRunResult.completed(
         processedBooks: 0,
@@ -1499,7 +1538,7 @@ class IndexingRepository {
           failures.add(failure);
           processedBooks++;
           onProgress(processedBooks, totalBooks);
-          final handled = await _markPermanentPdfFailure(
+          final handled = await _markPermanentFailure(
             book,
             failure,
             catalogueOrder,
@@ -1580,14 +1619,20 @@ class IndexingRepository {
   }
 
   /// Clears the index and resets the list of indexed books.
-  Future<void> clearIndex() async {
+  Future<bool> clearIndex() async {
+    if (WindowRole.isSecondary) {
+      UiSnack.show(WindowMessages.indexingOnlyInMainWindow);
+      return false;
+    }
     await _tantivyDataProvider.clear();
+    return true;
   }
 
   /// מסיר מהאינדקס את רשומות הספרים הנתונים — מחיקה מדויקת לפי מפתח
   /// ה-filePath שהמסמכים נכתבו איתו ([buildIndexedBookFilePath]), כך שספר
   /// אחר החולק את אותה כותרת אינו נפגע. מחזיר האם המחיקה נקלטה.
   Future<bool> dropBookIndexEntries(Iterable<Book> books) async {
+    if (WindowRole.isSecondary) return false;
     final keys = <String>{
       for (final book in books) buildIndexedBookFilePath(book),
     }..remove('');
@@ -1628,6 +1673,7 @@ class IndexingRepository {
   ///
   /// מחזיר את מספר הספרים שהוסרו.
   Future<int> dropOrphanedIndexEntries(Library library) async {
+    if (WindowRole.isSecondary) return 0;
     final books = library.getAllBooks();
     if (books.isEmpty) return 0;
 
@@ -1677,6 +1723,13 @@ class IndexingRepository {
     void Function()? onActualIndexingStarted,
     required void Function(int processed, int total) onProgress,
   }) async {
+    if (WindowRole.isSecondary) {
+      return IndexingRunResult.cancelled(
+        processedBooks: 0,
+        totalBooks: changedBooks.length,
+        indexedBooks: 0,
+      );
+    }
     if (changedBooks.isEmpty) {
       return const IndexingRunResult.completed(
         processedBooks: 0,
@@ -1748,6 +1801,13 @@ class IndexingRepository {
     @visibleForTesting
     Future<BigInt> Function(TextBook book, String text)? fingerprintOf,
   }) async {
+    if (WindowRole.isSecondary) {
+      return const IndexingRunResult.cancelled(
+        processedBooks: 0,
+        totalBooks: 0,
+        indexedBooks: 0,
+      );
+    }
     if (await _blockIndexingOnTempFallback() ||
         await requiresManualReindex(library)) {
       return const IndexingRunResult.cancelled(

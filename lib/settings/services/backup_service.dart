@@ -26,6 +26,7 @@ import 'package:otzaria/services/direct_error_report_service.dart';
 import 'package:otzaria/core/app_paths.dart';
 import 'package:otzaria/core/messages/settings_messages.dart';
 import 'package:otzaria/core/ui_snack.dart';
+import 'package:otzaria/settings/services/backup/backup_import_merge.dart';
 import 'package:otzaria/settings/services/backup/backup_maintenance.dart';
 import 'package:otzaria/settings/services/backup/backup_store.dart';
 
@@ -169,7 +170,7 @@ class BackupService {
         final workspacesData = await _backupWorkspaces();
         backupData['workspaces'] = workspacesData['workspaces'];
         backupData['currentWorkspace'] = workspacesData['currentWorkspace'];
-        final openTabs = _backupOpenTabs();
+        final openTabs = await _backupOpenTabs();
         if (openTabs != null) backupData['openTabs'] = openTabs;
       }
 
@@ -243,6 +244,12 @@ class BackupService {
     'library_loaded.marker':
         'סימון מקומי שספרייה נטענה במכשיר זה — שחזורו למכשיר אחר מטעה',
     'biographies.tsb': 'נתוני ביוגרפיות ארוזים באפליקציה ומתעדכנים מהרשת',
+    windowRootsDirName:
+        'שורשי Hive פרטיים של חלונות נוספים; נמחקים בהפעלה קרה '
+        '(deleteStaleWindowRoots) ואין בהם נתונים שאינם אצל החלון הראשון',
+    AppPaths.libraryPathRecordFileName:
+        'נתיב הספרייה עבור ה-uninstaller; נגזר מההגדרות ונרשם מחדש בכל '
+        'עלייה, ושחזור נתיב ממכשיר אחר מטעה אותו',
   };
 
   /// מפתחות הגדרות שאינם מועברים בין התקנות.
@@ -555,7 +562,7 @@ class BackupService {
   /// Backup workspaces
   static Future<Map<String, dynamic>> _backupWorkspaces() async {
     final repo = WorkspaceRepository();
-    final (workspaces, currentWorkspace) = repo.loadWorkspaces();
+    final (workspaces, currentWorkspace) = await repo.loadWorkspaces();
     return {
       'workspaces': workspaces.map((w) => w.toJson()).toList(),
       'currentWorkspace': currentWorkspace,
@@ -567,7 +574,7 @@ class BackupService {
   ///
   /// היעדר ה-box אינו מסמן את השחזור כחלקי: הטאבים הפתוחים הם מצב רגעי
   /// שמשתנה בכל פתיחת ספר, ואין להבהיל את המשתמש בגללם.
-  static Map<String, dynamic>? _backupOpenTabs() {
+  static Future<Map<String, dynamic>?> _backupOpenTabs() async {
     if (!Hive.isBoxOpen(TabsRepository.boxName)) {
       _logger.warning('_backupOpenTabs: tabs box not open — skipping');
       return null;
@@ -665,15 +672,24 @@ class BackupService {
   /// צורת הדף, התאמות פר-ספר) אינו בקובץ ואינו בר-שחזור — והמשתמש חייב לדעת.
   /// [notesWithoutAnchor] — הערות שקובץ הגיבוי אינו יכול לבטא להן עיגון (נוצר
   /// לפני שהעיגון נכנס לגיבוי), ולכן תסומנה על כל השורה במקום על המילים.
+  /// [added] — מה נוסף בפועל; רק ב-[BackupImportMode.merge], ובשחזור `null`.
+  ///
+  /// [mode] — `replace` (ברירת מחדל) מחליף את הנתונים הקיימים; `merge` מייבא
+  /// מגיבוי של מכשיר אחר בלי למחוק דבר: ההגדרות והטאבים הפתוחים אינם נוגעים,
+  /// והפריטים מתווספים לקיימים (ראה [BackupImportMerge]).
   static Future<
     ({
       List<String> skippedSections,
       List<String> missingCustomFolders,
       bool hasLegacyPartialSettings,
       int notesWithoutAnchor,
+      BackupImportCounts? added,
     })
   >
-  restoreFromBackup(String backupPath) async {
+  restoreFromBackup(
+    String backupPath, {
+    BackupImportMode mode = BackupImportMode.replace,
+  }) async {
     final file = File(backupPath);
     if (!await file.exists()) {
       throw Exception('קובץ הגיבוי לא נמצא');
@@ -708,26 +724,33 @@ class BackupService {
     final includes = backupData['includes'] as Map<String, dynamic>;
 
     final runtimeSkipped = <String>[];
+    final isMerge = mode == BackupImportMode.merge;
+    final counts = isMerge ? BackupImportCounts() : null;
 
     // Restore settings
     var hasLegacyPartialSettings = false;
     if (includes['settings'] == true && backupData.containsKey('settings')) {
       final settings = backupData['settings'] as Map<String, dynamic>;
-      await _restoreSettings(settings);
-      missingCustomFolders.addAll(await findMissingCustomFolders());
-      hasLegacyPartialSettings = isPartialSettingsSection(
-        settings,
-        backupData['settingsSource'],
-      );
+      // בייבוא ממזג ההגדרות אינן נכנסות כלל: נתיב הספרייה, נתיב מסד הנתונים
+      // והתיקיות המותאמות מתארים את המכשיר שממנו הגיע הקובץ, לא את זה.
+      if (!isMerge) {
+        await _restoreSettings(settings);
+        missingCustomFolders.addAll(await findMissingCustomFolders());
+        hasLegacyPartialSettings = isPartialSettingsSection(
+          settings,
+          backupData['settingsSource'],
+        );
+        final reportsSkipped = await _restoreReportQueues(
+          (backupData['reportQueues'] as Map?)?.cast<String, dynamic>(),
+        );
+        if (reportsSkipped) runtimeSkipped.add('reportQueues');
+      }
       final perBookHadFailures = await _restorePerBookSettings(
         (backupData['perBookSettings'] as Map?)?.cast<String, dynamic>() ??
             const {},
+        keepExisting: isMerge,
       );
       if (perBookHadFailures) runtimeSkipped.add('perBookSettings');
-      final reportsSkipped = await _restoreReportQueues(
-        (backupData['reportQueues'] as Map?)?.cast<String, dynamic>(),
-      );
-      if (reportsSkipped) runtimeSkipped.add('reportQueues');
     }
 
     // Restore bookmarks
@@ -736,6 +759,7 @@ class BackupService {
         backupData.containsKey('bookmarks')) {
       await _restoreBookmarks(
         (backupData['bookmarks'] as List).cast<Map<String, dynamic>>(),
+        counts: counts,
       );
     }
 
@@ -745,6 +769,7 @@ class BackupService {
         backupData.containsKey('history')) {
       await _restoreHistory(
         (backupData['history'] as List).cast<Map<String, dynamic>>(),
+        counts: counts,
       );
     }
 
@@ -753,6 +778,7 @@ class BackupService {
     if (includes['notes'] == true && backupData.containsKey('notes')) {
       notesWithoutAnchor = await _restoreNotes(
         (backupData['notes'] as List).cast<Map<String, dynamic>>(),
+        counts: counts,
       );
     }
 
@@ -771,10 +797,14 @@ class BackupService {
       await _restoreWorkspaces(
         (backupData['workspaces'] as List).cast<Map<String, dynamic>>(),
         backupData['currentWorkspace'],
+        counts: counts,
       );
-      await _restoreOpenTabs(
-        (backupData['openTabs'] as Map?)?.cast<String, dynamic>(),
-      );
+      // הטאבים הפתוחים הם מצב המסך הנוכחי — ייבוא ממזג לא יסגור אותם.
+      if (!isMerge) {
+        await _restoreOpenTabs(
+          (backupData['openTabs'] as Map?)?.cast<String, dynamic>(),
+        );
+      }
     }
 
     // Restore plugins
@@ -782,6 +812,7 @@ class BackupService {
       final pluginsHadFailures = await _restorePlugins(
         (backupData['plugins'] as List).cast<Map<String, dynamic>>(),
         stores,
+        counts: counts,
       );
       if (pluginsHadFailures) runtimeSkipped.add('plugins');
     }
@@ -791,6 +822,7 @@ class BackupService {
         backupData.containsKey('shamorZachor')) {
       final skipped = await _restoreShamorZachor(
         backupData['shamorZachor'] as Map<String, dynamic>,
+        counts: counts,
       );
       if (skipped) runtimeSkipped.add('shamorZachor');
     }
@@ -805,6 +837,7 @@ class BackupService {
       missingCustomFolders: missingCustomFolders,
       hasLegacyPartialSettings: hasLegacyPartialSettings,
       notesWithoutAnchor: notesWithoutAnchor,
+      added: counts,
     );
   }
 
@@ -813,9 +846,12 @@ class BackupService {
   /// קובץ שאינו בגיבוי נשאר במקומו: השחזור מחזיר את מה שנשמר בו ואינו מוחק
   /// התאמות של ספרים אחרים. שם הקובץ מאומת כשם בסיס בלבד לפני הכתיבה, כדי
   /// שגיבוי פגום/זדוני לא יכתוב מחוץ לתיקייה.
+  ///
+  /// [keepExisting] (ייבוא ממזג) — התאמה מקומית לספר אינה נדרסת בזו שבקובץ.
   static Future<bool> _restorePerBookSettings(
-    Map<String, dynamic> files,
-  ) async {
+    Map<String, dynamic> files, {
+    bool keepExisting = false,
+  }) async {
     if (files.isEmpty) return false;
     final dir = Directory(await AppPaths.getPerBookSettingsPath());
     await dir.create(recursive: true);
@@ -830,9 +866,9 @@ class BackupService {
         continue;
       }
       try {
-        await File(
-          p.join(dir.path, entry.key),
-        ).writeAsString(entry.value as String);
+        final file = File(p.join(dir.path, entry.key));
+        if (keepExisting && await file.exists()) continue;
+        await file.writeAsString(entry.value as String);
       } catch (e) {
         hadFailures = true;
         _logger.warning('Failed to restore per-book settings ${entry.key}: $e');
@@ -953,24 +989,52 @@ class BackupService {
     }
   }
 
-  /// Restore bookmarks
+  /// Restore bookmarks. [counts] לא ריק = ייבוא ממזג, והסימניות מתווספות.
   static Future<void> _restoreBookmarks(
-    List<Map<String, dynamic>> bookmarksData,
-  ) async {
+    List<Map<String, dynamic>> bookmarksData, {
+    BackupImportCounts? counts,
+  }) async {
     final repo = BookmarkRepository();
     final bookmarks = bookmarksData
         .map((data) => Bookmark.fromJson(data))
         .toList();
-    await repo.saveBookmarks(bookmarks);
+    if (counts == null) {
+      await repo.replaceBookmarks(bookmarks);
+      return;
+    }
+    // ⚠️ `mutate` ולא `load` + `replace`. הייבוא הממזג הוא **תוספת**, ולכן
+    // הוא בדיוק המקרה שבו read-modify-write מוחק: סימנייה שנוספה בחלון אחר
+    // בין הקריאה לכתיבה נעלמה. אותה המרה נעשתה כבר בשולחנות העבודה.
+    var added = 0;
+    await repo.mutateBookmarks((current) {
+      final result = BackupImportMerge.mergeBookmarks(current, bookmarks);
+      // ⚠️ נקבע בכל ניסיון ולא נסכם: `mutate` עשוי להריץ את הפונקציה שוב
+      // על רשימה טרייה, וצבירה הייתה סופרת פעמיים.
+      added = result.added;
+      return result.merged;
+    });
+    counts.bookmarks += added;
   }
 
-  /// Restore history
+  /// Restore history. [counts] לא ריק = ייבוא ממזג, והרשומות מתווספות.
   static Future<void> _restoreHistory(
-    List<Map<String, dynamic>> historyData,
-  ) async {
+    List<Map<String, dynamic>> historyData, {
+    BackupImportCounts? counts,
+  }) async {
     final repo = HistoryRepository();
     final history = historyData.map((data) => Bookmark.fromJson(data)).toList();
-    await repo.saveHistory(history);
+    if (counts == null) {
+      await repo.replaceHistory(history);
+      return;
+    }
+    // ⚠️ `mutate` — ראו ההערה ב-`_restoreBookmarks`.
+    var added = 0;
+    await repo.mutateHistory((current) {
+      final result = BackupImportMerge.mergeHistory(current, history);
+      added = result.added;
+      return result.merged;
+    });
+    counts.history += added;
   }
 
   /// מפתח העיגון שנוכחותו מעידה שהגיבוי יודע לבטא עיגון להערה.
@@ -981,8 +1045,9 @@ class BackupService {
   /// מחזיר את מספר ההערות שקובץ הגיבוי אינו יכול לבטא להן עיגון (ראה
   /// [_restoreNoteAnchoredAsBefore]) — הן תסומנה על כל השורה במקום על המילים.
   static Future<int> _restoreNotes(
-    List<Map<String, dynamic>> notesData,
-  ) async {
+    List<Map<String, dynamic>> notesData, {
+    BackupImportCounts? counts,
+  }) async {
     final database = PersonalNotesDatabase.instance;
     var anchorlessNotes = 0;
 
@@ -1002,6 +1067,18 @@ class BackupService {
               if (!json.containsKey(_noteAnchorKey)) {
                 note = await _restoreNoteAnchoredAsBefore(database, note);
                 if (!note.isWordAnchored) anchorlessNotes++;
+              }
+              if (counts != null) {
+                // `insertNote` הוא INSERT OR REPLACE — בייבוא ממזג הוא היה
+                // דורס הערה מקומית שנערכה מאוחר יותר מזו שבקובץ.
+                final existing = await database.getNote(note.id);
+                if (existing == null) {
+                  counts.notes++;
+                } else if (note.updatedAt.isAfter(existing.updatedAt)) {
+                  counts.notesUpdated++;
+                } else {
+                  continue;
+                }
               }
               await database.insertNote(note);
             } catch (e) {
@@ -1095,16 +1172,24 @@ class BackupService {
   // אם תוסף אחד נכשל — מחזיר `true` כדי שהמשתמש יראה שחזור חלקי.
   static Future<bool> _restorePlugins(
     List<Map<String, dynamic>> pluginsData,
-    List<BackupStore> stores,
-  ) async {
+    List<BackupStore> stores, {
+    BackupImportCounts? counts,
+  }) async {
     final db = PluginSystemDatabase.instance;
     var hadFailures = false;
+
+    // בייבוא ממזג תוסף שכבר מותקן כאן אינו נדרס: ההתקנה המקומית עשויה להיות
+    // חדשה יותר, והנתונים שלה (kvStore) הם של המשתמש הזה.
+    final installedIds = counts == null
+        ? const <String>{}
+        : (await db.getAllInstalledPlugins()).map((p) => p.pluginId).toSet();
 
     for (final entry in pluginsData) {
       try {
         final installation = (entry['installation'] as Map)
             .cast<String, dynamic>();
         final pluginId = installation['plugin_id'] as String;
+        if (installedIds.contains(pluginId)) continue;
         // המזהה מגיע מקובץ הגיבוי ומרכיב נתיב שנמחק ב-recursive; מזהה כמו `..`
         // היה מוחק תיקייה שרירותית.
         if (!PluginManifestValidator.isValidPluginId(pluginId)) {
@@ -1138,6 +1223,8 @@ class BackupService {
           'kvStore': entry['kvStore'],
           'publishedRecords': entry['publishedRecords'],
         });
+
+        counts?.plugins++;
       } catch (e) {
         _logger.warning('Failed to restore plugin entry: $e');
         hadFailures = true;
@@ -1205,19 +1292,35 @@ class BackupService {
   }
 
   /// Restore workspaces
+  /// [counts] לא ריק = ייבוא ממזג: השולחנות המיובאים נוספים בסוף הרשימה,
+  /// והשולחן הפעיל אינו זז (ראה [BackupImportMerge.workspacesToAdd]).
   static Future<void> _restoreWorkspaces(
     List<Map<String, dynamic>> workspacesData,
-    Object? currentWorkspace,
-  ) async {
+    Object? currentWorkspace, {
+    BackupImportCounts? counts,
+  }) async {
     final repo = WorkspaceRepository();
     final workspaces = workspacesData
         .map((data) => Workspace.fromJson(data))
         .toList();
+    if (counts != null) {
+      final (existing, _) = await repo.loadWorkspaces();
+      final toAdd = BackupImportMerge.workspacesToAdd(existing, workspaces);
+      if (toAdd.isEmpty) return;
+      counts.workspaces += toAdd.length;
+      await repo.mutateWorkspaces(
+        (current) => [
+          ...current,
+          ...BackupImportMerge.workspacesToAdd(current, workspaces),
+        ],
+      );
+      return;
+    }
     final currentId = _resolveCurrentWorkspaceId(
       workspaces: workspaces,
       currentWorkspace: currentWorkspace,
     );
-    await repo.saveWorkspaces(workspaces, currentId);
+    await repo.replaceWorkspaces(workspaces, currentId);
   }
 
   /// שחזור הטאבים הפתוחים (ראה [_backupOpenTabs]). גיבוי בלעדיהם משאיר את
@@ -1252,8 +1355,9 @@ class BackupService {
   /// Restore Shamor Zachor data - restores ALL backed up keys.
   /// Returns true if the section was skipped (Hive box not open).
   static Future<bool> _restoreShamorZachor(
-    Map<String, dynamic> shamorZachorData,
-  ) async {
+    Map<String, dynamic> shamorZachorData, {
+    BackupImportCounts? counts,
+  }) async {
     if (!Hive.isBoxOpen(HiveCache.keyName)) {
       _logger.warning(
         '_restoreShamorZachor: Hive box not open — skipping (partial restore)',
@@ -1261,6 +1365,24 @@ class BackupService {
       return true;
     }
     final box = Hive.box<dynamic>(HiveCache.keyName);
+
+    if (counts != null) {
+      final local = {
+        for (final key in box.keys.where(
+          (k) => k.toString().startsWith('sz:'),
+        ))
+          key.toString(): box.get(key),
+      };
+      final merged = BackupImportMerge.mergeShamorZachor(
+        local,
+        shamorZachorData,
+      );
+      counts.shamorZachorBooks += merged.addedBooks;
+      for (final entry in merged.toWrite.entries) {
+        await box.put(entry.key, entry.value);
+      }
+      return false;
+    }
 
     for (final entry in shamorZachorData.entries) {
       final key = entry.key;
@@ -1436,7 +1558,7 @@ class BackupService {
     if (_hasSettingsChanges(backupData)) return true;
 
     // Always recommend: workspace added
-    if (_hasWorkspaceAdded(backupData)) return true;
+    if (await _hasWorkspaceAdded(backupData)) return true;
 
     // Always recommend: plugin added
     if (await _hasPluginAdded(backupData)) return true;
@@ -1466,10 +1588,12 @@ class BackupService {
     return false;
   }
 
-  static bool _hasWorkspaceAdded(Map<String, dynamic> backupData) {
+  static Future<bool> _hasWorkspaceAdded(
+    Map<String, dynamic> backupData,
+  ) async {
     final backedUpWorkspaces = backupData['workspaces'] as List?;
     if (backedUpWorkspaces == null) return false;
-    final (workspaces, _) = WorkspaceRepository().loadWorkspaces();
+    final (workspaces, _) = await WorkspaceRepository().loadWorkspaces();
     return workspaces.length > backedUpWorkspaces.length;
   }
 

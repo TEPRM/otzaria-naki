@@ -6,6 +6,8 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:collection/collection.dart' show IterableExtension;
 import 'package:otzaria/core/messages/text_book_messages.dart';
+import 'package:otzaria/core/messages/report_messages.dart';
+import 'package:otzaria/text_book/view/error_report_dialog.dart';
 import 'package:otzaria/core/ui_snack.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -30,9 +32,11 @@ import 'package:otzaria/tabs/bloc/tabs_state.dart';
 import 'package:otzaria/text_book/bloc/text_book_bloc.dart';
 import 'package:otzaria/text_book/utils/book_versions_action.dart';
 import 'package:otzaria/text_book/utils/per_book_display_settings.dart';
+import 'package:otzaria/text_display/view/text_display_bar_button.dart';
 import 'package:otzaria/text_book/utils/reader_build_policy.dart';
 import 'package:otzaria/text_book/utils/text_book_export_utils.dart';
 import 'package:otzaria/text_book/utils/visible_index.dart';
+import 'package:otzaria/text_display/text_display_exports.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:otzaria/text_book/bloc/text_book_event.dart';
 import 'package:otzaria/text_book/bloc/text_book_state.dart';
@@ -49,6 +53,7 @@ import 'package:otzaria/models/books.dart';
 import 'package:otzaria/tabs/models/tab.dart';
 import 'package:otzaria/printing/print_content_models.dart';
 import 'package:otzaria/printing/view/printing_screen.dart';
+import 'package:otzaria/printing/export_restriction_service.dart';
 import 'package:otzaria/printing/word_export_service.dart';
 import 'package:otzaria/text_book/view/tabbed_commentary_panel.dart';
 import 'package:otzaria/text_book/view/text_book_scaffold.dart';
@@ -205,6 +210,10 @@ String _createTextBookTextExport(_TextExportRequest request) {
       .join('\n');
 }
 
+/// פרופיל ערוץ הייצוא של גוף הספר — משותף להדפסה ולייצוא.
+TextDisplayProfile _exportProfile(TextBookLoaded state) =>
+    state.displayProfile(target: TextTarget.body, channel: TextChannel.export);
+
 final GlobalKey textBookNavigationTourTargetKey = GlobalKey(
   debugLabel: 'text_book_navigation_tour_target',
 );
@@ -273,6 +282,9 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
   // עוקב אחרי מצב הפאנל הצדדי כדי לבקש פוקוס לשדה החיפוש רק ברגע שהפאנל
   // נפתח (false→true) ולא בכל rebuild - אחרת היה גונב פוקוס מתוכן הספר.
   bool _wasLeftPaneShown = false;
+
+  /// לשונית החיפוש נבחרה בפתיחת הספר (מתוצאת חיפוש) ולא בהקשה של המשתמש.
+  bool _searchTabAutoSelected = false;
   FocusRepository? _focusRepository; // שמירת הפניה לשימוש ב-dispose
   String? _selectedTextForSearch;
   int?
@@ -604,8 +616,6 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
       final png = await _capturePageShapeViewPng();
       if (!mounted) return;
 
-      final settingsState = context.read<SettingsBloc>().state;
-
       if (png == null || png.isEmpty) {
         UiSnack.showError(TextBookMessages.cannotCapturePageShapeForPrint);
         return;
@@ -618,8 +628,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
           // במצב זה ה-PDF נוצר מצילום המסך, ולכן אין צורך בנתוני הטקסט
           data: Future.value(''),
           bookId: state.book.title,
-          removeNikud: state.removeNikud,
-          removeTaamim: !settingsState.showTeamim,
+          displayProfile: _exportProfile(state),
           createPdfOverride: (PdfPageFormat format) async {
             final doc = pw.Document(compress: false);
             final img = pw.MemoryImage(png);
@@ -653,14 +662,17 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
         links: state.links,
         activeCommentators: state.activeCommentators,
         startLine: _topmostVisibleSourceLine(state),
-        removeNikud: state.removeNikud,
-        removeTaamim: !context.read<SettingsBloc>().state.showTeamim,
+        displayProfile: _exportProfile(state),
         tableOfContents: state.tableOfContents,
       ),
     );
   }
 
   Future<void> _exportWholeBook(TextBookLoaded state) async {
+    if (ExportRestrictionService.isRestricted(state.book.title)) {
+      UiSnack.showError(TextBookMessages.editableExportRestricted);
+      return;
+    }
     if (!await verifySaferModePassword(context)) return;
     if (!mounted) return;
 
@@ -671,9 +683,10 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
 
       final extension = selectedFormat.extension;
       final settingsState = context.read<SettingsBloc>().state;
-      final removeTaamim = !settingsState.showTeamim;
-      final shouldReplaceHolyNames =
-          Settings.getValue<bool>('key-replace-holy-names') ?? true;
+      final profile = state.displayProfile(
+        target: TextTarget.body,
+        channel: TextChannel.export,
+      );
       final fullContent = await context
           .read<TextBookBloc>()
           .repository
@@ -687,10 +700,10 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
           _WordExportRequest(
             title: state.book.title,
             rawContent: fullContent,
-            removeNikud: state.removeNikud,
-            removeTaamim: removeTaamim,
-            shouldReplaceHolyNames: shouldReplaceHolyNames,
-            holyNameStyle: settingsState.holyNameStyle,
+            removeNikud: profile.removeNikud,
+            removeTaamim: profile.removeTeamim,
+            shouldReplaceHolyNames: profile.replaceHolyNames,
+            holyNameStyle: profile.holyNameStyle,
             fontFamily: settingsState.fontFamily,
             fontSize: state.fontSize,
           ),
@@ -701,10 +714,10 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
           _createTextBookTextExport,
           _TextExportRequest(
             rawContent: fullContent,
-            removeNikud: state.removeNikud,
-            removeTaamim: removeTaamim,
-            shouldReplaceHolyNames: shouldReplaceHolyNames,
-            holyNameStyle: settingsState.holyNameStyle,
+            removeNikud: profile.removeNikud,
+            removeTaamim: profile.removeTeamim,
+            shouldReplaceHolyNames: profile.replaceHolyNames,
+            holyNameStyle: profile.holyNameStyle,
           ),
         );
         bytes = Uint8List.fromList(utf8.encode(text));
@@ -824,6 +837,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
     // אחרת, נתחיל בלשונית 'ניווט' (שנמצאת במקום ה-0)
     // highlightText לא פותח את חלונית החיפוש
     final int initialIndex = widget.tab.searchText.isNotEmpty ? 2 : 0;
+    _searchTabAutoSelected = initialIndex != 0;
 
     // יוצרים את בקר הלשוניות עם האינדקס ההתחלתי שקבענו
     tabController = TabController(
@@ -832,9 +846,9 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
       initialIndex: initialIndex,
     );
     tabController.addListener(_handleTabChange);
-    // ה-listener נורה רק על שינוי — פתיחה ישירה ללשונית החיפוש (ספר שנפתח
-    // מתוצאת חיפוש) חייבת סנכרון מיידי, אחרת סרגל החיפוש מושבת (issue #1063).
-    _searchHost.activeTab = tabController.index;
+    // ה-listener נורה רק על שינוי, ובלי סימון מיידי סרגל החיפוש מושבת
+    // (issue #1063). לשונית אוטומטית נסמכת ב-didChangeDependencies, שם ידוע הרוחב.
+    if (!_searchTabAutoSelected) _searchHost.activeTab = tabController.index;
 
     // בדיקה האם יש כותרות חלופיות
     _checkAltTitles();
@@ -907,6 +921,24 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
     });
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncSearchHostActiveTab();
+  }
+
+  /// מסמן ב-host את הלשונית הנבחרת. לשונית שנבחרה אוטומטית (ספר שנפתח מחיפוש)
+  /// מסומנת רק כשהשדה מורם לסרגל — בחלונית הוא ממקד את עצמו ופותח מקלדת.
+  void _syncSearchHostActiveTab() {
+    if (!NavPanelSearch.shouldMarkActiveTab(
+      context,
+      autoSelected: _searchTabAutoSelected,
+    )) {
+      return;
+    }
+    _searchHost.activeTab = tabController.index;
+  }
+
   /// טעינת הגדרות פר-ספר
   Future<void> _checkAltTitles() async {
     try {
@@ -935,7 +967,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
             initialIndex: newIndex,
           );
           tabController.addListener(_handleTabChange);
-          _searchHost.activeTab = tabController.index;
+          _syncSearchHostActiveTab();
         });
       }
     } catch (e) {
@@ -946,15 +978,19 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
   /// מאזין למעבר בין לשוניות הפאנל הצדדי. מעביר פוקוס לשדה החיפוש של
   /// הלשונית החדשה רק לאחר שהמעבר הושלם (לא במהלך אנימציית המעבר).
   void _handleTabChange() {
+    // בחירה של המשתמש — מכאן והלאה השדה רשאי למקד את עצמו.
+    _searchTabAutoSelected = false;
     _searchHost.activeTab = tabController.index;
     if (tabController.indexIsChanging) return;
     _focusActiveTabSearchField();
   }
 
   /// מבקש פוקוס לשדה החיפוש של הלשונית הפעילה בפאנל הצדדי
-  /// ('ניווט' / 'כותרות' / 'חיפוש'). לא עושה דבר באנדרואיד או כשהפאנל סגור.
+  /// ('ניווט' / 'כותרות' / 'חיפוש'). לא עושה דבר כשהפאנל סגור.
   void _focusActiveTabSearchField() {
-    if (Platform.isAndroid) return;
+    // במסך צר השדה יושב בתוך החלונית ולא בסרגל שמעליה, ומיקוד יזום שלו פותח
+    // את מקלדת המערכת על ספר שהמשתמש רק רצה לקרוא.
+    if (!NavPanelSearch.canHoist(context)) return;
     final state = context.read<TextBookBloc>().state;
     if (state is! TextBookLoaded || !state.showLeftPane) return;
 
@@ -968,7 +1004,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
     }
   }
 
-  /// מאתר את המהדורות המקבילות (לחצן "פתח מהדורה מקבילה") פעם אחת, אחרי
+  /// מאתר את המהדורות המקבילות (לחצן המהדורה המקבילה) פעם אחת, אחרי
   /// שתוכן הספר כבר נטען. `getCompanionBook` דורש את כל קטלוג הספרייה
   /// (~300ms CPU), ולכן הוא נדחה לכאן כדי לא לחנוק את שאילתת תוכן הספר
   /// בעלייה. עד שיתבצע, הלחצן פשוט מוסתר.
@@ -1036,12 +1072,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
         if (settings.commentatorsBelow != null) {
           textBookBloc.add(ToggleSplitView(!settings.commentatorsBelow!));
         }
-        if (settings.removeNikud != null) {
-          textBookBloc.add(ToggleNikud(settings.removeNikud!));
-        }
-        if (settings.removePunctuation != null) {
-          textBookBloc.add(TogglePunctuation(settings.removePunctuation!));
-        }
+        // ניקוד/פיסוק/טעמים נטענים כשכבת ספר בתוך LoadContent, לא כאן.
         if (settings.continuousReadingMode != null) {
           textBookBloc.add(
             ToggleContinuousReadingMode(settings.continuousReadingMode!),
@@ -1409,7 +1440,6 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
                     }
                   });
 
-                  final wideScreen = MediaQuery.of(context).size.width >= 600;
                   return KeyboardListener(
                     focusNode: _bookContentFocusNode,
                     autofocus: false,
@@ -1428,7 +1458,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
                     child: Scaffold(
                       body: Column(
                         children: [
-                          _buildAppBar(context, state, wideScreen),
+                          _buildAppBar(context, state),
                           Expanded(child: _buildBody(context, state)),
                         ],
                       ),
@@ -1449,11 +1479,14 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
   Widget _buildAppBar(
     BuildContext context,
     TextBookLoaded state,
-    bool wideScreen,
   ) {
     return AppTopBar(
+      minCenterWidth: ReaderNavCenter.minTitleWidth,
       leadingItems: [
-        AppTopBarItem(widget: _buildPaneSearchBar(state)),
+        AppTopBarItem(
+          flexible: true,
+          widget: _buildPaneSearchBar(state),
+        ),
         AppTopBarItem(widget: _buildMenuButton(context, state)),
         if (state.showPageShapeView)
           AppTopBarItem(widget: _buildPageShapeSettingsButton(context, state)),
@@ -1473,10 +1506,8 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
             ),
       trailingItems: [
         AppTopBarItem(
-          widget: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: _buildActions(context, state, wideScreen),
-          ),
+          flexible: true,
+          widget: _buildActions(context, state),
         ),
       ],
     );
@@ -1639,53 +1670,42 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
     );
   }
 
-  List<Widget> _buildActions(
+  Widget _buildActions(
     BuildContext context,
     TextBookLoaded state,
-    bool wideScreen,
   ) {
-    final maxButtons = maxToolbarButtonsForWidth(
-      MediaQuery.of(context).size.width,
-    );
-
-    return [
-      ListenableBuilder(
-        listenable: PluginToolbarRegistry.instance,
-        builder: (context, _) => Consumer<ShamorZachorDataProvider>(
-          builder: (context, _, _) => ResponsiveActionBar(
-            key: const ValueKey('responsive_actions'),
-            overflowMenuOffset: const Offset(0, 8),
-            overflowButtonKey: widget.enableTourTargets
-                ? textBookOverflowTourTargetKey
-                : null,
-            menuItemKeysByTooltip: widget.enableTourTargets
-                ? {
-                    _getViewModeTooltip(state):
-                        textBookOverflowCommentatorsTourTargetKey,
-                    'סימניות בספר זה': textBookOverflowBookmarkTourTargetKey,
-                    'חיפוש': textBookOverflowSearchTourTargetKey,
-                    'הדפסה': textBookOverflowPrintTourTargetKey,
-                  }
-                : null,
-            actions: [
-              ..._buildDisplayOrderActions(context, state),
-              ..._buildPluginActions(context),
-            ],
-            // מיזוג לפי משקל: פריטי תוסף עם order משתבצים בין המובנים.
-            alwaysInMenu: mergeOrderedMenuActions(
-              _buildAlwaysInMenuActions(context, state),
-              _buildOrderedPluginOverflowActions(context),
-            ),
-            // בתצוגה מפוצלת אין מקום לניווט במרכז הסרגל — הוא עובר לשורת
-            // הכפתורים שבראש תפריט ה-"...".
-            menuHeaderActions: widget.isInCombinedView
-                ? _buildNavigationActions()
-                : null,
-            maxVisibleButtons: maxButtons,
+    return ListenableBuilder(
+      listenable: PluginToolbarRegistry.instance,
+      builder: (context, _) => Consumer<ShamorZachorDataProvider>(
+        builder: (context, _, _) => ResponsiveActionBar(
+          key: const ValueKey('responsive_actions'),
+          overflowMenuOffset: const Offset(0, 8),
+          overflowButtonKey: widget.enableTourTargets
+              ? textBookOverflowTourTargetKey
+              : null,
+          menuItemKeysByTooltip: widget.enableTourTargets
+              ? {
+                  _getViewModeTooltip(state):
+                      textBookOverflowCommentatorsTourTargetKey,
+                  'סימניות בספר זה': textBookOverflowBookmarkTourTargetKey,
+                  'חיפוש': textBookOverflowSearchTourTargetKey,
+                  'הדפסה': textBookOverflowPrintTourTargetKey,
+                }
+              : null,
+          actions: [
+            ..._buildDisplayOrderActions(context, state),
+            ..._buildPluginActions(context),
+          ],
+          alwaysInMenu: mergeOrderedMenuActions(
+            _buildAlwaysInMenuActions(context, state),
+            _buildOrderedPluginOverflowActions(context),
           ),
+          menuHeaderActions: widget.isInCombinedView
+              ? _buildNavigationActions()
+              : null,
         ),
       ),
-    ];
+    );
   }
 
   List<ActionButtonData> _buildPluginActions(BuildContext context) {
@@ -1744,6 +1764,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
         ),
         icon: _getViewModeIcon(state),
         tooltip: _getViewModeTooltip(state),
+        actionId: ToolbarActionId.viewMode,
         // ב-overflow הכפתור עצמו לא בנוי בעץ, לכן המצבים מוצגים כתת-תפריט
         submenuItems: [
           ActionButtonData(
@@ -1776,34 +1797,20 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
         ],
       ),
 
-      // 3) Nikud Button
+      // 3) תצוגת הטקסט: לחיצה מחליפה ניקוד, החץ פותח את כל הפרופיל
       ActionButtonData(
-        widget: _buildNikudButton(context, state),
-        icon: state.removeNikud
-            ? OtzariaIcons.alef_with_score_24_regular
-            : OtzariaIcons.alef_deletion_24_regular,
-        tooltip: state.removeNikud ? 'הצג ניקוד' : 'הסתר ניקוד',
-        onPressed: () async {
-          final newValue = !state.removeNikud;
-          context.read<TextBookBloc>().add(ToggleNikud(newValue));
-          await savePerBookDisplaySettings(
-            context,
-            state,
-            removeNikud: newValue,
-          );
-        },
-      ),
-
-      // 3b) Punctuation Button - מוסתר בספרי תנ"ך
-      if (!state.isTanach)
-        ActionButtonData(
-          widget: _buildPunctuationButton(context, state),
-          icon: state.removePunctuation
-              ? OtzariaIcons.alef_with_punctuation_24_regular
-              : OtzariaIcons.alef_with_eraser_24_regular,
-          tooltip: state.removePunctuation ? 'הצג פיסוק' : 'הסתר פיסוק',
-          onPressed: () => _toggleAndSavePunctuation(context, state),
+        widget: TextBookDisplayBarButton(
+          state: state,
+          compact: context.read<SettingsBloc>().state.compactMenuMode,
         ),
+        icon: textDisplayBarIcon(state.removeNikud),
+        tooltip: textDisplayBarTooltip(state.removeNikud),
+        actionId: ToolbarActionId.textDisplay,
+        toolbarWidth: BarSplitButton.toolbarWidth(
+          context.read<SettingsBloc>().state.compactMenuMode,
+        ),
+        onPressed: () => toggleTextBookNikud(context, state, TextTarget.body),
+      ),
 
       // 3c) Continuous Reading Mode Button - רק לספרים שתומכים (תנ"ך/תלמוד)
       if (state.supportsContinuousReadingMode)
@@ -1815,6 +1822,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
           tooltip: state.continuousReadingMode
               ? 'הצג כשורות בודדות'
               : 'הצג כטקסט רציף',
+          actionId: ToolbarActionId.continuousReading,
           onPressed: () => _toggleAndSaveContinuousReading(context, state),
         ),
 
@@ -1828,6 +1836,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
         icon: FluentIcons.search_24_regular,
         tooltip: 'חיפוש',
         onPressed: _openSearchFromToolbar,
+        actionId: ToolbarActionId.search,
       ),
 
       // 5) Zoom In Button
@@ -1835,6 +1844,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
         widget: _buildZoomInButton(context, state),
         icon: FluentIcons.zoom_in_24_regular,
         tooltip: 'הגדל את גודל הטקסט',
+        actionId: ToolbarActionId.zoomIn,
         onPressed: () async {
           final newSize = min(50.0, state.fontSize + 3);
           context.read<TextBookBloc>().add(UpdateFontSize(newSize));
@@ -1847,6 +1857,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
         widget: _buildZoomOutButton(context, state),
         icon: FluentIcons.zoom_out_24_regular,
         tooltip: 'הקטן את גודל הטקסט',
+        actionId: ToolbarActionId.zoomOut,
         onPressed: () async {
           final newSize = max(15.0, state.fontSize - 3);
           context.read<TextBookBloc>().add(UpdateFontSize(newSize));
@@ -1975,7 +1986,8 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
       ),
 
       // ייצוא הספר המלא - Word מעוצב או טקסט פשוט
-      if (!widget.isInCombinedView)
+      if (!widget.isInCombinedView &&
+          !ExportRestrictionService.isRestricted(state.book.title))
         (
           50,
           ActionButtonData(
@@ -2049,12 +2061,13 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
                 tooltip: 'הדפסה',
                 onPressed: () => _handlePrintPress(state),
               ),
-              ActionButtonData(
-                widget: const SizedBox.shrink(),
-                icon: FluentIcons.arrow_export_ltr_24_regular,
-                tooltip: 'ייצוא הספר',
-                onPressed: () => _exportWholeBook(state),
-              ),
+              if (!ExportRestrictionService.isRestricted(state.book.title))
+                ActionButtonData(
+                  widget: const SizedBox.shrink(),
+                  icon: FluentIcons.arrow_export_ltr_24_regular,
+                  tooltip: 'ייצוא הספר',
+                  onPressed: () => _exportWholeBook(state),
+                ),
               ActionButtonData(
                 widget: const SizedBox.shrink(),
                 icon: OtzariaIcons.book_information_24_regular,
@@ -2208,47 +2221,6 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
     );
   }
 
-  Widget _buildNikudButton(BuildContext context, TextBookLoaded state) {
-    final isCompact = context.read<SettingsBloc>().state.compactMenuMode;
-    return BarButton.icon(
-      tooltip: state.removeNikud ? 'הצג ניקוד' : 'הסתר ניקוד',
-      icon: state.removeNikud
-          ? OtzariaIcons.alef_with_score_24_regular
-          : OtzariaIcons.alef_deletion_24_regular,
-      compact: isCompact,
-      onPressed: () async {
-        final newValue = !state.removeNikud;
-        context.read<TextBookBloc>().add(ToggleNikud(newValue));
-        await savePerBookDisplaySettings(context, state, removeNikud: newValue);
-      },
-    );
-  }
-
-  Future<void> _toggleAndSavePunctuation(
-    BuildContext context,
-    TextBookLoaded state,
-  ) async {
-    final newValue = !state.removePunctuation;
-    context.read<TextBookBloc>().add(TogglePunctuation(newValue));
-    await savePerBookDisplaySettings(
-      context,
-      state,
-      removePunctuation: newValue,
-    );
-  }
-
-  Widget _buildPunctuationButton(BuildContext context, TextBookLoaded state) {
-    final isCompact = context.read<SettingsBloc>().state.compactMenuMode;
-    return BarButton.icon(
-      tooltip: state.removePunctuation ? 'הצג פיסוק' : 'הסתר פיסוק',
-      icon: state.removePunctuation
-          ? OtzariaIcons.alef_with_punctuation_24_regular
-          : OtzariaIcons.alef_with_eraser_24_regular,
-      compact: isCompact,
-      onPressed: () => _toggleAndSavePunctuation(context, state),
-    );
-  }
-
   Future<void> _toggleAndSaveContinuousReading(
     BuildContext context,
     TextBookLoaded state,
@@ -2295,11 +2267,13 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
         ShortcutValidator.getShortcutValue(
           ShortcutValidator.currentWindowSearchKey,
         ) ??
-        'ctrl+f';
+        '';
     final isCompact = context.read<SettingsBloc>().state.compactMenuMode;
     return BarButton.icon(
       key: key,
-      tooltip: 'חיפוש (${ShortcutHelper.formatShortcutForDisplay(shortcut)})',
+      tooltip: shortcut.isEmpty
+          ? 'חיפוש'
+          : 'חיפוש (${ShortcutHelper.formatShortcutForDisplay(shortcut)})',
       icon: FluentIcons.search_24_regular,
       compact: isCompact,
       onPressed: _openSearchFromToolbar,
@@ -2495,7 +2469,6 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
         context.read<TourCubit>().recordInteraction(
           TourInteraction(type: TourInteractionType.printUsed),
         );
-        final settingsState = context.read<SettingsBloc>().state;
         // תוכן מלא מה-repository — state.content יכול להיות חלקי (חימום/שחרור).
         // חובה לקרוא כאן: בתוך ה-builder ה-context הוא של הדיאלוג וחסר לו provider ל-TextBookBloc.
         final contentData = context
@@ -2512,8 +2485,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
             links: state.links,
             activeCommentators: state.activeCommentators,
             startLine: _topmostVisibleSourceLine(state),
-            removeNikud: state.removeNikud,
-            removeTaamim: !settingsState.showTeamim,
+            displayProfile: _exportProfile(state),
             tableOfContents: state.tableOfContents,
           ),
         );
@@ -2657,7 +2629,9 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
   ) {
     final compact = context.read<SettingsBloc>().state.compactMenuMode;
     final primary = _parallelEditions.first;
-    const tooltip = 'פתח מהדורה מקבילה';
+    final tooltip = primary.isCompanion
+        ? 'פתח בתצוגת PDF'
+        : 'פתח מהדורה מקבילה';
     if (_parallelEditions.length == 1) {
       return ActionButtonData(
         widget: BarButton.icon(
@@ -2668,6 +2642,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
         ),
         icon: OtzariaIcons.book_pdf_24_regular,
         tooltip: tooltip,
+        actionId: ToolbarActionId.parallelEdition,
         onPressed: () => _openParallelEdition(context, state, primary),
       );
     }
@@ -2675,6 +2650,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
       icon: OtzariaIcons.book_pdf_24_regular,
       tooltip: tooltip,
       compact: compact,
+      actionId: ToolbarActionId.parallelEdition,
       onPressed: () => _openParallelEdition(context, state, primary),
       menuItems: [
         for (final edition in _parallelEditions)
@@ -3128,13 +3104,16 @@ bool _handleGlobalKeyEvent(
       ShortcutValidator.getShortcutValue(
         ShortcutValidator.currentWindowSearchKey,
       ) ??
-      'ctrl+f';
+      '';
   final printShortcut =
       Settings.getValue<String>('key-shortcut-print') ?? 'ctrl+p';
   final addBookmarkShortcut =
       Settings.getValue<String>('key-shortcut-add-bookmark') ?? 'ctrl+b';
   final addNoteShortcut =
       Settings.getValue<String>('key-shortcut-add-note') ?? 'ctrl+n';
+  final reportErrorShortcut =
+      ShortcutValidator.getShortcutValue(ShortcutValidator.reportErrorKey) ??
+      '';
   final togglePdfShortcut =
       Settings.getValue<String>('key-shortcut-toggle-pdf-view') ??
       ShortcutValidator.defaultShortcuts['key-shortcut-toggle-pdf-view'] ??
@@ -3182,7 +3161,6 @@ bool _handleGlobalKeyEvent(
     context.read<TourCubit>().recordInteraction(
       TourInteraction(type: TourInteractionType.printUsed),
     );
-    final settingsState = context.read<SettingsBloc>().state;
     // תוכן מלא מה-repository — state.content יכול להיות חלקי (חימום/שחרור).
     // חובה לקרוא כאן: בתוך ה-builder ה-context הוא של הדיאלוג וחסר לו provider ל-TextBookBloc.
     final contentData = context.read<TextBookBloc>().repository.getBookContent(
@@ -3198,8 +3176,7 @@ bool _handleGlobalKeyEvent(
         links: state.links,
         activeCommentators: state.activeCommentators,
         startLine: _topmostVisibleSourceLine(state),
-        removeNikud: state.removeNikud,
-        removeTaamim: !settingsState.showTeamim,
+        displayProfile: _exportProfile(state),
         tableOfContents: state.tableOfContents,
       ),
     );
@@ -3226,6 +3203,32 @@ bool _handleGlobalKeyEvent(
       selectedText: selectedTextForNote,
       selectedLineIndex: selectedLineForNote,
       selectionColumn: selectedColumnForNote,
+    );
+    return true;
+  }
+
+  // דיווח על טעות בספר — רק כשיש טקסט מסומן או קטע נבחר, בדיוק כמו הפריט
+  // בתפריט ההקשר (שאינו מוצג בספרי המשתמש).
+  if (reportErrorShortcut.isNotEmpty &&
+      !state.book.isUserBook &&
+      ShortcutHelper.matchesShortcut(event, reportErrorShortcut)) {
+    // בצורת הדף, כשהבחירה במפרש, חלונית המפרש כבר פתחה דיווח על ספר המפרש.
+    if (SimpleTextViewer.commentaryReportHandledRecently) {
+      return true;
+    }
+    final reportLineIndex = selectedLineForNote ?? state.selectedIndex;
+    final reportText = selectedTextForNote ?? '';
+    if (reportText.trim().isEmpty && reportLineIndex == null) {
+      UiSnack.show(ReportMessages.selectTextToReport);
+      return true;
+    }
+    ErrorReportHelper.showErrorReportDialog(
+      context: context,
+      selectedText: reportText,
+      state: state,
+      fontSize: state.fontSize,
+      bookTitle: state.book.title,
+      savedSelectedIndex: reportLineIndex,
     );
     return true;
   }
@@ -3494,12 +3497,8 @@ Future<void> _dispatchContextMenuShortcut({
     return;
   }
 
-  final renderSettings = RenderSettings(
-    removeNikud: state.removeNikud,
-    removePunctuation: state.removePunctuation,
-    removeTeamim: !settingsState.showTeamim,
-    replaceHolyNames: settingsState.replaceHolyNames,
-    holyNameStyle: settingsState.holyNameStyle,
+  final renderSettings = RenderSettings.fromProfile(
+    state.bodyDisplayProfile,
     searchText: state.searchText,
     searchOptions: state.searchOptions,
     alternativeWords: state.alternativeWords,

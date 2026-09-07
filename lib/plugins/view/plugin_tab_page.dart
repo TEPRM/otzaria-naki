@@ -19,6 +19,7 @@ import 'package:path/path.dart' as p;
 import 'package:otzaria/plugins/services/plugin_page_launcher.dart';
 import 'package:otzaria/plugins/services/plugin_ref_line_resolver.dart';
 import 'package:otzaria/plugins/services/plugin_runtime_dispatcher.dart';
+import 'package:otzaria/plugins/services/plugin_unsaved_changes_registry.dart';
 import 'package:otzaria/plugins/storage/plugin_system_database.dart';
 import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -36,6 +37,8 @@ import 'package:otzaria/find_ref/repository/find_ref_factory.dart';
 import 'package:otzaria/find_ref/repository/find_ref_repository.dart';
 import 'package:otzaria/utils/navigation/book_open_coordinator.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:otzaria/utils/file/file_picker_dialog_options.dart';
+import 'package:otzaria/plugins/bridge/plugin_save_target.dart';
 import 'package:otzaria/settings/services/safer_mode_guard.dart';
 import 'package:otzaria/widgets/dialogs/dialogs_exports.dart';
 import 'package:otzaria/widgets/misc/middle_click_autoscroll.dart';
@@ -54,6 +57,7 @@ import 'package:otzaria/plugins/view/plugin_webview_failed_view.dart';
 import 'package:otzaria/plugins/services/windows_arch_info.dart';
 import 'package:otzaria/plugins/view/plugin_drop_guard_script.dart';
 import 'package:otzaria/plugins/view/plugin_linkify_script.dart';
+import 'package:otzaria/plugins/view/widgets/plugin_webview_focus_restorer.dart';
 import 'package:otzaria/plugins/services/plugin_file_server.dart';
 import 'package:otzaria/plugins/services/plugin_download_handler.dart';
 import 'package:otzaria/plugins/services/plugin_webview_permission_gate.dart';
@@ -216,6 +220,7 @@ class _PluginTabPageState extends State<PluginTabPage> {
   late final FindRefRepository _findRefRepository;
   bool _hasError = false;
   String? _devErrorMessage;
+  DateTime? _lastFileServerDenialLogAt;
 
   // כשל יצירה native לא מפעיל אף callback ב-Dart — נשאר רק מסך ריק.
   // השעון נדרך בבניית ה-WebView ומבוטל ב-onWebViewCreated, כדי לרשום ללוג.
@@ -227,6 +232,7 @@ class _PluginTabPageState extends State<PluginTabPage> {
 
   // Cache PackageInfo so the async gap in onLoadStop never crosses a dispose
   static PackageInfo? _cachedPackageInfo;
+  static const _fileServerDenialLogInterval = Duration(minutes: 1);
 
   @override
   void initState() {
@@ -282,7 +288,16 @@ class _PluginTabPageState extends State<PluginTabPage> {
         final results = await findRefRepository.findRefs(reference);
         return results
             .map(
-              (r) => (title: r.title, index: r.segment.toInt(), isPdf: r.isPdf),
+              (r) => (
+                title: r.title,
+                index: r.segment.toInt(),
+                isPdf: r.isPdf,
+                bookId: r.bookId,
+                reference: r.reference,
+                bookPath: r.bookPath,
+                isSourceLine: r.isSourceLine,
+                isUserBook: r.isUserBook,
+              ),
             )
             .toList();
       },
@@ -344,7 +359,8 @@ class _PluginTabPageState extends State<PluginTabPage> {
         if (!await verifySaferModePassword(context)) return null;
         if (!mounted) return null;
         return FilePicker.getDirectoryPath(
-          lockParentWindow: true,
+          windowsOptions: kModalWindowsOptions,
+          linuxOptions: kModalLinuxOptions,
           dialogTitle: title,
         );
       },
@@ -354,14 +370,44 @@ class _PluginTabPageState extends State<PluginTabPage> {
         if (!mounted) return null;
         final hasExtensions =
             allowedExtensions != null && allowedExtensions.isNotEmpty;
-        final result = await FilePicker.pickFiles(
+        final result = await FilePicker.pickFile(
           dialogTitle: title,
-          lockParentWindow: true,
+          windowsOptions: kModalWindowsOptions,
+          linuxOptions: kModalLinuxOptions,
           type: hasExtensions ? FileType.custom : FileType.any,
           allowedExtensions: hasExtensions ? allowedExtensions : null,
         );
-        return result?.files.single.path;
+        return result?.path;
       },
+      pickSaveLocation:
+          ({
+            required String suggestedName,
+            List<String>? allowedExtensions,
+            String? title,
+          }) async {
+            if (!mounted) return null;
+            if (!await verifySaferModePassword(context)) return null;
+            if (!mounted) return null;
+            final folder = await FilePicker.getDirectoryPath(
+              dialogTitle: title ?? 'בחירת תיקייה לשמירת הקובץ',
+              windowsOptions: kModalWindowsOptions,
+              linuxOptions: kModalLinuxOptions,
+            );
+            if (folder == null || !mounted) return null;
+            final typed = await showInputDialog(
+              context: context,
+              title: title ?? 'שמירת קובץ',
+              labelText: 'שם הקובץ',
+              initialValue: suggestedName,
+              confirmText: 'שמור',
+            );
+            if (typed == null) return null;
+            final fileName = pluginSaveFileName(
+              typed,
+              allowedExtensions?.firstOrNull,
+            );
+            return pluginSaveTargetPath(folder: folder, fileName: fileName);
+          },
     );
 
     _pluginRegistryRepository = pluginRegistryRepository;
@@ -445,6 +491,7 @@ class _PluginTabPageState extends State<PluginTabPage> {
         return;
       }
 
+      final wasInError = _devErrorMessage != null;
       setState(() => _devErrorMessage = null);
 
       try {
@@ -455,11 +502,29 @@ class _PluginTabPageState extends State<PluginTabPage> {
         widget.plugin.resolvedRootPath,
         manifest.entrypoint,
       );
-      _entrypointMissing = !File(localHtmlPath).existsSync();
+      final exists = File(localHtmlPath).existsSync();
+      if (!exists) {
+        setState(
+          () => _devErrorMessage =
+              'קובץ נקודת הכניסה חסר בתיקייה: $localHtmlPath',
+        );
+        return;
+      }
+      _entrypointMissing = false;
+
+      if (wasInError || webViewController == null) {
+        // במסך שגיאה ה-WebView ירד מהעץ וה-controller מת — איפוס הדגל
+        // למעלה בונה WebView חדש שטוען מחדש את נקודת הכניסה, במקום
+        // לקרוא ל-loadUrl על controller מת שזורק MissingPluginException.
+        webViewController = null;
+        return;
+      }
+
       await webViewController?.loadUrl(
         urlRequest: URLRequest(url: WebUri.uri(Uri.file(localHtmlPath))),
       );
     } catch (e) {
+      webViewController = null;
       if (mounted) {
         setState(
           () => _devErrorMessage = 'שגיאה בלתי צפויה בריענון התוסף: $e',
@@ -671,6 +736,37 @@ class _PluginTabPageState extends State<PluginTabPage> {
     registry: _pluginRegistryRepository,
   );
 
+  /// מאפשרת רק קבצים והעלאה פעילה של התוסף עצמו.
+  bool _isOwnFileServerRequest(Uri uri) =>
+      PluginFileServer.isUriForPlugin(uri, widget.plugin.pluginId) ||
+      PluginFileServer.instance.isUploadUriForPlugin(
+        uri,
+        widget.plugin.pluginId,
+      );
+
+  void _logFileServerDenial(Uri uri) {
+    final now = DateTime.now();
+    final lastLogAt = _lastFileServerDenialLogAt;
+    if (lastLogAt != null &&
+        now.difference(lastLogAt) < _fileServerDenialLogInterval) {
+      return;
+    }
+    _lastFileServerDenialLogAt = now;
+    final kind = uri.pathSegments.isEmpty
+        ? uri.path
+        : '/${uri.pathSegments.first}/…';
+    final message = 'בקשת התוסף לשרת הקבצים נחסמה בשער ה-WebView: $kind';
+    debugPrint('Plugin [${widget.plugin.pluginId}]: $message');
+    // fire-and-forget, כמו כל כתיבה ללוג הריצה.
+    unawaited(
+      PluginSystemDatabase.instance.writeLog(
+        widget.plugin.pluginId,
+        'warn',
+        message,
+      ),
+    );
+  }
+
   Widget _buildWebView() {
     if (_creationFailure != null) {
       return PluginWebViewFailedView(
@@ -716,6 +812,22 @@ class _PluginTabPageState extends State<PluginTabPage> {
         buildPluginDropGuardScript(),
         buildPluginLinkifyScript(auto: widget.plugin.manifest.autoLinkify),
       ]),
+      onShowFileChooser: (controller, showFileChooserRequest) async {
+        if (!mounted) {
+          return ShowFileChooserResponse(
+            handledByClient: true,
+            filePaths: null,
+          );
+        }
+        final verified = await verifySaferModePassword(context);
+        if (!verified) {
+          return ShowFileChooserResponse(
+            handledByClient: true,
+            filePaths: null,
+          );
+        }
+        return null;
+      },
       onWebViewCreated: (controller) {
         _creationWatchdog?.cancel();
         unawaited(_creationFailureSub?.cancel());
@@ -813,9 +925,12 @@ class _PluginTabPageState extends State<PluginTabPage> {
           // תוספים — השרת אינו יכול לזהות מי הפונה.
           if (uri.scheme == 'http' &&
               PluginFileServer.instance.isServerUri(uri)) {
-            return PluginFileServer.isUriForPlugin(uri, widget.plugin.pluginId)
-                ? NavigationActionPolicy.ALLOW
-                : NavigationActionPolicy.CANCEL;
+            // גם נתיבי קבצים (/f/) וגם נתיב ההעלאה (/w/) של התוסף הזה.
+            if (_isOwnFileServerRequest(uri)) {
+              return NavigationActionPolicy.ALLOW;
+            }
+            _logFileServerDenial(uri);
+            return NavigationActionPolicy.CANCEL;
           }
 
           if (uri.scheme == 'http' || uri.scheme == 'https') {
@@ -857,9 +972,12 @@ class _PluginTabPageState extends State<PluginTabPage> {
           // תוספים — השרת אינו יכול לזהות מי הפונה.
           if (uri.scheme == 'http' &&
               PluginFileServer.instance.isServerUri(uri)) {
-            if (PluginFileServer.isUriForPlugin(uri, widget.plugin.pluginId)) {
-              return null;
-            }
+            // גם נתיבי קבצים (/f/) וגם נתיב ההעלאה (/w/) של התוסף הזה: בלי
+            // ההחרגה השנייה ה-PUT של fs.beginBinaryWrite נחסם כאן, וכל
+            // שמירה בינארית נופלת ב-"Failed to fetch" (נמדד בווינדוס, שבו
+            // ה-fork של אוצריא כן מפעיל shouldInterceptRequest).
+            if (_isOwnFileServerRequest(uri)) return null;
+            _logFileServerDenial(uri);
             return WebResourceResponse(
               statusCode: 403,
               reasonPhrase: 'Forbidden',
@@ -886,6 +1004,11 @@ class _PluginTabPageState extends State<PluginTabPage> {
         }
       },
       onLoadStop: (controller, url) async {
+        // טעינה מחדש של הדף מאפסת את מצב ה-JS, ואיתו את הדגל שהוא הרים.
+        PluginUnsavedChangesRegistry.instance.removeInstance((
+          pluginId: widget.plugin.pluginId,
+          instanceId: widget.instanceId,
+        ));
         try {
           // לוכד theme לפני ה-await (context חייב להישמר synchronously)
           final theme = buildThemePayload(context);
@@ -1199,7 +1322,17 @@ class _PluginTabPageState extends State<PluginTabPage> {
 
     // ה-WebView מגיב ללחצן האמצעי בעצמו (Chromium מפעיל שם גלילה אוטומטית
     // משלו), ובלי החסימה היו נפתחים שני עוגנים במקביל.
-    return AutoScrollBarrier(child: webView);
+    return AutoScrollBarrier(
+      child: PluginWebViewFocusRestorer(
+        onRestore: () => unawaited(
+          PluginRuntimeDispatcher.instance.requestKeyboardFocus(
+            widget.plugin.pluginId,
+            instanceId: widget.instanceId,
+          ),
+        ),
+        child: webView,
+      ),
+    );
   }
 
   static bool get _needsWebViewPrerequisites {

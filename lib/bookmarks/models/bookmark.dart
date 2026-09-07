@@ -95,6 +95,23 @@ class Bookmark {
     return versionTitle == null ? base : '$base|version:$versionTitle';
   }
 
+  /// מפתח לזיהוי סימניה כפולה בייבוא מגיבוי של מכשיר אחר.
+  ///
+  /// למודל אין מזהה, ולכן הזהות ערכית: המיקום בספר, או טקסט החיפוש בסימניית
+  /// חיפוש. [label] אינו נכלל — אותו מיקום עם תיאור שנערך הוא אותה סימניה.
+  String get dedupeKey => isSearch
+      ? 'search:$ref'
+      : '${targetKind.name}:${bookIdentity(book)}:$index:$ref';
+
+  /// מזהה יציב של סימנייה בתוך רשימת הסימניות.
+  ///
+  /// ⚠️ אינדקס ברשימה **אינו** מזהה: חלון אחר יכול להוסיף סימנייה ולהזיז
+  /// את כל מה שאחריה, ואז מחיקה לפי אינדקס מוחקת את הסימנייה הלא נכונה.
+  /// ההרכב כאן הוא בדיוק מה ש-`addBookmark` מונע כפילות עליו — זיהוי הספר,
+  /// המיקום וסוג היעד — ולכן שתי סימניות אינן יכולות לחלוק אותו.
+  String get bookmarkIdentity =>
+      '${bookIdentity(book)}|$index|${targetKind.name}';
+
   Bookmark({
     required this.ref,
     required this.book,

@@ -1,3 +1,4 @@
+import 'package:otzaria/shortcuts/dynamic/dynamic_shortcut_dispatcher.dart';
 import 'dart:async';
 import 'package:otzaria/text_book/bloc/text_book_bloc.dart';
 import 'package:otzaria/text_book/text_book_repository.dart';
@@ -8,9 +9,11 @@ import 'package:otzaria/data/data_providers/file_system_data_provider.dart';
 import 'package:otzaria/models/books.dart';
 import 'package:otzaria/tabs/models/reading_tab_search_state.dart';
 import 'package:otzaria/tabs/models/tab.dart';
+import 'package:otzaria/text_book/view/page_shape/utils/page_shape_plugin_api.dart';
 import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:flutter/foundation.dart';
 import 'package:otzaria/search/models/search_configuration.dart';
+import 'package:otzaria/utils/text/ref_helper.dart';
 import 'package:otzaria/utils/ui/reading_left_pane_policy.dart';
 
 /// Represents a tab that contains a text book.
@@ -74,6 +77,31 @@ class TextBookTab extends OpenedTab {
   /// הכותרת הנוכחית של המיקום בספר (למשל "בראשית פרק ד")
   final currentTitle = ValueNotifier<String>("");
 
+  /// שולף את כתובת השורה [index] ב-[book] בלי לטעון את תוכן הספר.
+  @visibleForTesting
+  static Future<String?> Function(TextBook book, int index)
+  locationTitleResolver = refFromDbLine;
+
+  Future<void>? _locationTitleResolution;
+  bool _isDisposed = false;
+
+  /// ממלא את [currentTitle] לטאב שטרם נבנה על המסך (למשל אחרי שחזור בעלייה),
+  /// בשאילתת DB יחידה. הטאב הפעיל מקבל את הכותרת מה-BLoC, ולכן רק ערך ריק מתמלא.
+  Future<void> ensureLocationTitle() =>
+      _locationTitleResolution ??= _resolveLocationTitle();
+
+  Future<void> _resolveLocationTitle() async {
+    if (currentTitle.value.isNotEmpty) return;
+    final title = (await locationTitleResolver(book, index))?.trim();
+    if (_isDisposed || currentTitle.value.isNotEmpty) return;
+    if (title == null || title.isEmpty) {
+      // ה-DB אולי עוד לא נפתח — הקריאה הבאה תנסה שוב.
+      _locationTitleResolution = null;
+      return;
+    }
+    currentTitle.value = title;
+  }
+
   /// counter שמתגלגל עם כל בקשה לטוגל חלונית המפרשים מקיצור מקלדת גלובלי.
   /// המאזין הוא [SplitedViewScreen] בלבד; כל הגדלה = toggle יחיד.
   final ValueNotifier<int> toggleCommentatorsPaneNotifier = ValueNotifier<int>(
@@ -90,6 +118,13 @@ class TextBookTab extends OpenedTab {
   final ValueNotifier<int> navNextSegmentNotifier = ValueNotifier<int>(0);
   final ValueNotifier<int> navPreviousTocNotifier = ValueNotifier<int>(0);
   final ValueNotifier<int> navNextTocNotifier = ValueNotifier<int>(0);
+
+  /// בקשת העתקה מקיצור דינמי; המסך שמחזיק את הבחירה מבצע ומאפס ל-null.
+  final ValueNotifier<DynamicCopyRequest?> dynamicCopyRequestNotifier =
+      ValueNotifier<DynamicCopyRequest?>(null);
+
+  final PageShapePluginController pageShapePluginController =
+      PageShapePluginController();
 
   List<String>? commentators;
   bool _lastSplitView = false;
@@ -198,9 +233,16 @@ class TextBookTab extends OpenedTab {
     });
   }
 
+  /// `OpenedTab.from` מטפל ב-[TextBookTab] בענף ייעודי ואינו מגיע לכאן;
+  /// המימוש קיים כדי שהחוזה המופשט של [OpenedTab.clone] יתקיים, ומפנה
+  /// לאותו מקום אחד שבו יודעים אילו שדות לשמר.
+  @override
+  OpenedTab clone() => OpenedTab.from(this);
+
   /// Cleanup when the tab is disposed
   @override
   void dispose() {
+    _isDisposed = true;
     _stateSubscription?.cancel();
     currentTitle.dispose();
     toggleCommentatorsPaneNotifier.dispose();
@@ -209,6 +251,8 @@ class TextBookTab extends OpenedTab {
     navNextSegmentNotifier.dispose();
     navPreviousTocNotifier.dispose();
     navNextTocNotifier.dispose();
+    dynamicCopyRequestNotifier.dispose();
+    pageShapePluginController.detach();
     bloc.close();
     super.dispose();
   }
@@ -234,9 +278,32 @@ class TextBookTab extends OpenedTab {
     // המחרוזת הרצופה, וחלונית החיפוש הציגה "אין תוצאות" על חיפוש מורכב.
     final searchState = ReadingTabSearchState.fromJson(json);
 
+    // חמשת שדות ההדגשה. קובץ קיים מגרסה שלא שמרה אותם, או ערך פגום, חייבים
+    // ליפול לברירת מחדל ולא לזרוק — כישלון כאן מפיל טאב שלם מהשחזור.
+    final rawResultLines = json['initialSearchResultLines'];
+    final Set<int>? restoredResultLines = rawResultLines is List
+        // רשימה ריקה נשמרת כריקה: "רץ חיפוש ולא נמצאו תוצאות" אינו זהה
+        // ל-null שמשמעותו "לא רץ חיפוש מנוע".
+        ? rawResultLines.whereType<int>().toSet()
+        : null;
+
     return TextBookTab(
       index: json['initalIndex'],
       book: restoredBook,
+      highlightText: json['highlightText'] is String
+          ? json['highlightText'] as String
+          : '',
+      permanentHighlightLine: json['permanentHighlightLine'] is int
+          ? json['permanentHighlightLine'] as int
+          : null,
+      initialSearchResultLines: restoredResultLines,
+      pinpointHighlight: json['pinpointHighlight'] is String
+          ? json['pinpointHighlight'] as String
+          : null,
+      pinpointHighlightSectionIndex:
+          json['pinpointHighlightSectionIndex'] is int
+          ? json['pinpointHighlightSectionIndex'] as int
+          : null,
       commentators: List<String>.from(json['commentators']),
       splitedView: splitedView,
       showPageShapeView: json['showPageShapeView'] ?? false,
@@ -266,6 +333,14 @@ class TextBookTab extends OpenedTab {
     int currentIndex = index; // שמירת האינדקס הנוכחי כברירת מחדל
     // ספר ה-state כולל העשרה שנעשתה ברקע (id/מחבר/קטגוריות) — עדיף לשמירה.
     TextBook bookToSave = book;
+    // חמשת שדות ההדגשה. בלעדיהם הפעלה מחדש החזירה את הספר בלי ההדגשה
+    // שהמשתמש רואה ובלי סימון שורות התוצאה. שמות המפתחות הם שמות השדות של
+    // [TextBookTab] — ב-state שלושה מהם נקראים אחרת.
+    String highlightText = this.highlightText;
+    int? permanentHighlightLine = this.permanentHighlightLine;
+    Set<int>? searchResultLines = initialSearchResultLines;
+    String? pinpointHighlight = this.pinpointHighlight;
+    int? pinpointHighlightSectionIndex = this.pinpointHighlightSectionIndex;
 
     var searchState = ReadingTabSearchState(
       searchText: searchText,
@@ -292,6 +367,11 @@ class TextBookTab extends OpenedTab {
       commentators = loadedState.activeCommentators;
       splitedView = loadedState.showSplitView;
       showPageShapeView = loadedState.showPageShapeView;
+      highlightText = loadedState.highlightText;
+      permanentHighlightLine = loadedState.permanentHighlightLine;
+      searchResultLines = loadedState.searchResultLines;
+      pinpointHighlight = loadedState.pinpointHighlightText;
+      pinpointHighlightSectionIndex = loadedState.pinpointHighlightIndex;
       // עדכון האינדקס מה-state הנטען - תמיד לוקחים את האינדקס האחרון שנראה
       if (loadedState.visibleIndices.isNotEmpty) {
         currentIndex = loadedState.visibleIndices.first;
@@ -310,6 +390,17 @@ class TextBookTab extends OpenedTab {
       'showLeftPane': bloc.state.showLeftPane,
       'isPinned': isPinned,
       'type': 'TextBookTab',
+      // ערכי ברירת מחדל אינם נכתבים, כדי לא לנפח את הקובץ ולא להבדיל בין
+      // "לא נשמר" ל"נשמר ריק" — בדיוק כמו [ReadingTabSearchState.toJson].
+      if (highlightText.isNotEmpty) 'highlightText': highlightText,
+      'permanentHighlightLine': ?permanentHighlightLine,
+      // null = "לא רץ חיפוש מנוע"; רשימה ריקה = "רץ ולא מצא". הבחנה
+      // משמעותית, ולכן null אינו נכתב כרשימה ריקה.
+      if (searchResultLines != null)
+        'initialSearchResultLines': searchResultLines.toList(),
+      if (pinpointHighlight != null && pinpointHighlight.isNotEmpty)
+        'pinpointHighlight': pinpointHighlight,
+      'pinpointHighlightSectionIndex': ?pinpointHighlightSectionIndex,
       ...searchState.toJson(),
     };
   }

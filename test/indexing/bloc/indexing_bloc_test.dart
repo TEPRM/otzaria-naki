@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otzaria/data/data_providers/tantivy_data_provider.dart';
+import 'package:otzaria/core/windowing/window_role.dart';
 import 'package:otzaria/indexing/bloc/indexing_bloc.dart';
 import 'package:otzaria/indexing/bloc/indexing_event.dart';
 import 'package:otzaria/indexing/bloc/indexing_state.dart';
@@ -12,6 +13,8 @@ import 'package:otzaria/library/models/library.dart';
 import 'package:otzaria/models/books.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   const failure = IndexingFailure(
     bookTitle: 'מוגן',
     bookPath: 'locked.pdf',
@@ -26,6 +29,9 @@ void main() {
         ]);
   _FakeIndexingRepository repositoryOf(IndexingBloc bloc) =>
       (bloc as _FakeIndexingBloc).repository;
+
+  setUp(() => WindowRole.isSecondary = false);
+  tearDown(() => WindowRole.isSecondary = false);
 
   group('StartIndexing', () {
     blocTest<IndexingBloc, IndexingState>(
@@ -68,6 +74,42 @@ void main() {
           booksProcessed: 0,
           totalBooks: 2,
           isFinalizing: true,
+        ),
+        const IndexingComplete(),
+      ],
+    );
+
+    blocTest<IndexingBloc, IndexingState>(
+      'התקדמות האיחוד נפלטת כשבר על גבי מצב האיחוד',
+      build: () {
+        final repository = _FakeIndexingRepository()
+          ..finalizeGate = Completer<void>()
+          ..finalizeFractions = const [0.25, 0.75];
+        return _FakeIndexingBloc(repository);
+      },
+      act: (bloc) async {
+        bloc.add(StartIndexing(libraryWithBooks(2)));
+        await Future.delayed(Duration.zero);
+        repositoryOf(bloc).finalizeGate!.complete();
+      },
+      expect: () => [
+        const IndexingInProgress(booksProcessed: 0, totalBooks: 2),
+        const IndexingInProgress(
+          booksProcessed: 0,
+          totalBooks: 2,
+          isFinalizing: true,
+        ),
+        const IndexingInProgress(
+          booksProcessed: 0,
+          totalBooks: 2,
+          isFinalizing: true,
+          finalizingProgress: 0.25,
+        ),
+        const IndexingInProgress(
+          booksProcessed: 0,
+          totalBooks: 2,
+          isFinalizing: true,
+          finalizingProgress: 0.75,
         ),
         const IndexingComplete(),
       ],
@@ -152,6 +194,58 @@ void main() {
             .having((state) => state.booksProcessed, 'processed', 0)
             .having((state) => state.totalBooks, 'total', 1),
       ],
+    );
+  });
+
+  group('חלון משני', () {
+    setUp(() => WindowRole.isSecondary = true);
+
+    blocTest<IndexingBloc, IndexingState>(
+      'אינדוקס מלא אינו מגיע למאגר',
+      build: _FakeIndexingBloc.new,
+      act: (bloc) => bloc.add(StartIndexing(libraryWithBooks())),
+      verify: (bloc) => expect(repositoryOf(bloc).indexAllCalls, 0),
+    );
+
+    blocTest<IndexingBloc, IndexingState>(
+      'אינדוקס ספרים חדשים אינו מגיע למאגר',
+      build: _FakeIndexingBloc.new,
+      act: (bloc) {
+        final library = libraryWithBooks();
+        bloc.add(IndexSpecificBooks(library.books, library));
+      },
+      verify: (bloc) => expect(repositoryOf(bloc).indexBooksCalls, 0),
+    );
+
+    blocTest<IndexingBloc, IndexingState>(
+      'אינדוקס ספרים שהשתנו אינו מגיע למאגר',
+      build: _FakeIndexingBloc.new,
+      act: (bloc) {
+        final library = libraryWithBooks();
+        bloc.add(ReindexChangedBooks(library.books, library));
+      },
+      verify: (bloc) => expect(repositoryOf(bloc).reindexCalls, 0),
+    );
+
+    blocTest<IndexingBloc, IndexingState>(
+      'התאמת האינדקס אינה מגיעה למאגר',
+      build: _FakeIndexingBloc.new,
+      act: (bloc) => bloc.add(ReconcileIndex(libraryWithBooks())),
+      verify: (bloc) => expect(repositoryOf(bloc).reconcileCalls, 0),
+    );
+
+    blocTest<IndexingBloc, IndexingState>(
+      'ניקוי רשומות יתומות אינו מגיע למאגר',
+      build: _FakeIndexingBloc.new,
+      act: (bloc) => bloc.add(DropOrphanedIndexEntries(libraryWithBooks())),
+      verify: (bloc) => expect(repositoryOf(bloc).dropOrphanedCalls, 0),
+    );
+
+    blocTest<IndexingBloc, IndexingState>(
+      'איפוס האינדקס אינו מגיע למאגר',
+      build: _FakeIndexingBloc.new,
+      act: (bloc) => bloc.add(ClearIndex()),
+      verify: (bloc) => expect(repositoryOf(bloc).clearCalls, 0),
     );
   });
 
@@ -497,7 +591,10 @@ class _FakeIndexingBloc extends IndexingBloc {
     : this._(repository ?? _FakeIndexingRepository());
 
   _FakeIndexingBloc._(this.repository)
-    : super(repository, reportFailures: repository.reportedResults.add);
+    : super(
+        repository,
+        reportFailures: (result, _) => repository.reportedResults.add(result),
+      );
 
   final _FakeIndexingRepository repository;
 }
@@ -518,6 +615,7 @@ class _FakeIndexingRepository extends IndexingRepository {
   int indexBooksCalls = 0;
   int reindexCalls = 0;
   int reconcileCalls = 0;
+  int dropOrphanedCalls = 0;
   int cancelCalls = 0;
   int pauseCalls = 0;
   int resumeCalls = 0;
@@ -527,6 +625,7 @@ class _FakeIndexingRepository extends IndexingRepository {
 
   /// כשהוא מסופק — הריצה מדווחת על שלב האיחוד ונעצרת בו עד לשחרור.
   Completer<void>? finalizeGate;
+  List<double> finalizeFractions = const [];
 
   /// דיווחי onScanProgress שהסריקה ב-reconcile תפלוט לפני הסיום.
   List<(int, int)> scanProgressReports = const [];
@@ -548,12 +647,16 @@ class _FakeIndexingRepository extends IndexingRepository {
     void Function()? onActualIndexingStarted,
     required void Function(int processed, int total) onProgress,
     void Function()? onFinalizing,
+    void Function(double fraction)? onFinalizingProgress,
     bool includePdfBooks = true,
   }) async {
     indexAllCalls++;
     final gate = finalizeGate;
     if (gate != null) {
       onFinalizing?.call();
+      for (final fraction in finalizeFractions) {
+        onFinalizingProgress?.call(fraction);
+      }
       await gate.future;
       return result;
     }
@@ -599,6 +702,12 @@ class _FakeIndexingRepository extends IndexingRepository {
   }
 
   @override
+  Future<int> dropOrphanedIndexEntries(Library library) async {
+    dropOrphanedCalls++;
+    return 0;
+  }
+
+  @override
   Future<void> awaitReady() async {
     awaitReadyCalls++;
   }
@@ -638,8 +747,9 @@ class _FakeIndexingRepository extends IndexingRepository {
   }
 
   @override
-  Future<void> clearIndex() async {
+  Future<bool> clearIndex() async {
     clearCalls++;
+    return true;
   }
 }
 

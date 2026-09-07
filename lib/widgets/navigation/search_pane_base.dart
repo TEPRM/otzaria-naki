@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:otzaria_icons/otzaria_icons.dart';
+import 'package:otzaria/widgets/feedback/otzaria_empty_state.dart';
 import 'package:otzaria/widgets/navigation/nav_panel_search.dart';
 import 'package:otzaria/widgets/text/otzaria_search_field.dart';
 
@@ -142,6 +144,11 @@ class _SearchPaneBaseState extends State<SearchPaneBase> {
   Widget build(BuildContext context) {
     // בתוך חלונית ניווט השדה מצויר בסרגל שמעליה, ולכן מפרסמים ולא מציירים.
     final hoisted = NavPanelSearch.isHoisted(context);
+    // TabBarView בונה גם את הלשונית השכנה תוך כדי החלקה. autofocus בשכנה
+    // היה חוטף את הפוקוס ופותח את מקלדת המערכת בלי שהמשתמש ביקש.
+    final slot = NavPanelSearchSlot.indexOf(context);
+    final host = NavPanelSearchScope.hostOf(context);
+    final isActiveSlot = slot == null || host == null || host.activeTab == slot;
     final delegate = _delegate;
     final searchField = Padding(
       key: const ValueKey('searchField'),
@@ -152,7 +159,7 @@ class _SearchPaneBaseState extends State<SearchPaneBase> {
         child: OtzariaSearchField(
           controller: widget.searchController,
           focusNode: widget.focusNode,
-          autofocus: true,
+          autofocus: isActiveSlot,
           hintText: widget.hintText ?? '',
           onChanged: (value) =>
               _debounce(() => widget.onSearchTextChanged?.call(value)),
@@ -182,18 +189,12 @@ class _SearchPaneBaseState extends State<SearchPaneBase> {
     final resultsArea = NotificationListener<ScrollNotification>(
       onNotification: _onScrollNotification,
       child: widget.isNoResults
-          ? Center(
-              child: widget.errorMessage != null
-                  ? Padding(
-                      padding: const EdgeInsets.all(8.0),
-                      child: Text(
-                        widget.errorMessage!,
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.error,
-                        ),
-                      ),
-                    )
-                  : const Text('אין תוצאות'),
+          ? OtzariaEmptyState(
+              isCompact: true,
+              icon: widget.errorMessage != null
+                  ? FluentIcons.error_circle_24_regular
+                  : FluentIcons.document_search_24_regular,
+              title: widget.errorMessage ?? 'אין תוצאות',
             )
           : widget.resultsWidget,
     );

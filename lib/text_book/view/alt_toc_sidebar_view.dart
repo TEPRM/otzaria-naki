@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:otzaria/widgets/feedback/otzaria_empty_state.dart';
 import 'package:otzaria/widgets/lists/nav_tree_tile.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:otzaria_icons/otzaria_icons.dart';
@@ -658,10 +659,10 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
     final matches = _getMatchingEntries(_searchController.text);
 
     if (matches.isEmpty) {
-      return const Center(
-        child: Text(
-          'לא נמצאו תוצאות',
-        ),
+      return const OtzariaEmptyState(
+        isCompact: true,
+        icon: OtzariaIcons.search_in_titles_24_regular,
+        title: 'לא נמצאו תוצאות',
       );
     }
 
@@ -683,11 +684,10 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
           return NavTreeGroupCard(
             isGroupStart: index == 1,
             isGroupEnd: index == matches.length,
-            child: NavTreeTile.book(
+            child: NavTreeTile.heading(
               title: entry.text ?? '',
               level: 0,
               isSelected: isSelected,
-              icon: OtzariaIcons.text_bullet_list_24_regular,
               onTap: () => _handleEntryTap(structureId, entry),
             ),
           );
@@ -739,23 +739,17 @@ class _AltTocSidebarViewState extends State<AltTocSidebarView>
     // רמת המבנה היא 0, ולכן ערכי ה-TOC מוזחים רמה אחת פנימה.
     final level = entry.level + 1;
 
-    final tile = hasChildren
-        ? NavTreeTile.category(
-            title: entry.text ?? '',
-            level: level,
-            isSelected: isSelected,
-            isExpanded: isExpanded,
-            hasChildren: true,
-            onTap: () => _handleEntryTap(structureId, entry),
-            onToggleExpand: () => _toggleEntryExpanded(entry.id),
-          )
-        : NavTreeTile.book(
-            title: entry.text ?? '',
-            level: level,
-            isSelected: isSelected,
-            icon: OtzariaIcons.text_bullet_list_24_regular,
-            onTap: () => _handleEntryTap(structureId, entry),
-          );
+    final tile = NavTreeTile.heading(
+      title: entry.text ?? '',
+      level: level,
+      isSelected: isSelected,
+      isExpanded: isExpanded,
+      hasChildren: hasChildren,
+      onTap: () => _handleEntryTap(structureId, entry),
+      onToggleExpand: hasChildren
+          ? () => _toggleEntryExpanded(entry.id)
+          : null,
+    );
 
     return Column(
       key: itemKey,

@@ -27,6 +27,7 @@ import 'package:otzaria/search/view/search_dialog.dart';
 import 'package:otzaria/widgets/controls/bar_button.dart';
 import 'package:otzaria/widgets/navigation/nav_panel_search.dart';
 import 'package:otzaria/widgets/navigation/nav_side_panel.dart';
+import 'package:otzaria/widgets/navigation/reader_nav_center.dart';
 import 'package:otzaria/widgets/text/otzaria_search_field.dart';
 import 'package:otzaria/widgets/feedback/indexing_warning.dart';
 
@@ -490,6 +491,8 @@ class _TantivyFullTextSearchState extends State<TantivyFullTextSearch>
         if (status == null) {
           final text = Text(
             collapsed ? compactEngineLine : engineLine,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: muted,
           );
           return collapsed ? Tooltip(message: engineLine, child: text) : text;
@@ -689,6 +692,7 @@ class _TantivyFullTextSearchState extends State<TantivyFullTextSearch>
   }) {
     final hasQuery = state.searchQuery.isNotEmpty;
     return AppTopBar(
+      minCenterWidth: ReaderNavCenter.minTitleWidth,
       leadingItems: [
         if (showPaneSearchBar)
           AppTopBarItem(
@@ -719,10 +723,15 @@ class _TantivyFullTextSearchState extends State<TantivyFullTextSearch>
           ),
         ),
       ],
-      center: hasQuery ? _buildQueryDisplay(context) : const SizedBox.shrink(),
+      center: hasQuery
+          ? _buildQueryDisplay(context, showLabel: showPaneSearchBar)
+          : const SizedBox.shrink(),
       trailingItems: hasQuery
           ? [
               AppTopBarItem(
+                // בלוק המונים מצטמצם עם ellipsis כשאין מקום לשאר הפקדים,
+                // במקום לדחוף אותם אל מחוץ לסרגל.
+                flexible: true,
                 widget: _buildResultCounts(
                   context,
                   state,
@@ -793,19 +802,22 @@ class _TantivyFullTextSearchState extends State<TantivyFullTextSearch>
   }
 
   /// מילות החיפוש בתוך סרגל בעיצוב שדה החיפוש; לחיצה עליו פותחת את דיאלוג
-  /// העריכה.
-  Widget _buildQueryDisplay(BuildContext context) {
+  /// העריכה. בפריסה הצרה התווית 'חיפוש' מושמטת — היא משכפלת את שם הכרטיסייה
+  /// ובולעת כמחצית מהמרחב שנשמר למילות החיפוש.
+  Widget _buildQueryDisplay(BuildContext context, {required bool showLabel}) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          'חיפוש',
-          style: TextStyle(
-            fontSize: AppTokens.fontMD,
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
+        if (showLabel) ...[
+          Text(
+            'חיפוש',
+            style: TextStyle(
+              fontSize: AppTokens.fontMD,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
           ),
-        ),
-        const SizedBox(width: AppTokens.spaceSM),
+          const SizedBox(width: AppTokens.spaceSM),
+        ],
         Flexible(
           child: OtzariaSearchDisplayBar(
             icon: FluentIcons.edit_24_regular,

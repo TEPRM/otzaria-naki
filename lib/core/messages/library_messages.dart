@@ -17,6 +17,14 @@ abstract class LibraryMessages {
   static String zipExtractedSuccessfully(String fileName) =>
       'הקובץ "$fileName" חולץ בהצלחה!';
 
+  static String hebrewBookDownloaded(String location) =>
+      'הספר הורד אל $location';
+
+  static const String hebrewBookDownloadCanceled = 'ההורדה בוטלה';
+
+  static String hebrewBookDownloadError(Object error) =>
+      'שגיאה בהורדת הספר: $error';
+
   // ===== חיפוש =====
   static String distanceSetAsDefault(int distance) =>
       'מרווח $distance נקבע כברירת מחדל לחיפוש רגיל';
@@ -58,6 +66,10 @@ abstract class LibraryMessages {
 
   static String tabMovedToWorkspace(String workspaceName) =>
       'הכרטיסיה הועברה לשולחן העבודה "$workspaceName"';
+
+  /// השולחן נמחק בחלון אחר בין בניית התפריט לבחירה.
+  static const String workspaceNoLongerExists =
+      'שולחן העבודה הזה אינו קיים יותר';
 
   // ===== עדכונים =====
   static const String updateCheckNetworkError =

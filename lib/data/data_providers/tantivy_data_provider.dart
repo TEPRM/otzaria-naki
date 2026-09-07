@@ -77,6 +77,10 @@ class TantivyDataProvider {
   /// לאנדקס — הכתיבות היו הולכות לתיקייה זמנית שנזרקת בהפעלה הבאה.
   bool isTempFallback = false;
 
+  /// התיקייה שהמנוע נפתח עליה בפועל. שונה מ-[AppPaths.getIndexPath] כשהפתיחה
+  /// נפלה למסלול חלופי (הסגר אינדקס פגום, או fallback זמני).
+  String? activeIndexPath;
+
   /// מסמן שקריאת מצב האינדקס מהאינדקס עצמו ([indexedFilePaths]) הסתיימה.
   /// עד שהערך הופך ל-true, אסור להסיק "אין אינדקס" מ-indexedFilePaths.isEmpty.
   final ValueNotifier<bool> isInitialized = ValueNotifier(false);
@@ -98,11 +102,21 @@ class TantivyDataProvider {
     // בפתיחה מחדש (reopen/clear) הערך כבר true; איפוס מונע מהצרכנים
     // להסיק "אין אינדקס" מ-indexedFilePaths בזמן שהטעינה מחדש רצה.
     isInitialized.value = false;
+    isTempFallback = false;
+    activeIndexPath = null;
 
     final indexPath = await AppPaths.getIndexPath();
-    _indexCompatibility = _checkIndexCompatibility(indexPath);
+    _indexCompatibility = await _checkIndexCompatibility(indexPath);
 
-    final engine = await _initEngine();
+    // אינדקס בסכמה לא תואמת אינו נפתח כלל: המנוע נכנס לפאניקה בפתיחתו,
+    // והכשל היה נספר בסנטינל ככשל-פתיחה ומזיז אינדקס תקין הצידה כ"פגום".
+    final SearchEngine engine;
+    if (isRebuildRequiredStatus(_indexCompatibility?.status)) {
+      debugPrint('⚠️ האינדקס דורש בנייה מחדש — המנוע נפתח על אינדקס זמני');
+      engine = await _openTempFallbackEngine();
+    } else {
+      engine = await _initEngine();
+    }
     final indexedFilePathsLoaded = await _loadIndexedFilePaths(engine);
     _syncCatalogueOrderRevision(
       indexPath,
@@ -117,9 +131,9 @@ class TantivyDataProvider {
 
   /// קורא את תוצאת בדיקת התאימות מהאינדקס עצמו. כשל בבדיקה אינו עוצר את
   /// האתחול — המנוע ייפתח כרגיל והסטטוס יישאר לא ידוע (null).
-  IndexCompatibility? _checkIndexCompatibility(String indexPath) {
+  Future<IndexCompatibility?> _checkIndexCompatibility(String indexPath) async {
     try {
-      final compatibility = checkIndexCompatibility(path: indexPath);
+      final compatibility = await checkIndexCompatibility(path: indexPath);
       debugPrint(
         '🔎 תאימות אינדקס: ${compatibility.status} '
         '(נמצא: ${compatibility.foundSchemaVersion}, '
@@ -357,7 +371,6 @@ class TantivyDataProvider {
   Future<SearchEngine> _initEngine() async {
     String? indexPath;
     File? sentinelFile;
-    isTempFallback = false;
 
     try {
       indexPath = await AppPaths.getIndexPath();
@@ -416,9 +429,10 @@ class TantivyDataProvider {
       // Try to open engine
       // If this CRASHES the process, the sentinel remains for next run.
       // If it throws an Exception, we catch it below.
-      final engine = SearchEngine(path: indexPath);
+      final engine = await SearchEngine.newInstance(path: indexPath);
 
       // הפתיחה הנייטיבית הצליחה — האינדקס תקין, הסנטינל מוסר מיד.
+      activeIndexPath = indexPath;
       try {
         await sentinelFile.delete();
       } catch (_) {}
@@ -448,17 +462,22 @@ class TantivyDataProvider {
       // Recover by falling back to temp memory index
       debugPrint('⚠️ Falling back to temporary in-memory index');
       try {
-        final tempDir = Directory.systemTemp.createTempSync(
-          'otzaria_temp_index_',
-        );
-        final tempEngine = SearchEngine(path: tempDir.path);
-        isTempFallback = true;
-        return tempEngine;
+        return await _openTempFallbackEngine();
       } catch (e2) {
         debugPrint('❌ CRITICAL: Failed to create temp index: $e2');
         rethrow;
       }
     }
+  }
+
+  /// מנוע על תיקייה זמנית, כשאינדקס הדיסק אינו ניתן לפתיחה. במצב זה
+  /// האינדוקס חסום ([isTempFallback]) כדי שכתיבות לא ילכו לתיקייה שנזרקת.
+  Future<SearchEngine> _openTempFallbackEngine() async {
+    final tempDir = Directory.systemTemp.createTempSync('otzaria_temp_index_');
+    final engine = await SearchEngine.newInstance(path: tempDir.path);
+    isTempFallback = true;
+    activeIndexPath = tempDir.path;
+    return engine;
   }
 
   /// האם האינדקס הקיים דורש איפוס ובנייה מחדש — בגלל אי-תאימות סכמה

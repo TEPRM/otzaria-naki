@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_settings_screens/flutter_settings_screens.dart';
 import 'package:otzaria/models/books.dart';
@@ -27,7 +29,7 @@ void main() {
       List<OpenedTab>? callbackTabs;
       final bloc = WorkspaceBloc(
         repository: repository,
-        onWorkspaceTabsChanged: (tabs, _) {
+        onWorkspaceTabsChanged: (tabs, _, _) {
           callbackTabs = tabs;
         },
       )..add(LoadWorkspaces());
@@ -73,7 +75,7 @@ void main() {
       List<OpenedTab>? callbackTabs;
       final bloc = WorkspaceBloc(
         repository: repository,
-        onWorkspaceTabsChanged: (tabs, _) {
+        onWorkspaceTabsChanged: (tabs, _, _) {
           callbackTabs = tabs;
         },
       )..add(LoadWorkspaces());
@@ -99,6 +101,43 @@ void main() {
       await bloc.close();
       targetTab.dispose();
     });
+
+    test('מחליף מצב פעיל רק אחרי שה-UI החליף את הטאבים', () async {
+      final sourceWorkspace = Workspace(name: 'א', tabs: const []);
+      final targetWorkspace = Workspace(name: 'ב', tabs: const []);
+      final repository = _FakeWorkspaceRepository(
+        workspaces: [sourceWorkspace, targetWorkspace],
+        activeWorkspaceId: sourceWorkspace.id,
+      );
+      final callbackStarted = Completer<void>();
+      final allowTabReplacement = Completer<void>();
+      final bloc = WorkspaceBloc(
+        repository: repository,
+        onWorkspaceTabsChanged: (_, _, _) {
+          callbackStarted.complete();
+          return allowTabReplacement.future;
+        },
+      )..add(LoadWorkspaces());
+
+      await bloc.stream.firstWhere((state) => !state.isLoading);
+      final switched = bloc.stream.firstWhere(
+        (state) => state.activeWorkspaceId == targetWorkspace.id,
+      );
+      bloc.add(
+        SwitchToWorkspace(
+          targetWorkspaceId: targetWorkspace.id,
+          currentTabsToSave: const [],
+          currentTabIndexToSave: 0,
+        ),
+      );
+
+      await callbackStarted.future;
+      expect(bloc.state.activeWorkspaceId, sourceWorkspace.id);
+
+      allowTabReplacement.complete();
+      await switched;
+      await bloc.close();
+    });
   });
 }
 
@@ -119,16 +158,22 @@ class _FakeWorkspaceRepository extends WorkspaceRepository {
   String? _activeWorkspaceId;
 
   @override
-  (List<Workspace>, String?) loadWorkspaces() =>
+  Future<(List<Workspace>, String?)> loadWorkspaces() async =>
       (List<Workspace>.from(_workspaces), _activeWorkspaceId);
 
   @override
-  Future<void> saveWorkspaces(
-    List<Workspace> workspaces,
-    String? currentWorkspaceId,
+  Future<List<Workspace>> mutateWorkspaces(
+    List<Workspace> Function(List<Workspace> current) apply,
   ) async {
-    _workspaces = List<Workspace>.from(workspaces);
-    _activeWorkspaceId = currentWorkspaceId;
+    _workspaces = List<Workspace>.from(
+      apply(List<Workspace>.from(_workspaces)),
+    );
+    return List<Workspace>.from(_workspaces);
+  }
+
+  @override
+  Future<void> saveActiveWorkspaceId(String? id) async {
+    _activeWorkspaceId = id;
   }
 }
 

@@ -6,6 +6,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:otzaria/indexing/bloc/indexing_bloc.dart';
 import 'package:otzaria/indexing/bloc/indexing_event.dart';
 import 'package:otzaria/indexing/bloc/indexing_state.dart';
+import 'package:otzaria/library/bloc/library_bloc.dart';
+import 'package:otzaria/library/bloc/library_event.dart';
+import 'package:otzaria/library/bloc/library_state.dart';
 import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
 import 'package:otzaria/navigation/bloc/navigation_event.dart';
 import 'package:otzaria/navigation/bloc/navigation_state.dart';
@@ -23,6 +26,7 @@ import 'package:otzaria/tabs/bloc/tabs_event.dart';
 import 'package:otzaria/tabs/bloc/tabs_state.dart';
 import 'package:otzaria/tabs/models/searching_tab.dart';
 import 'package:otzaria/widgets/misc/app_popup_menu.dart';
+import 'package:otzaria/widgets/text/otzaria_search_field.dart';
 
 import '../test_helpers/memory_cache_provider.dart';
 
@@ -37,6 +41,9 @@ class _MockNavigationBloc extends MockBloc<NavigationEvent, NavigationState>
 
 class _MockIndexingBloc extends MockBloc<IndexingEvent, IndexingState>
     implements IndexingBloc {}
+
+class _MockLibraryBloc extends MockBloc<LibraryEvent, LibraryState>
+    implements LibraryBloc {}
 
 class _SearchBloc extends SearchBloc {
   _SearchBloc(SearchState state) {
@@ -61,22 +68,26 @@ void main() {
       searchQuery: 'בדיקה',
       totalResults: 12,
     ),
+    bool externalProvider = true,
   }) async {
     final searchBloc = _SearchBloc(state);
     final settingsBloc = _MockSettingsBloc();
     final tabsBloc = _MockTabsBloc();
     final navigationBloc = _MockNavigationBloc();
     final indexingBloc = _MockIndexingBloc();
+    final libraryBloc = _MockLibraryBloc();
     final tab = SearchingTab('חיפוש', '', searchBloc: searchBloc);
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = Size(width, 700);
     tab.isLeftPaneOpen.value = false;
-    tab.externalSearchStatus.value = const ExternalSearchStatus(
-      sourceTitle: 'היברובוקס',
-      loading: false,
-      books: 3,
-      hits: 7,
-    );
+    tab.externalSearchStatus.value = externalProvider
+        ? const ExternalSearchStatus(
+            sourceTitle: 'היברובוקס',
+            loading: false,
+            books: 3,
+            hits: 7,
+          )
+        : null;
 
     whenListen(
       settingsBloc,
@@ -102,6 +113,11 @@ void main() {
       const Stream<IndexingState>.empty(),
       initialState: IndexingInitial(),
     );
+    whenListen(
+      libraryBloc,
+      const Stream<LibraryState>.empty(),
+      initialState: const LibraryState(),
+    );
 
     addTearDown(() async {
       await tester.pumpWidget(const SizedBox.shrink());
@@ -113,6 +129,7 @@ void main() {
       await tabsBloc.close();
       await navigationBloc.close();
       await indexingBloc.close();
+      await libraryBloc.close();
     });
 
     await tester.pumpWidget(
@@ -124,6 +141,7 @@ void main() {
             BlocProvider<TabsBloc>.value(value: tabsBloc),
             BlocProvider<NavigationBloc>.value(value: navigationBloc),
             BlocProvider<IndexingBloc>.value(value: indexingBloc),
+            BlocProvider<LibraryBloc>.value(value: libraryBloc),
           ],
           child: Scaffold(
             body: TantivyFullTextSearch(tab: tab),
@@ -173,6 +191,36 @@ void main() {
     expect(menu.tooltip, 'מיקום תוצאות היברובוקס');
   });
 
+  testWidgets('סרגל ברוחב 909 עם ספק חיצוני אינו חורג (Pixel XL landscape)', (
+    tester,
+  ) async {
+    await pumpSearch(tester, width: 909);
+
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('סרגל ברוחב 909 בלי ספק חיצוני — שורת מונים אחת ובלי חריגה', (
+    tester,
+  ) async {
+    await pumpSearch(
+      tester,
+      width: 909,
+      externalProvider: false,
+      state: const SearchState(
+        searchQuery: 'בדיקה',
+        totalResults: 12345,
+        totalGroups: 4711,
+      ),
+    );
+
+    expect(tester.takeException(), isNull);
+    // בלי maxLines הטקסט נכרך לשתי שורות בתוך סרגל בגובה שורה אחת.
+    expect(
+      tester.getSize(find.textContaining('תוצאות מאוחדות')).height,
+      lessThan(24),
+    );
+  });
+
   testWidgets('בלוק המונים תחום ברוחב כשספק חיצוני פעיל (issue #1051)', (
     tester,
   ) async {
@@ -195,6 +243,24 @@ void main() {
     expect(
       tester.getSize(find.textContaining('היברובוקס: 3 ספרים')).width,
       lessThanOrEqualTo(240),
+    );
+  });
+
+  testWidgets('סרגל ברוחב 411 שומר רוחב מזערי למילות החיפוש', (tester) async {
+    await pumpSearch(
+      tester,
+      width: 411,
+      externalProvider: false,
+      state: const SearchState(
+        searchQuery: 'ברכת המזון',
+        totalResults: 5957,
+      ),
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(
+      tester.getSize(find.byType(OtzariaSearchDisplayBar)).width,
+      greaterThanOrEqualTo(80),
     );
   });
 }

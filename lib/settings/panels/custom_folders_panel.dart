@@ -4,6 +4,7 @@ import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:otzaria/utils/file/file_picker_dialog_options.dart';
 import 'dart:async';
 import 'dart:io';
 
@@ -129,7 +130,10 @@ class _CustomFoldersPanelState extends State<CustomFoldersPanel> {
 
   Future<void> _addFolder() async {
     final bloc = context.read<CustomFoldersBloc>();
-    final path = await FilePicker.getDirectoryPath(lockParentWindow: true);
+    final path = await FilePicker.getDirectoryPath(
+      windowsOptions: kModalWindowsOptions,
+      linuxOptions: kModalLinuxOptions,
+    );
     if (path == null) return;
 
     final dir = Directory(path);
@@ -290,6 +294,15 @@ class _CustomFoldersPanelState extends State<CustomFoldersPanel> {
         merge == false,
       ),
       AppMenuEntry(
+        value: _FolderMenuAction.toggleHidden,
+        label: folder.hidden
+            ? context.settingsText('הצג בספרייה')
+            : context.settingsText('הסתר מהספרייה'),
+        icon: folder.hidden
+            ? FluentIcons.eye_24_regular
+            : FluentIcons.eye_off_24_regular,
+      ),
+      AppMenuEntry(
         value: _FolderMenuAction.openFolder,
         label: context.settingsText('פתח תיקייה'),
         icon: FluentIcons.folder_open_24_regular,
@@ -327,6 +340,10 @@ class _CustomFoldersPanelState extends State<CustomFoldersPanel> {
         _setMergeMode(folder, true);
       case _FolderMenuAction.mergeNever:
         _setMergeMode(folder, false);
+      case _FolderMenuAction.toggleHidden:
+        context.read<CustomFoldersBloc>().add(
+          SetFolderHidden(folder, !folder.hidden),
+        );
       case _FolderMenuAction.openFolder:
         _openInFileManager(folder.path);
       case _FolderMenuAction.copyPath:
@@ -427,18 +444,22 @@ class _CustomFoldersPanelState extends State<CustomFoldersPanel> {
 
     // תיקייה שנקבעה לה חריגה מתנהגת אחרת מהמתג הגלובלי — בלי סימון בשורה
     // ההבדל אינו נראה בלי לפתוח את התפריט.
-    final mergeBadge = switch (folder.mergeIntoLibrary) {
-      true => context.settingsText('ממוזגת'),
-      false => context.settingsText('לא ממוזגת'),
-      null => null,
-    };
+    final badges = [
+      folder.name,
+      if (folder.hidden) context.settingsText('מוסתרת'),
+      switch (folder.mergeIntoLibrary) {
+        true => context.settingsText('ממוזגת'),
+        false => context.settingsText('לא ממוזגת'),
+        null => null,
+      },
+    ].nonNulls;
 
     return SettingsActionTile.path(
-      icon: FluentIcons.folder_24_filled,
-      iconColor: cs.primary,
-      title: mergeBadge == null
-          ? folder.name
-          : '${folder.name}  •  $mergeBadge',
+      icon: folder.hidden
+          ? FluentIcons.folder_24_regular
+          : FluentIcons.folder_24_filled,
+      iconColor: folder.hidden ? cs.onSurfaceVariant : cs.primary,
+      title: badges.join('  •  '),
       path: folder.path,
       placeholder: '',
       // הכפתור נשאר צמוד לטקסט תמיד — בניגוד ל-actions, לא גולש למטה במסך צר.
@@ -617,6 +638,7 @@ enum _FolderMenuAction {
   mergeDefault,
   mergeAlways,
   mergeNever,
+  toggleHidden,
   openFolder,
   copyPath,
   remove,
@@ -629,13 +651,13 @@ class UserContentImportTile extends StatelessWidget {
 
   Future<void> _import(BuildContext context) async {
     final bloc = context.read<CustomFoldersBloc>();
-    final result = await FilePicker.pickFiles(
+    final files = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: const ['csv', 'json'],
-      lockParentWindow: true,
+      windowsOptions: kModalWindowsOptions,
+      linuxOptions: kModalLinuxOptions,
     );
-    if (result == null) return;
-    final paths = result.files.map((f) => f.path).whereType<String>().toList();
+    final paths = files.map((f) => f.path).whereType<String>().toList();
     if (paths.isEmpty) return;
     bloc.add(ImportUserContentFiles(paths));
   }

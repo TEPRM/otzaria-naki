@@ -33,11 +33,15 @@
 | API | id | type | bookId | bookUid |
 |-----|-----|------|--------|---------|
 | `library.findBooks` | ✓ | ✓ | ✓ | ✓ |
+| `library.resolveRef` | ✓* | ✓* | ✓ | ✓* |
 | `library.getBookMetadata` | ✓ | ✓ | ✓ | ✓ |
 | `library.listRecentBooks` | ✓ | ✓ | ✓ | ✓ |
 | `library.getTree` | ✓ | ✓ | ✓ | ✓ |
 | `reader.openBook` | קלט | קלט | קלט | קלט |
 | `reader.openBookAtRef` | קלט | קלט | קלט | קלט |
+
+\* ב-`library.resolveRef` השדות `id`/`type`/`bookUid` חסרים כשההתאמה היא ספר
+אישי או PDF ממערכת הקבצים — ראה את האזהרה בתיאור המתודה.
 | `reader.getCurrentState` | ✓ | ✓ | ✓ | ✓ |
 | `reader.getCurrentRef` | ✓ | ✓ | ✓ | ✓ |
 | `reader.getSelection` | ✓ | ✓ | ✓ | ✓ |
@@ -136,6 +140,7 @@ if (response.success) {
 | `fonts.resolveFamilies` | 0.9.97 |
 | `fonts.listInstalled` | 0.9.97 |
 | `library.findBooks` | 0.9.89 |
+| `library.resolveRef` | 0.9.97 |
 | `library.getBookMetadata` | 0.9.89 |
 | `library.resolveBooks` | 0.9.97 |
 | `library.resolveCategoryPaths` | 0.9.97 |
@@ -162,9 +167,13 @@ if (response.success) {
 | `reader.openSearchTab` | 0.9.89 |
 | `reader.getCurrentState` | 0.9.89 |
 | `reader.getCurrentRef` | 0.9.89 |
+| `reader.closeTab` | 0.9.97 |
+| `reader.activateTab` | 0.9.97 |
 | `reader.getSelection` | 0.9.89 |
 | `reader.getActiveCommentators` | 0.9.97 |
 | `reader.setActiveCommentators` | 0.9.97 |
+| `reader.getPageShapeLayout` | 0.9.97 |
+| `reader.setPageShapeCommentatorVisibility` | 0.9.97 |
 | `reader.scrollToSection` | 0.9.97 |
 | `reader.getHighlightCapabilities` | 0.9.97 |
 | `reader.findTextOccurrences` | 0.9.95 |
@@ -185,6 +194,10 @@ if (response.success) {
 | `reader.revealHighlight` | 0.9.96 |
 | `reader.clearHighlight` | 0.9.89 |
 | `reader.clearAllHighlights` | 0.9.89 |
+| `workspace.list` | 0.9.97 |
+| `workspace.getActive` | 0.9.97 |
+| `workspace.create` | 0.9.97 |
+| `workspace.switch` | 0.9.97 |
 | `navigation.goTo` | 0.9.89 |
 | `plugin.openSelf` | 0.9.96 |
 | `plugin.openOther` | 0.9.97 |
@@ -203,6 +216,7 @@ if (response.success) {
 | `ui.pickFolder` | 0.9.93 |
 | `ui.print` | 0.9.97 |
 | `ui.exportPdf` | 0.9.97 |
+| `ui.setUnsavedChanges` | 0.9.97 |
 | `fs.extractZip` | 0.9.93 |
 | `fs.deleteFile` | 0.9.93 |
 | `fs.pickUserFile` | 0.9.94 |
@@ -602,6 +616,55 @@ const { data } = await Otzaria.call('library.findBooks', {
 });
 // [{ bookId: "משנה תורה", title: "משנה תורה", topics: [...] }, ...]
 ```
+
+### `library.resolveRef`
+**הרשאה:** `library.books.read`
+
+פותר הפניה חופשית שנכתבה בידי אדם — שם ספר ומיקום יחד — למיקום קונקרטי,
+בלי לפתוח אותו. זו הצורה השאילתתית של `reader.openBookAtRef`, ומאחוריה אותו
+מנוע `find_ref` שמפעיל את מסך "איתור מקורות".
+
+השתמש בה כדי לבנות קישור עומק, להציע השלמה בזמן הקלדה, או לאמת הפניה לפני
+שמציגים אותה. לניווט בפועל השתמש ב-`reader.openBookAtRef`.
+
+```javascript
+const { data } = await Otzaria.call('library.resolveRef', {
+  ref: 'פסחים לד',
+  limit: 5  // אופציונלי, ברירת מחדל: 20
+});
+// [{
+//   id: 42, bookId: "פסחים", bookUid: "id:42", type: "text",
+//   title: "פסחים", reference: "פסחים דף לד", index: 1234,
+//   isPdf: false, isSourceLine: true, isUserBook: false,
+//   bookPath: "ש\"ס, בבלי"
+// }, ...]
+```
+
+התוצאות מדורגות — הראשונה היא ההתאמה הטובה ביותר, לפי אותו דירוג שמסך
+"איתור מקורות" מציג. הפניה קצרה משני תווים מוחזרת כרשימה ריקה.
+
+`isSourceLine` מבחין בין שתי רמות דיוק: `true` = נפתר לשורת מקור מדויקת
+(פסוק, סעיף) דרך אינדקס ההפניות; `false` = נפתר לכותרת בתוכן העניינים,
+כלומר לרמת פרק או דף בלבד.
+
+**בניית קישור עומק — קרא את זה:** `id` הוא המזהה שקישור `otzaria://open/book/<id>`
+מצפה לו, אבל הוא מוחזר `null` כשההתאמה היא ספר אישי (`isUserBook`) או PDF
+ממערכת הקבצים. `user_books.db` מקצה מזהים באותו טווח כמו ספריית הבסיס, ולכן
+מזהה של ספר אישי אינו מזהה ספר יחיד ברמת האפליקציה. במקרה כזה נווט עם
+`reader.openBookAtRef` (שמקבל גם כותרת), או השתמש ב-`otzaria://open/detection?q=<ההפניה>`
+שמעביר את פתירת ההפניה לאוצריא עצמה.
+
+```javascript
+const hit = data[0];
+const href = hit && hit.id != null
+  ? (hit.isPdf
+      ? `otzaria://open/pdf/${hit.id}?index=${hit.index}`
+      : `otzaria://open/book/${hit.id}?index=${hit.index}`)
+  : `otzaria://open/detection?q=${encodeURIComponent(ref)}`;
+```
+
+שים לב ש-`index` הוא אינדקס שורה (0-based) בספר טקסט, אך **מספר עמוד
+(1-based)** ב-PDF — בדיוק כפי ששני נתיבי הקישור מצפים.
 
 ### `library.getBookMetadata`
 **הרשאה:** `library.books.read`
@@ -1606,6 +1669,35 @@ const { data } = await Otzaria.call('reader.getCurrentState');
 // }
 ```
 
+### `reader.closeTab`
+**הרשאה:** `reader.open` · **מגרסה:** 0.9.97
+
+סוגר את הכרטיסייה שבמקום `index` **ברשימה ש-`reader.getCurrentState`
+מחזיר** (`openTabs`). זו אינה בהכרח מקומה של הכרטיסייה בשורת הכרטיסיות:
+כרטיסיות של כלים ותוספים אינן נכללות ב-`openTabs`, ולכן יש לקחת את האינדקס
+מאותה קריאה ולא ממקום אחר.
+
+אינדקס חסר או מחוץ לתחום מוחזר כ-`error.invalid_params`. הכרטיסייה נכנסת
+לרשימת "נסגרו לאחרונה" ולכן המשתמש יכול לשחזר אותה, בדיוק כמו סגירה ידנית.
+
+```javascript
+const { data: state } = await Otzaria.call('reader.getCurrentState');
+const i = state.openTabs.findIndex((tab) => tab.bookUid === bookUid);
+if (i !== -1) await Otzaria.call('reader.closeTab', { index: i });
+// true
+```
+
+### `reader.activateTab`
+**הרשאה:** `reader.open` · **מגרסה:** 0.9.97
+
+הופך את הכרטיסייה שבמקום `index` (באותה רשימת `openTabs`) לכרטיסייה הפעילה.
+אותם כללי אינדקס ואותה שגיאה כמו ב-`reader.closeTab`.
+
+```javascript
+await Otzaria.call('reader.activateTab', { index: 0 });
+// true
+```
+
 ### `reader.getCurrentRef`
 **הרשאה:** `reader.open`
 
@@ -1690,6 +1782,39 @@ const { data } = await Otzaria.call('reader.getActiveCommentators');
 await Otzaria.call('reader.setActiveCommentators', {
   add: ['רש״י על בראשית'],
   remove: ['רמב״ן על בראשית']
+});
+```
+
+### `reader.getPageShapeLayout`
+**הרשאה:** `reader.open` · **מגרסה:** 0.9.97
+
+מחזיר את מפרשי תצוגת "צורת הדף" הפעילה ואת נראותו הנוכחית של כל מפרש.
+`null` כשאין טאב טקסט בצורת הדף, או כשהמסך עדיין טוען את ההגדרות. בטור הימני
+יכולים להיות כמה מפרשים, ולכן הוא מערך. הנראות שמדווחת כאן כוללת גם שינוי
+זמני שביצע תוסף.
+
+```javascript
+const { data } = await Otzaria.call('reader.getPageShapeLayout');
+// {
+//   available: ["ביאור הלכה", "רש״י על בראשית"],
+//   left: { commentator: "ביאור הלכה", visible: false },
+//   right: [{ commentator: "רש״י על בראשית", visible: true }],
+//   bottom: null,
+//   bottomRight: null
+// }
+```
+
+### `reader.setPageShapeCommentatorVisibility`
+**הרשאה:** `reader.open` · **מגרסה:** 0.9.97
+
+מציג או מסתיר זמנית מפרש שכבר משובץ בצורת הדף. השינוי אינו משנה את שיבוץ
+המפרשים ואינו נשמר בהגדרות המשתמש; קריאה עם `visible: true` מחזירה גם מפרש
+שהוסתר קודם. מפרש שאינו משובץ נדחה ב-`error.not_found`.
+
+```javascript
+await Otzaria.call('reader.setPageShapeCommentatorVisibility', {
+  commentator: 'ביאור הלכה',
+  visible: true
 });
 ```
 
@@ -1798,6 +1923,83 @@ const { data } = await Otzaria.call('reader.getSectionTextMap', {
 > **`includeDomRects` שמור לעתיד ואינו נתמך.** הפרמטר מתקבל ומאומת כבוליאני,
 > אך `true` נדחה תמיד ב-`error.unsupported_context`. השאירו אותו `false`
 > או השמיטו אותו.
+
+---
+
+## workspace.* - שולחנות עבודה
+
+שולחן עבודה הוא אוסף הכרטיסיות הפתוחות. מעבר בין שולחנות מחליף את כל
+הכרטיסיות — אלה שהיו פתוחות נשמרות בשולחן שממנו יצאתם, ואלה של שולחן היעד
+נפתחות במקומן.
+
+הקריאה והניהול הם שתי הרשאות נפרדות: **שם** שולחן עבודה הוא תוכן אישי
+שיכול להסגיר מה המשתמש לומד, ולכן חשיפתו דורשת `workspace.read` בנפרד
+מ-`workspace.manage` שרק יוצר ומחליף. מאותו טעם `key-workspaces` ו-
+`key-current-workspace-id` חסומים ל-`settings.get`.
+
+מעבר שולחן מפעיל את האירוע [`workspace.changed`](#אירועים-events), גם כשהוא
+נעשה דרך ה-API.
+
+> `workspace.*` אינו כולל מחיקת שולחן או שינוי שמו — פעולות הרסניות שנשארות
+> בידי המשתמש.
+
+### `workspace.list`
+**הרשאה:** `workspace.read` · **מגרסה:** 0.9.97
+
+```javascript
+const { data } = await Otzaria.call('workspace.list');
+// [{ id: '1756612800000000-0', name: 'שולחן עבודה 1',
+//    isActive: true, tabCount: 3 }]
+```
+
+`tabCount` מונה את הכרטיסיות שה-API חושף — אותן כרטיסיות שמופיעות ב-
+`reader.getCurrentState().openTabs`. כרטיסיות של כלים ותוספים אינן נמנות.
+בשולחן הפעיל הספירה היא של המצב החי, ולא של העותק השמור בדיסק.
+
+### `workspace.getActive`
+**הרשאה:** `workspace.read` · **מגרסה:** 0.9.97
+
+```javascript
+const { data } = await Otzaria.call('workspace.getActive');
+// { id: '1756612800000000-0', name: 'שולחן עבודה 1' }
+// { id: null, name: null } — כשעדיין לא נטען שולחן
+```
+
+### `workspace.create`
+**הרשאה:** `workspace.manage` · **מגרסה:** 0.9.97
+
+יוצר שולחן עבודה **ריק** בשם `name` (עד 100 תווים; שם ריק →
+`error.invalid_params`). `switchTo: true` עובר אליו מיד, ו-`reuseExisting:
+true` מחזיר שולחן קיים באותו שם במקום ליצור כפילות — כך שהתוסף יכול לקרוא
+לאותה קריאה בכל התחברות בלי לצבור שולחנות.
+
+```javascript
+const { data } = await Otzaria.call('workspace.create', {
+  name: 'חברותא — יוסי',
+  switchTo: true,
+  reuseExisting: true
+});
+// { id: '1756612800000000-4', created: true }   // created: false = שולחן קיים
+```
+
+### `workspace.switch`
+**הרשאה:** `workspace.manage` · **מגרסה:** 0.9.97
+
+עובר לשולחן `id`. **הכרטיסיות הפתוחות כרגע נשמרות** בשולחן הנוכחי לפני
+המעבר, בדיוק כמו מעבר מהממשק.
+
+מחזיר `false` כשאין שולחן עם המזהה הזה — תוסף שמסנכרן בין מחשבים מקבל מזהה
+מהצד השני ויכול ליפול בחזרה ל-`workspace.create` לפי השם. `id` חסר או ריק
+מחזיר `error.invalid_params`. מעבר לשולחן שהוא כבר הפעיל מחזיר `true` ואינו
+עושה דבר.
+
+```javascript
+const { data } = await Otzaria.call('workspace.switch', { id: workspaceId });
+// true / false
+```
+
+> המעבר אינו מנווט את המשתמש למסך העיון. תוסף שרוצה גם להעביר מסך יקרא
+> ל-`navigation.goTo` בנוסף, תחת ההרשאה `navigation.write` שלו.
 
 ---
 
@@ -2236,14 +2438,28 @@ if (res.success && res.data.path) {
 מקדימה ובחירת טווח עמודים. `ui.print` היא החלופה למי שרוצה את דיאלוג
 המערכת ואת מאפייני המדפסת המלאים.
 
-השליטה בפריסת ההדפסה היא דרך CSS `@media print` בדף התוסף עצמו.
+עיצוב התוכן המודפס נעשה ב-CSS `@media print` בדף התוסף. את **העימוד** —
+גודל הדף, הכיוון, השוליים והרקעים — מעבירים כפרמטרים, באותם שדות בדיוק כמו
+ב-[`ui.exportPdf`](#uiexportpdf); `@page { size: ... }` אינו מכובד כאן.
+
+זה חשוב במיוחד מפני שברירת המחדל של מנוע ההדפסה היא **US Letter**: תוסף
+שמיועד ל-A4 צריך לבקש זאת מפורשות, אחרת הדף מיוצר בגודל אמריקאי ונשלח כך
+למדפסת בלי להיפרס מחדש.
 
 ```javascript
 const res = await Otzaria.call('ui.print', {
-  jobName: 'דף לדוגמה'  // אופציונלי; ברירת המחדל היא שם התוסף
+  jobName: 'דף לדוגמה',  // אופציונלי; ברירת המחדל היא שם התוסף
+  pageSize: 'a4',        // אופציונלי; כמו ב-ui.exportPdf
+  orientation: 'portrait',
+  marginMm: 12,
+  printBackgrounds: true
 });
 // { printed: true }
 ```
+
+> הפרמטרים מעמדים את ה-PDF לפני שדיאלוג המערכת נפתח, ולכן הם גוברים על גודל
+> הנייר שהמשתמש יבחר שם — הדף לא נפרס מחדש. בקשו גודל רק כשהתוסף באמת תלוי
+> בו; אחרת השאירו את השדה ריק ותנו למשתמש לשלוט.
 
 ### `ui.exportPdf`
 **הרשאה:** (אין — דיאלוג „שמור בשם” של המערכת הוא שער ההסכמה)
@@ -2255,15 +2471,65 @@ const res = await Otzaria.call('ui.print', {
 **הנתיב המלא אינו מוחזר** — התוסף אינו מקבל גישה למה שנשמר; רק שם הקובץ.
 מ-`fileName` נלקח שם מוצע לדיאלוג בלבד (מפרידי נתיב מוסרים ממנו).
 
+**פרמטרי עימוד (אופציונליים):** שדה שלא סופק משאיר את ברירת המחדל של מנוע
+ההדפסה של ה-WebView (גודל הדף — US Letter). אותם שדות תקפים גם ב-`ui.print`.
+
+| שדה | ערך |
+|---|---|
+| `pageSize` | שם קבוע — `'a4'` / `'a5'` / `'letter'` / `'legal'` — או מפה `{ widthMm, heightMm }` למידות חופשיות (10–5080 מ"מ לכל מידה) |
+| `orientation` | `'portrait'` או `'landscape'` |
+| `marginMm` | מספר אחיד או מפה `{ top, right, bottom, left }`; 0–100 מ"מ, צד חסר במפה הוא 0 |
+| `printBackgrounds` | האם להדפיס רקעים של CSS (בוליאני) |
+
+ערך פסול מוחזר ב-`error.invalid_params` בלי לפתוח דיאלוג.
+
 ```javascript
 const res = await Otzaria.call('ui.exportPdf', {
   fileName: 'שני טורים',  // אופציונלי; שם מוצע בדיאלוג
-  title: 'ייצוא ל-PDF'    // אופציונלי; כותרת הדיאלוג
+  title: 'ייצוא ל-PDF',   // אופציונלי; כותרת הדיאלוג
+  pageSize: { widthMm: 210, heightMm: 297 },  // או 'a4'
+  orientation: 'portrait',
+  marginMm: 0,
+  printBackgrounds: true
 });
 // { saved: true, name: 'שני טורים.pdf' }
 ```
 
-> **שתי הקריאות דורשות פעולת משתמש מפורשת.** אוצריא בודקת ישירות ב-WebView
+### `ui.setUnsavedChanges`
+**הרשאה:** (אין — הקריאה רק מרימה דגל; ההשפעה היחידה היא דיאלוג אישור)
+
+מסמנת שבכרטיסיית התוסף יש מידע שלא נשמר. כל עוד הדגל דלוק, סגירת
+הכרטיסיה — מה-X, מהתפריט, מ-Ctrl+W, ב"סגור הכל", בהעברה לשולחן עבודה אחר
+ובמעבר בין שולחנות — פותחת קודם דיאלוג אזהרה, והמשתמש יכול לבטל.
+`reader.closeTab` על כרטיסיה כזו מחזירה `false` אם המשתמש ביטל.
+
+גם סגירת התוכנה עצמה (ה-X של החלון, בדסקטופ) עוברת דרך אותו דיאלוג.
+
+הדגל הוא לכל מופע (כרטיסיה) בנפרד, ומתאפס בסגירה, בטעינה מחדש של הדף
+וב-`hasChanges: false`.
+
+> **רשת ביטחון, לא תחליף לשמירה.** במובייל אין אירוע סגירה — המערכת הורגת
+> את התהליך בלי לשאול — וגם קריסה או כיבוי המחשב אינם עוברים דרך הדיאלוג.
+> תוסף שמחזיק עבודה של המשתמש צריך לשמור טיוטה שוטפת (למשל ב-`storage.set`),
+> ולהשתמש בדגל רק כדי למנוע סגירה בטעות. `message` (אופציונלי, עד 200 תווים) מוצג בדיאלוג
+מתחת לשם הכרטיסיה — כתבו בו מה ייאבד. קראו עם `false` מיד אחרי שמירה
+מוצלחת, אחרת המשתמש יישאל לחינם.
+
+```javascript
+editor.addEventListener('input', () => {
+  Otzaria.call('ui.setUnsavedChanges', {
+    hasChanges: true,
+    message: 'הטיוטה שבעריכה תאבד'  // אופציונלי
+  });
+});
+
+async function save() {
+  await persist();
+  await Otzaria.call('ui.setUnsavedChanges', { hasChanges: false });
+}
+```
+
+> **`ui.print` ו-`ui.exportPdf` דורשות פעולת משתמש מפורשת.** אוצריא בודקת ישירות ב-WebView
 > אם קיימת הפעלת-משתמש חולפת (`navigator.userActivation`), ולכן אין דרך
 > לזייף אותה מתוך התוסף. קריאה מטעינת הדף, מטיימר, או אחרי שרשרת `await`
 > ארוכה — מוחזרת ב-`error.forbidden`. קראו להן ישירות מתוך מטפל לחיצה.

@@ -41,6 +41,11 @@ const aboutRegularEditorsLabel = 'מהדירים שההדירו בין 5 ל-10 �
 
 const aboutTopEditors = <Map<String, String>>[
   {
+    'name': 'חנניה',
+    'url': 'https://otzaria.org/forum/user/%D7%97%D7%A0%D7%A0%D7%99%D7%94',
+    'description': 'טרח והשיג ספרים רבים לאוצריא',
+  },
+  {
     'name': 'י. פל',
     'url': 'https://forum.otzaria.org/user/%D7%99.-%D7%A4%D7%9C.',
   },
@@ -115,8 +120,11 @@ const aboutTopEditors = <Map<String, String>>[
         'https://forum.otzaria.org/user/%D7%90%D7%99%D7%A9-%D7%A6%D7%93%D7%99%D7%A7-%D7%9E%D7%99%D7%93%D7%99',
   },
   {
-    'name': 'obs', // ??? צריך מילוי
+    'name': 'obs', // אורי בן שמעון
     'url': 'https://otzaria.org/forum/user/ori-bensimon',
+  },
+  {
+    'name': 'shlomlaolam.', // שלמה
   },
 ];
 
@@ -225,6 +233,10 @@ const aboutAdditionalSources = <Map<String, String>>[
     'name': 'מכון שלמה אומן',
     'url': 'https://www.machonso.org/',
     'logo': 'assets/logo_books/machonso_logo.svg',
+  },
+  {
+    'name': 'מכון פי ישרים',
+    'logo': 'assets/logo_books/pi_yesharim_logo.svg',
   },
   {
     'name': 'פרויקט בן י.',
