@@ -63,7 +63,8 @@ import 'package:otzaria/update/my_update_widget.dart';
 import 'package:otzaria/tools/calendar/utils/calendar_cubit.dart';
 import 'package:otzaria/widgets/dialogs/ad_popup_dialog.dart';
 import 'package:otzaria/settings/services/safer_mode_guard.dart';
-import 'package:otzaria/main.dart' show appWindowListener, presentMainWindow;
+import 'package:otzaria/main.dart'
+    show appWindowListener, presentMainWindow, startupRecoveryVerified;
 import 'package:otzaria/core/splash_screen.dart' show SplashIcon;
 import 'package:otzaria/navigation/view/custom_title_bar.dart';
 import 'package:otzaria/navigation/view/reading_tabs_side_panel.dart';
@@ -626,10 +627,14 @@ class MainWindowScreenState extends State<MainWindowScreen>
 
       _tourCubit.registerSession();
 
-      AdPopupDialog.showIfNeeded(
-        context,
-        shouldSkip: () => _tourStartedAutomaticallyThisLaunch,
-      );
+      // ⚠️ פר-תהליך: מונה ההפעלות שמכתיב מתי הפופאפ מוצג עולה פר-חלון,
+      // והפופאפ עצמו הופיע בכל חלון שנפתח.
+      if (!WindowRole.isSecondary) {
+        AdPopupDialog.showIfNeeded(
+          context,
+          shouldSkip: () => _tourStartedAutomaticallyThisLaunch,
+        );
+      }
 
       // רענון plugin calendar events עם scope אמיתי לאחר שה-context מוכן.
       // הטעינה הראשונית ב-_initializeCalendar נקראה בלי workspace/book IDs —
@@ -723,7 +728,9 @@ class MainWindowScreenState extends State<MainWindowScreen>
         pendingPane.bloc.state is! TextBookError;
 
     if (!shouldWaitForBook) {
-      StartupTimeline.instance.mark('reveal:immediate');
+      StartupTimeline.instance.mark(
+        'reveal:immediate:${pendingPane?.runtimeType ?? currentTab.runtimeType}',
+      );
       _revealMainWindowOnce();
       return;
     }
@@ -807,7 +814,9 @@ class MainWindowScreenState extends State<MainWindowScreen>
           _splashOverlayVisible = false;
         });
       }
+      StartupTimeline.instance.mark('reveal:contentShown');
       await WidgetsBinding.instance.endOfFrame;
+      StartupTimeline.instance.mark('reveal:firstFrame');
       await presentMainWindow();
       await WidgetsBinding.instance.endOfFrame;
       if (!_skipsEagerLibraryLoad) libraryBloc.add(LoadLibrary());
@@ -830,6 +839,8 @@ class MainWindowScreenState extends State<MainWindowScreen>
   /// Initialize background file sync AFTER library is loaded.
   /// This avoids DB lock contention that caused 17s delays.
   void _initializeBackgroundSync() {
+    // ⚠️ פר-תהליך: הסנכרון כותב ל-`seforim.db` ול-`user_books.db` המשותפים.
+    if (WindowRole.isSecondary) return;
     BackgroundSyncInitializer.initializeAfterDelay(
       delaySeconds: 2, // Small delay to let UI settle after library load
       onComplete: (result) {
@@ -859,6 +870,13 @@ class MainWindowScreenState extends State<MainWindowScreen>
   }
 
   void _tryStartDeferredStartupWork() {
+    // סנכרון הרקע ועדכון הספרייה כותבים ל-seforim.db — ממתינים לאימות ה-DB
+    // שנדחה מהעלייה (ראה startupRecoveryVerified).
+    unawaited(startupRecoveryVerified.then((_) => _startDeferredStartupWork()));
+  }
+
+  void _startDeferredStartupWork() {
+    if (!mounted) return;
     tryStartDeferredStartupWork(
       gate: _startupWorkGate,
       startBackgroundSync: _initializeBackgroundSync,
@@ -871,7 +889,10 @@ class MainWindowScreenState extends State<MainWindowScreen>
           Settings.getValue<bool>(SettingsRepository.keyAutoSync) ?? true,
       canUseSoftwareAndBookUpdates: () =>
           context.read<SettingsBloc>().state.canUseSoftwareAndBookUpdates,
+      // ⚠️ פר-תהליך: עדכון הספרייה מוריד את אותם קבצים לאותו נתיב, ושני
+      // חלונות שמתחילים אותו במקביל נלחמים על אותו `seforim.db`.
       isLibraryUpdateCheckDue: () =>
+          !WindowRole.isSecondary &&
           isAutoUpdateCheckDue(SettingsRepository.keyLastLibraryUpdateCheck),
       libraryUpdateBloc: context.read<LibraryUpdateBloc>,
     );
@@ -987,6 +1008,8 @@ class MainWindowScreenState extends State<MainWindowScreen>
     BuildContext context,
     library_model.Library library,
   ) async {
+    // ⚠️ החלטה פר-תהליך: הענף `autoReindexThenStart` מוחק את האינדקס שכל
+    // החלונות חולקים. החלון המשני רק מדווח על מצב האינדקס ופותח את השער.
     if (WindowRole.isSecondary) {
       _startupWorkGate.markIndexingDecisionResolved(expectIndexing: false);
       _tryStartDeferredStartupWork();
@@ -1257,6 +1280,28 @@ class MainWindowScreenState extends State<MainWindowScreen>
       } else {
         bloc.add(LoadPlugins());
       }
+    } else if (state is PluginSystemDuplicateNameDetected) {
+      final versions = state.duplicates.map((p) => p.version).join(', ');
+      final value = await showWarningDialog(
+        context: context,
+        title: 'נמצא תוסף ישן באותו שם',
+        content: state.duplicates.length == 1
+            ? 'מותקן אצלך תוסף נוסף בשם "${state.pluginName}" (גרסה $versions) '
+                  'שאינו קשור לגרסה ${state.installedVersion} שהותקנה כעת.'
+            : 'מותקנים אצלך ${state.duplicates.length} תוספים נוספים בשם '
+                  '"${state.pluginName}" (גרסאות $versions) שאינם קשורים '
+                  'לגרסה ${state.installedVersion} שהותקנה כעת.',
+        subtitle: 'האם להסיר את הישן? כך יישאר תוסף אחד בלבד בשם זה.',
+        cancelText: 'השאר',
+        confirmText: 'הסר את הישן',
+      );
+      if (value == true) {
+        for (final p in state.duplicates) {
+          bloc.add(UninstallPluginRequested(p.pluginId));
+        }
+      } else {
+        bloc.add(LoadPlugins());
+      }
     }
   }
 
@@ -1391,6 +1436,7 @@ class MainWindowScreenState extends State<MainWindowScreen>
           ? pluginState.plugins
           : await PluginRegistryRepository().getAllPlugins(),
       errorLimit: action.errorLimit,
+      fileLimit: action.fileLimit,
     );
     if (!mounted) {
       _isShowingInfoReport = false;
@@ -2466,6 +2512,7 @@ class MainWindowScreenState extends State<MainWindowScreen>
 
   @override
   Widget build(BuildContext context) {
+    StartupTimeline.instance.markOnce('mainScreenBuild');
     final Widget content = MultiBlocProvider(
       providers: [
         BlocProvider.value(value: _calendarCubit),
@@ -2948,6 +2995,23 @@ class MainWindowScreenState extends State<MainWindowScreen>
               ),
             ),
           ),
+          // חלון משני שהתרוקן מכרטיסיות נסגר, כמו כרטיסייה אחרונה בדפדפן.
+          // ⚠️ מעבר-מצב ולא `!hasOpenTabs`: בעלייה הרשימה עדיין ריקה.
+          BlocListener<TabsBloc, TabsState>(
+            listenWhen: (previous, current) =>
+                previous.hasOpenTabs && !current.hasOpenTabs,
+            listener: (context, state) {
+              final windowListener = appWindowListener;
+              if (windowListener != null) {
+                final tabsBloc = context.read<TabsBloc>();
+                unawaited(
+                  windowListener.closeIfEmptied(
+                    isStillEmpty: () => !tabsBloc.state.hasOpenTabs,
+                  ),
+                );
+              }
+            },
+          ),
           // settings.changed עבור selectedCity ו-calendarType —
           // שדות אלה נמצאים ב-CalendarState ולא ב-SettingsState
           BlocListener<CalendarCubit, CalendarState>(
@@ -3045,7 +3109,8 @@ class MainWindowScreenState extends State<MainWindowScreen>
             listenWhen: (_, current) =>
                 current is PluginSystemInstallRequiresPermissions ||
                 current is PluginSystemDevInstallRequiresPermissions ||
-                current is PluginSystemOverwriteRequired,
+                current is PluginSystemOverwriteRequired ||
+                current is PluginSystemDuplicateNameDetected,
             listener: (context, state) =>
                 _pluginInstallDialogQueue.enqueue(state),
           ),

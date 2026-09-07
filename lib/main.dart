@@ -55,10 +55,10 @@ import 'package:otzaria/data/constants/database_constants.dart';
 import 'package:otzaria/empty_library/bloc/empty_library_bloc.dart';
 import 'package:otzaria/library_update/bloc/library_update_bloc.dart';
 import 'package:otzaria/library_update/repository/library_update_repository.dart';
+import 'package:otzaria/library_update/services/streaming_patch_downloader.dart';
 import 'package:otzaria/library_update/services/companion_assets_service.dart';
 import 'package:otzaria/library_update/services/startup_recovery_check.dart';
 import 'package:seforim_library_updater/seforim_library_updater.dart';
-import 'package:zstandard/zstandard.dart';
 import 'package:otzaria/work_status/work_status_cubit.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_bloc.dart';
 import 'package:otzaria/plugins/bloc/plugin_system_event.dart';
@@ -87,7 +87,6 @@ import 'package:otzaria/core/window_persistence.dart';
 import 'package:otzaria/core/windowing/app_window_scope.dart';
 import 'package:otzaria/core/windowing/multi_window_service.dart';
 import 'package:otzaria/core/windowing/window_bus_host.dart';
-import 'package:otzaria/core/windowing/thread_contention_probe.dart';
 import 'package:otzaria/core/windowing/window_bus.dart';
 import 'package:otzaria/core/windowing/window_role.dart';
 import 'package:otzaria/core/windowing/window_manager_app_window_controller.dart';
@@ -112,13 +111,11 @@ import 'package:otzaria/widgets/misc/app_cursors.dart';
 import 'package:otzaria/widgets/misc/restart_widget.dart';
 import 'package:otzaria/core/splash_screen.dart';
 import 'package:otzaria/plugins/services/plugin_crash_guard.dart';
-import 'package:otzaria/plugins/services/plugin_background_policy.dart';
 import 'package:otzaria/plugins/services/plugin_install_report_service.dart';
 import 'package:otzaria/plugins/services/plugin_packager_cli.dart';
 import 'package:otzaria/plugins/services/plugin_store_link_parser.dart';
 import 'package:otzaria/plugins/services/plugin_protocol_registration_service.dart';
 import 'package:otzaria/plugins/utils/plugin_dev_tools_mode.dart';
-import 'package:otzaria/plugins/view/webview_environment_holder.dart';
 import 'package:otzaria/core/sentry_event_filter.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 
@@ -331,6 +328,30 @@ void main(List<String> args) async {
     await _enqueueExternalActivationArgs(args);
   });
 
+  _installGlobalErrorHandlers();
+
+  if (!kDebugMode) {
+    try {
+      ErrorLogFile.ensureExists();
+    } catch (error, stackTrace) {
+      stderr.writeln(
+        'Failed to prepare error log file at ${ErrorLogFile.resolvePath()}: $error',
+      );
+      stderr.writeln(stackTrace);
+    }
+  }
+
+  // Start Sentry in parallel to avoid blocking app startup.
+  unawaited(_initializeSentry());
+
+  await _runAppBootstrap();
+}
+
+/// מתקין את מטפלי השגיאות הגלובליים של ה-isolate.
+///
+/// ⚠️ נקרא משתי נקודות הכניסה. בלי הקריאה מ-`secondaryWindowMain` כל חריגה
+/// בחלון משני הייתה שקטה לחלוטין ב-release, שבו `debugPrint` הוא no-op.
+void _installGlobalErrorHandlers() {
   // Set up custom error handlers before Sentry initialization
   // Sentry will automatically wrap these handlers
   FlutterError.onError = (FlutterErrorDetails details) {
@@ -392,22 +413,6 @@ void main(List<String> args) async {
     }
     return true;
   };
-
-  if (!kDebugMode) {
-    try {
-      ErrorLogFile.ensureExists();
-    } catch (error, stackTrace) {
-      stderr.writeln(
-        'Failed to prepare error log file at ${ErrorLogFile.resolvePath()}: $error',
-      );
-      stderr.writeln(stackTrace);
-    }
-  }
-
-  // Start Sentry in parallel to avoid blocking app startup.
-  unawaited(_initializeSentry());
-
-  await _runAppBootstrap();
 }
 
 Future<void> _initializeSentry() async {
@@ -691,11 +696,10 @@ Future<void> _initializeProcessSingletons() async {
   // ה-Hive הפרטי שלו ולא על המשותף — כלומר בזבוז במקרה הטוב.
   if (!WindowRole.isSecondary) {
     await _timedPhase('portablePaths', PortablePaths.migrateIfMoved);
+    // נתיב הספרייה נרשם לקובץ טקסט שה-uninstaller קורא; ההגדרות עצמן
+    // ב-Hive בינארי שאינו נגיש לו (issue #1020). פר-תהליך — קובץ אחד.
+    unawaited(AppPaths.recordLibraryPathForUninstaller());
   }
-
-  // נתיב הספרייה נרשם לקובץ טקסט שה-uninstaller קורא; ההגדרות עצמן
-  // ב-Hive בינארי שאינו נגיש לו (issue #1020).
-  unawaited(AppPaths.recordLibraryPathForUninstaller());
 
   // שירות ההתראות (לוח השנה) ושירות דיווחי השגיאות אינם חיוניים להצגת
   // המסך הראשי. tz.initializeTimeZones + plugin init של flutter_local_notifications
@@ -716,9 +720,10 @@ Future<void> _initializeProcessSingletons() async {
   }
 }
 
-/// משחזר עדכון ספרייה שנקטע (marker+backup) לפני פתיחת ה-DB.
-Future<void> _recoverInterruptedLibraryUpdate() {
-  return StartupRecoveryCheck(
+/// משחזר עדכון ספרייה שנקטע (marker+backup) לפני פתיחת ה-DB. אימות
+/// `quick_check` אחרי דלתא שנקטע (דקות על ספרייה מלאה) נדחה לאחרי החשיפה.
+Future<void> _recoverInterruptedLibraryUpdate() async {
+  final check = StartupRecoveryCheck(
     readPref: Settings.getValue<String>,
     writePref: (key, value) => Settings.setValue(key, value),
     logError: (title, message) => _appendUnhandledErrorToLocalLog(
@@ -726,7 +731,39 @@ Future<void> _recoverInterruptedLibraryUpdate() {
       error: message,
       details: const {'Phase': 'initialize', 'Component': 'Library recovery'},
     ),
-  ).run(DatabaseConstants.getDatabasePath());
+  );
+  await check.run(DatabaseConstants.getDatabasePath());
+  if (check.hasPendingVerification) {
+    final completer = _startupRecoveryVerification = Completer<void>();
+    unawaited(_runDeferredRecoveryVerification(check, completer));
+  }
+}
+
+Completer<void>? _startupRecoveryVerification;
+
+/// מסתיים כשה-DB אומת אחרי עדכון דלתא שנקטע (או מיד, כשלא נדרש אימות).
+/// עבודות שכותבות ל-seforim.db או מחליפות אותו — סנכרון רקע, עדכון ספרייה —
+/// ממתינות לו: ה-quick_check מחזיק את הקובץ פתוח ב-isolate, ובווינדוס
+/// החלפת קובץ פתוח נכשלת.
+Future<void> get startupRecoveryVerified =>
+    _startupRecoveryVerification?.future ?? Future.value();
+
+Future<void> _runDeferredRecoveryVerification(
+  StartupRecoveryCheck check,
+  Completer<void> completer,
+) async {
+  try {
+    await _mainWindowRevealedCompleter.future.timeout(
+      const Duration(seconds: 15),
+    );
+  } on TimeoutException {
+    // ממשיכים בכל זאת — כמו חימומי המטמון.
+  }
+  try {
+    await check.verifyPending();
+  } finally {
+    completer.complete();
+  }
 }
 
 /// seforim.db שהוזז לגיבוי זמני בעדכון ספרייה שנהרג באמצע חוזר לספרייה —
@@ -808,15 +845,15 @@ Future<void> _initializeRestartableRuntime() async {
   unawaited(_runDeferredProtocolRegistration());
   unawaited(_logJobObjectContainmentFailure());
   unawaited(_runDeferredDataRootWritabilityWarning());
-
-  // מסלול התאימות הישן זקוק ל-WebView מיד; החימום רץ ברקע ואינו מעכב bootstrap.
-  unawaited(_preWarmWebViewEnvironment());
 }
 
 /// כשקונטיינמנט ה-Job Object לא הוקם, תהליכי msedgewebview2.exe שורדים את
 /// סגירת התוכנה ונועלים את פרופיל ה-WebView2 (תוספים ריקים) — נרשם ל-errors.txt.
 Future<void> _logJobObjectContainmentFailure() async {
-  if (kIsWeb || !Platform.isWindows || kDebugMode) return;
+  // פר-תהליך: ה-Job Object אחד לתהליך, ורישום מכל חלון משכפל את אותה שורה.
+  if (kIsWeb || !Platform.isWindows || kDebugMode || WindowRole.isSecondary) {
+    return;
+  }
   try {
     final status = await AppWindowListener.jobObjectStatus();
     if (status.ready) return;
@@ -885,6 +922,9 @@ Future<void> _runDeferredPdfrxCacheInit() async {
 }
 
 Future<void> _runDeferredAutoBackup() async {
+  // ⚠️ פר-תהליך. הגיבוי קורא `Hive.box` ישירות — בחלון משני זהו שורש פרטי
+  // בלי תורי הדיווחים — ומשדר `key-last-auto-backup` שדורס את מועד הבעלים.
+  if (WindowRole.isSecondary) return;
   try {
     if (await BackupService.shouldPerformAutoBackup()) {
       await BackupService.performAutoBackup();
@@ -908,6 +948,8 @@ Future<void> _runDeferredDataRootWritabilityWarning() async {
 }
 
 Future<void> _runDeferredProtocolRegistration() async {
+  // פר-תהליך: רישום ברג'יסטרי של המכונה, עשרה תת-תהליכי `reg.exe` בכל חלון.
+  if (WindowRole.isSecondary) return;
   try {
     await PluginProtocolRegistrationService().ensureRegistered();
   } catch (error, stackTrace) {
@@ -933,6 +975,17 @@ Future<void> _runDeferredCacheWarmups() async {
   } on TimeoutException {
     // ממשיכים בכל זאת — עדיף חימום מאוחר מאשר אף פעם.
     StartupTimeline.instance.mark('warmupsStartedBeforeReveal');
+  }
+  // ⚠️ חלון משני מדלג: לכל השאר יש חימום לפי דרישה באתרי הקריאה, והרצתו
+  // כאן שכפלה `VACUUM` על `cache.db` המשותף ושני isolates לכל חלון נוסף.
+  // הגופנים נשארים, כי הנפילה שלהם היא סריקה סינכרונית על ה-thread הראשי.
+  if (WindowRole.isSecondary) {
+    unawaited(
+      AppFonts.warmUpSystemFontsCache().catchError((e) {
+        if (kDebugMode) debugPrint('Failed to warm up system fonts: $e');
+      }),
+    );
+    return;
   }
   // כיווץ cache.db — ה-prune-ים של מטמוני ה-docx/PDF משחררים דפים במהלך
   // הסשן אך לא מקטינים את הקובץ. רץ *לפני* החימומים ולא במקביל להם, כי
@@ -991,36 +1044,6 @@ Future<void> _runDeferredCacheWarmups() async {
       }
     }
   }());
-}
-
-Future<void> _preWarmWebViewEnvironment() async {
-  if (kIsWeb || !Platform.isWindows) return;
-  try {
-    // תוסף דקלרטיבי נשאר עצל גם אם אושרה לו הפעלה ברקע.
-    final installed = await PluginRegistryRepository().getAllPlugins();
-    final hasStartupRunner = installed.any(usesLegacyStartupRunner);
-    if (!hasStartupRunner) {
-      if (kDebugMode) {
-        debugPrint('WebView2 pre-warm skipped: no startup plugins');
-      }
-      return;
-    }
-    // אם WebView2 Runtime אינו מותקן, אתחול הסביבה ייכשל ממילא. מדלגים כדי
-    // לא לזרוק חריגה מיותרת ולא להצמיח תהליכי Edge חלקיים.
-    if (!await WebViewEnvironmentHolder.isRuntimeAvailable()) {
-      if (kDebugMode) {
-        debugPrint('WebView2 pre-warm skipped: runtime not installed');
-      }
-      return;
-    }
-    await WebViewEnvironmentHolder.initialize();
-  } catch (error, stackTrace) {
-    _logNonFatalInitializationError(
-      'WebView2 environment pre-warm',
-      error,
-      stackTrace,
-    );
-  }
 }
 
 Future<void>? _processInitializationFuture;
@@ -1419,9 +1442,8 @@ class _AppBootstrapState extends State<AppBootstrap> {
                 discovery: LibraryUpdateDiscovery(
                   client: GithubLibraryReleaseClient(),
                 ),
-                downloader: PatchDownloader(
-                  decompress: (bytes) => Zstandard().decompress(bytes),
-                ),
+                // זורם לדיסק: patch גדול נפרס בלי לשבת ב-RAM (ראו את המחלקה).
+                downloader: StreamingPatchDownloader(),
               ),
               companionAssets: CompanionAssetsService(),
               isOfflineMode: () =>
@@ -1578,6 +1600,11 @@ void secondaryWindowMain(List<String> args) async {
   SentryWidgetsFlutterBinding.ensureInitialized();
   EditableText.debugDeterministicCursor = true;
 
+  // ⚠️ מטפלי השגיאות הם פר-isolate. בלעדיהם כל חריגה בחלון הזה נעלמה
+  // ב-release, שבו `debugPrint` הוא no-op — בלי לוג ובלי דיווח.
+  await _initializeLogMetadata();
+  _installGlobalErrorHandlers();
+
   // ⚠️ **לפני** הקמת שורש ה-Hive: המשבצת היא שם התיקייה. `register` נשען
   // על [IsolateNameServer] בלבד ואינו תלוי ב-Hive, ולכן אין מניעה להקדים.
   _claimWindowBusSlot();
@@ -1682,8 +1709,6 @@ void secondaryWindowMain(List<String> args) async {
       debugPrint('secondaryWindowMain: windowManager init failed: $e');
     }
   }
-
-  _maybeMeasureThreadContention();
 
   runApp(
     AppWindowScope(
@@ -1822,27 +1847,6 @@ void _claimWindowBusSlot() {
   final slot = WindowBus.instance.register(asOwner: !WindowRole.isSecondary);
   if (slot == null) {
     debugPrint('⚠️ כל משבצות האפיק תפוסות — החלון הזה לא יוכל לשתף מצב');
-  }
-}
-
-/// מריץ את בדיקה 10 של P-2 — תחרות thread בין חלונות.
-///
-/// ⚠️ **מהחלון המשני**, ולא מהראשון. המדידה צריכה חלון שאינו עסוק בזמן
-/// שהאחר שורף CPU, והחלון הראשון הוא זה שנשרף. ההשהיה נותנת לאתחול
-/// להסתיים — מדידת בסיס בזמן שהחלון עוד עולה מודדת את האתחול, לא את
-/// התחרות.
-///
-/// ראו [ThreadContentionProbe] לנוהל ההרצה.
-void _maybeMeasureThreadContention() {
-  if (!ThreadContentionProbe.isEnabled || !WindowRole.isSecondary) return;
-  Timer(const Duration(seconds: 5), () => unawaited(_runContentionProbe()));
-}
-
-Future<void> _runContentionProbe() async {
-  try {
-    await ThreadContentionProbe.run();
-  } catch (e, st) {
-    debugPrint('[contention] probe failed: $e\n$st');
   }
 }
 

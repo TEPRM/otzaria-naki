@@ -31,7 +31,9 @@ import 'package:otzaria/personal_notes/repository/personal_notes_repository.dart
 import 'package:otzaria/personal_notes/models/personal_note.dart';
 import 'package:otzaria/settings/services/safer_mode_guard.dart';
 import 'package:otzaria/core/connectivity_status_service.dart';
+import 'package:otzaria/core/messages/window_messages.dart';
 import 'package:otzaria/core/ui_snack.dart';
+import 'package:otzaria/core/windowing/window_role.dart';
 import 'package:otzaria/models/books.dart';
 import 'package:otzaria/models/links.dart';
 import 'package:otzaria/models/link_types.dart';
@@ -3314,6 +3316,12 @@ class PluginBridgeAdapter {
         _grantedFolders.add(p.normalize(p.absolute(path)));
         return {'path': path};
       case 'print':
+        // ⚠️ פלאגין ההדפסה נרשם בחלון הראשון בלבד, ובלי הגידור התוסף קיבל
+        // `MissingPluginException` אטומה והמשתמש לא ראה דבר.
+        if (WindowRole.isSecondary) {
+          UiSnack.show(WindowMessages.printOnlyInMainWindow);
+          return {'printed': false};
+        }
         final context = navigatorKey.currentContext;
         if (context != null && !await verifySaferModePassword(context)) {
           return {'printed': false};
@@ -5913,6 +5921,10 @@ class PluginBridgeAdapter {
         'up to ${PluginNetworkFetchService.maxTimeout.inMilliseconds}',
       );
     }
+    final rawBody = args['body'];
+    if (rawBody != null && rawBody is! String) {
+      throw Exception('error.invalid_params: body must be a string');
+    }
     final rawHeaders = args['headers'];
     final headers = <String, String>{};
     if (rawHeaders is Map) {
@@ -5927,7 +5939,7 @@ class PluginBridgeAdapter {
       uri: uri,
       method: method,
       headers: headers.isEmpty ? null : headers,
-      body: args['body'] as String?,
+      body: rawBody as String?,
       timeout: rawTimeoutMs == null
           ? PluginNetworkFetchService.defaultTimeout
           : Duration(milliseconds: rawTimeoutMs),
@@ -5940,18 +5952,6 @@ class PluginBridgeAdapter {
     PluginRpcEventSink? eventSink,
   }) async {
     switch (action) {
-      case 'fetch':
-        // TODO(0.9.98): להסיר את network.fetch לאחר מעבר התוספים ל-fetchStream.
-        final request = await _prepareNetworkRequest(args);
-        final result = await _fetchService.fetch(
-          request.uri,
-          method: request.method,
-          headers: request.headers,
-          body: request.body,
-          timeout: request.timeout,
-        );
-        return {'status': result.status, 'ok': result.ok, 'body': result.body};
-
       case 'fetchStream':
         if (args[_cancelStreamIdKey] case final String streamId) {
           return _cancelPluginNetworkFetch(streamId);
