@@ -1689,20 +1689,31 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -e
+          if [ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 secret is missing or empty. Add the Android signing secrets (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD) to the repository to build the Android APK."
+            exit 1
+          fi
           mkdir -p android/app/keystore
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/keystore/otzaria-keystore.jks
           chmod 600 android/app/keystore/otzaria-keystore.jks
           
-          # Verify keystore file exists
+          # Verify keystore file exists and is non-empty
           echo "Verifying keystore setup..."
           ls -la android/app/keystore/
           
-          if [ ! -f android/app/keystore/otzaria-keystore.jks ]; then
-            echo "::error::Keystore file was not created!"
+          if [ ! -s android/app/keystore/otzaria-keystore.jks ]; then
+            echo "::error::Keystore file is empty! ANDROID_KEYSTORE_BASE64 is probably wrong or missing."
             exit 1
           fi
           
-          echo "✓ Keystore file exists at: android/app/keystore/otzaria-keystore.jks"
+          # Verify the keystore is actually readable with the given password/alias (JKS or PKCS12)
+          if ! keytool -list -keystore android/app/keystore/otzaria-keystore.jks -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" -storetype JKS -noprompt >/dev/null 2>&1 && \
+             ! keytool -list -keystore android/app/keystore/otzaria-keystore.jks -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" -storetype PKCS12 -noprompt >/dev/null 2>&1; then
+            echo "::error::Cannot read keystore with ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS. Check the secrets."
+            exit 1
+          fi
+          
+          echo "✓ Keystore is valid and readable at: android/app/keystore/otzaria-keystore.jks"
           echo "✓ Environment variables set for Gradle signing"
       
       - run: sudo apt install ninja-build
