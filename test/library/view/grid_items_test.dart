@@ -382,12 +382,6 @@ void main() {
     Finder infoButton() =>
         find.widgetWithIcon(IconButton, FluentIcons.info_24_regular);
 
-    Future<void> closeDialog(WidgetTester tester) async {
-      await tester.tap(find.text('סגור'));
-      await tester.pumpAndSettle();
-      expect(find.text('אודות הקטגוריה'), findsNothing);
-    }
-
     testWidgets('קצר וארוך: התיאורים אינם מוצגים בכרטיס, בריחוף או בדיאלוג', (
       tester,
     ) async {
