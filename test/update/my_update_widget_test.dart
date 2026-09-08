@@ -518,13 +518,13 @@ void main() {
     test('treats every exe installer as silent-capable, zip is not', () {
       expect(
         isSilentWindowsInstallerUrl(
-          'https://github.com/Otzaria/otzaria/releases/download/0.9.96/otzaria-0.9.96-windows.exe',
+          'https://github.com/TEPRM/otzaria-naki/releases/download/0.9.96/otzaria-0.9.96-windows.exe',
         ),
         isTrue,
       );
       expect(
         isSilentWindowsInstallerUrl(
-          'https://github.com/Otzaria/otzaria/releases/download/0.9.96/otzaria-windows.zip',
+          'https://github.com/TEPRM/otzaria-naki/releases/download/0.9.96/otzaria-windows.zip',
         ),
         isFalse,
       );

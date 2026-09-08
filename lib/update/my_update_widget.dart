@@ -37,8 +37,8 @@ const _kInstallKind = String.fromEnvironment(
   defaultValue: 'auto',
 );
 
-const _githubOwner = 'Otzaria';
-const _githubRepository = 'otzaria';
+const _githubOwner = 'TEPRM';
+const _githubRepository = 'otzaria-naki';
 const _changelogAssetPath = 'assets/יומן שינויים.md';
 const _kGithubTimeout = Duration(seconds: 15);
 const _kDownloadConnectTimeout = Duration(seconds: 20);
@@ -891,14 +891,48 @@ class _ManagedUpdatWidgetState extends State<_ManagedUpdatWidget> {
       return normalized;
     }
 
-    final data = await http
+    var data = await http
         .get(
           Uri.parse(
             "https://api.github.com/repos/$_githubOwner/$_githubRepository/releases/latest",
           ),
         )
         .timeout(_kGithubTimeout);
-    final release = (jsonDecode(data.body) as Map).cast<String, dynamic>();
+
+    Map<String, dynamic> release;
+    if (data.statusCode == 404) {
+      // כל ה-releases בריפו הם prerelease (כפי שהפורק מפרסם אותם) — ואז
+      // /releases/latest מחזיר 404 בלי גרסה יציבה להציע. נופלים לרשימת
+      // ה-releases ובוחרים את האחרון שאינו draft, כך שגם ערוץ stable מקבל
+      // את העדכון האחרון של הפורק במקום שגיאת בדיקה בכל פתיחה.
+      final listData = await http
+          .get(
+            Uri.parse(
+              "https://api.github.com/repos/$_githubOwner/$_githubRepository/releases?per_page=5",
+            ),
+          )
+          .timeout(_kGithubTimeout);
+      if (listData.statusCode != 200) {
+        throw Exception(
+          'Failed to list releases (status ${listData.statusCode})',
+        );
+      }
+      final releases = (jsonDecode(listData.body) as List)
+          .cast<Map<String, dynamic>>();
+      if (releases.isEmpty) {
+        throw Exception('No releases found');
+      }
+      release = releases.firstWhere(
+        (r) => r["draft"] != true,
+        orElse: () => releases.first,
+      );
+    } else if (data.statusCode != 200) {
+      throw Exception(
+        'Failed to fetch latest release (status ${data.statusCode})',
+      );
+    } else {
+      release = (jsonDecode(data.body) as Map).cast<String, dynamic>();
+    }
     final normalized = _normalizeVersion(release["tag_name"] as String);
     _cacheRelease(normalized, release, isDev: false);
     return normalized;

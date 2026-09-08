@@ -3,7 +3,7 @@
 /// ## איך מאשרים כתובת חדשה (אין צורך ב-release!)
 /// מקור האמת **היחיד** הוא הקובץ `plugin_network_allowlist.txt` בשורש
 /// הריפו, כפי שהוא בענף **`dev`** — האפליקציה מושכת אותו משם בזמן ריצה:
-/// <https://github.com/Otzaria/otzaria/blob/dev/plugin_network_allowlist.txt>
+/// <https://github.com/TEPRM/otzaria-naki/blob/dev/plugin_network_allowlist.txt>
 ///
 /// מוסיפים את הכתובת לקובץ (שורה = קידומת URL, `#` = הערה) — האישור
 /// נכנס לתוקף **מיד** אצל כל המשתמשים עם מיזוג ל-dev, בכל גרסה מותקנת.

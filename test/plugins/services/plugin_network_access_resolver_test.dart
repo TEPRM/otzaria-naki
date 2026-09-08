@@ -257,7 +257,7 @@ https://other.example.com
     test('כתובת הרשימה הרשמית מצביעה על הקובץ שבענף dev', () {
       expect(
         PluginNetworkAccessResolver.officialAllowlistUri.toString(),
-        'https://raw.githubusercontent.com/Otzaria/otzaria/'
+        'https://raw.githubusercontent.com/TEPRM/otzaria-naki/'
         'dev/plugin_network_allowlist.txt',
       );
     });

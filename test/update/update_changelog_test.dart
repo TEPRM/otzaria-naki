@@ -64,7 +64,7 @@ void main() {
       // בצורתו המילולית בנתיב raw (אומת ידנית מול raw.githubusercontent.com).
       expect(
         url.pathSegments,
-        containsAllInOrder(['Otzaria', 'otzaria', 'refs', 'tags']),
+        containsAllInOrder(['TEPRM', 'otzaria-naki', 'refs', 'tags']),
       );
       expect(url.pathSegments[4], '0.9.92+628');
       // והמחרוזת השלמה משמרת את ה-tag המלא, כך שהיומן יישלף מהקומיט הנכון
@@ -90,10 +90,10 @@ void main() {
       expect(url.toString(), isNot(contains(' ')));
     });
 
-    test('builds a path rooted under the upstream repo', () {
+    test('builds a path rooted under the fork repo', () {
       final url = rawAssetUrlForTag('0.9.92+628', 'assets/foo.md');
-      expect(url.pathSegments.first, 'Otzaria');
-      expect(url.pathSegments[1], 'otzaria');
+      expect(url.pathSegments.first, 'TEPRM');
+      expect(url.pathSegments[1], 'otzaria-naki');
       expect(url.pathSegments[2], 'refs');
       expect(url.pathSegments[3], 'tags');
     });
