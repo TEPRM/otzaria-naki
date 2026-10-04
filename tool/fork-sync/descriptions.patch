@@ -155,3 +155,27 @@ index 8874a72..73f3e47 100644
            BookActionsMenuButton(book: book, onBookDeleted: onBookDeleted),
          ],
        ),
+diff --git a/lib/book_common/view/book_source_dialog.dart b/lib/book_common/view/book_source_dialog.dart
+index 9cf451e..3fdeb3b 100644
+--- a/lib/book_common/view/book_source_dialog.dart
++++ b/lib/book_common/view/book_source_dialog.dart
+@@ -257,18 +257,7 @@ Widget _buildBookDetailsContent(
+               icon: FluentIcons.tag_24_regular,
+               value: information.topics.join(', '),
+             ),
+-          if (information.shortDescription != null)
+-            DetailsInfoSection(
+-              title: 'תיאור קצר:',
+-              icon: OtzariaIcons.book_information_24_regular,
+-              value: information.shortDescription!,
+-            ),
+-          if (information.fullDescription != null)
+-            DetailsInfoSection(
+-              title: 'תיאור מורחב:',
+-              icon: FluentIcons.document_text_24_regular,
+-              value: information.fullDescription!,
+-            ),
++          // תיאורי הספר (קצר ומורחב) הוסרו ב-fork.
+           const Divider(height: 24),
+           Row(
+             children: [
