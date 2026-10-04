@@ -93,7 +93,12 @@ jobs:
           git checkout -B dev "upstream/${{ env.UPSTREAM_BRANCH }}"
 
           # 2) מחזירים את כלי ה-fork שאין במקורי (האיפוס מחק אותם).
-          git checkout "$OLD" -- .github/workflows/auto-sync.yml tool/fork-sync
+          # מקפיאים את קבצי ה-workflow של ה-fork כפי שהם: ל-GITHUB_TOKEN אין
+          # הרשאת `workflows`, ולכן commit שמשנה קובץ workflow נדחה ב-push.
+          # (כדי למשוך גם את ה-workflows של upstream — יש להגדיר secret עם PAT
+          # בעל scope `workflow` ולהשתמש בו ב-checkout.)
+          rm -rf .github/workflows
+          git checkout "$OLD" -- .github/workflows tool/fork-sync
 
           # 3) מחילים את שכבת ה-fork.
           bash tool/fork-sync/apply-fork-overlay.sh .

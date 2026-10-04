@@ -33,7 +33,7 @@ index 51fd048..eb1b7e2 100644
            ),
          ),
 diff --git a/lib/library/view/grid_items.dart b/lib/library/view/grid_items.dart
-index 837072f..5127955 100644
+index 8874a72..73f3e47 100644
 --- a/lib/library/view/grid_items.dart
 +++ b/lib/library/view/grid_items.dart
 @@ -13,7 +13,6 @@ import 'dart:math';
@@ -155,27 +155,3 @@ index 837072f..5127955 100644
            BookActionsMenuButton(book: book, onBookDeleted: onBookDeleted),
          ],
        ),
-diff --git a/lib/text_book/view/book_source_dialog.dart b/lib/text_book/view/book_source_dialog.dart
-index 1e69d26..fba5594 100644
---- a/lib/text_book/view/book_source_dialog.dart
-+++ b/lib/text_book/view/book_source_dialog.dart
-@@ -266,18 +266,7 @@ Widget _buildBookDetailsContent(
-               icon: FluentIcons.tag_24_regular,
-               value: information.topics.join(', '),
-             ),
--          if (information.shortDescription != null)
--            DetailsInfoSection(
--              title: 'תיאור קצר:',
--              icon: OtzariaIcons.book_information_24_regular,
--              value: information.shortDescription!,
--            ),
--          if (information.fullDescription != null)
--            DetailsInfoSection(
--              title: 'תיאור מורחב:',
--              icon: FluentIcons.document_text_24_regular,
--              value: information.fullDescription!,
--            ),
-+          // תיאורי הספר (קצר ומורחב) הוסרו ב-fork.
-           const Divider(height: 24),
-           Row(
-             children: [
