@@ -7,13 +7,10 @@ name: "Auto Sync & Build (upstream releases)"
 #      tool/fork-sync/apply-fork-overlay.sh.
 #   3. דוחפים ומפעילים את הבנייה (build-and-announce.yml).
 #
-# בכל release חדש של upstream — נבנה release חדש אצלנו. הסקריפט לעולם לא מפיל
-# את ה-job על צעד אופציונלי; כשל בהסרת התיאורים מדווח כאזהרה וממשיכים לבנות.
+# הסקריפט לעולם לא מפיל את ה-job על צעד אופציונלי; כשל בהסרת התיאורים מדווח
+# כאזהרה וממשיכים לבנות. לפני כל דחיפה כפויה נוצר תג גיבוי pre-sync-<timestamp>.
 #
-# לפני כל דחיפה כפויה נוצר תג גיבוי pre-sync-<timestamp> לשחזור מהיר.
-#
-# הערה: אם ענף dev מוגן מפני force-push, יש לאפשר ל-GitHub Actions לדחוף אליו
-# (Settings → Branches), אחרת השלב "Commit and force-push" ייכשל.
+# הערה: אם ענף dev מוגן מפני force-push, יש לאפשר ל-GitHub Actions לדחוף אליו.
 
 on:
   schedule:
@@ -92,7 +89,7 @@ jobs:
           git tag "pre-sync-$STAMP" "$OLD"
           git push origin "pre-sync-$STAMP" || echo "::warning::could not push backup tag"
 
-          # 1) איפוס מלא לעץ של upstream — הפרי-פייבוריט היחיד לסנכרון נקי.
+          # 1) איפוס מלא לעץ של upstream.
           git checkout -B dev "upstream/${{ env.UPSTREAM_BRANCH }}"
 
           # 2) מחזירים את כלי ה-fork שאין במקורי (האיפוס מחק אותם).
@@ -104,20 +101,28 @@ jobs:
       - name: Commit and force-push
         if: steps.compare.outputs.changed == 'true'
         run: |
-          set -euo pipefail
+          set -uo pipefail
           echo "${{ steps.release.outputs.tag }}" > "$MARKER"
           echo "${{ steps.release.outputs.prerelease }}" > .github/LAST_UPSTREAM_PRERELEASE
           git add -A
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "No staged changes (unexpected after reset)."
           else
-            git commit -m "Sync with upstream release ${{ steps.release.outputs.tag }}"
+            if ! git commit -m "Sync with upstream release ${{ steps.release.outputs.tag }}" 2>/tmp/e1; then
+              echo "::error title=commit-failed::$(tr '\n' '|' </tmp/e1)"; exit 1
+            fi
           fi
-          git push --force origin dev
+          if ! git push --force origin dev 2>/tmp/e2; then
+            echo "::error title=push-failed::$(tr '\n' '|' </tmp/e2)"; exit 1
+          fi
+          echo "pushed dev -> $(git rev-parse HEAD)"
 
       - name: Trigger build-and-announce (all platforms + release)
         if: steps.compare.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh workflow run build-and-announce.yml --ref dev
+        run: |
+          if ! gh workflow run build-and-announce.yml --ref dev 2>/tmp/e3; then
+            echo "::warning title=dispatch-failed::$(tr '\n' '|' </tmp/e3)"
+          fi
