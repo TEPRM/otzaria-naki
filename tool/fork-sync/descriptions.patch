@@ -1,0 +1,157 @@
+diff --git a/lib/library/view/category_details_dialog.dart b/lib/library/view/category_details_dialog.dart
+index 51fd048..eb1b7e2 100644
+--- a/lib/library/view/category_details_dialog.dart
++++ b/lib/library/view/category_details_dialog.dart
+@@ -25,9 +25,6 @@ class _CategoryDetailsDialogContent extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    final shortDescription = category.shortDescription.trim();
+-    final fullDescription = category.description.trim();
+-
+     return SizedBox(
+       width: 450,
+       child: AppSelectionArea(
+@@ -43,18 +40,7 @@ class _CategoryDetailsDialogContent extends StatelessWidget {
+                 icon: FluentIcons.folder_24_regular,
+                 value: category.title,
+               ),
+-              if (shortDescription.isNotEmpty)
+-                DetailsInfoSection(
+-                  title: 'תיאור קצר:',
+-                  icon: OtzariaIcons.book_information_24_regular,
+-                  value: category.shortDescription,
+-                ),
+-              if (fullDescription.isNotEmpty)
+-                DetailsInfoSection(
+-                  title: 'תיאור מורחב:',
+-                  icon: FluentIcons.document_text_24_regular,
+-                  value: category.description,
+-                ),
++              // תיאורי הקטגוריה (קצר ומורחב) הוסרו ב-fork — מוצג רק שם הקטגוריה.
+             ],
+           ),
+         ),
+diff --git a/lib/library/view/grid_items.dart b/lib/library/view/grid_items.dart
+index 8874a72..73f3e47 100644
+--- a/lib/library/view/grid_items.dart
++++ b/lib/library/view/grid_items.dart
+@@ -13,7 +13,6 @@ import 'dart:math';
+ import 'package:otzaria/core/ui_snack.dart';
+ import 'package:otzaria/core/messages/library_messages.dart';
+ import 'package:otzaria/data/book_locator.dart';
+-import 'package:otzaria/library/view/category_details_dialog.dart';
+ import 'package:otzaria/library/view/book_versions_dialog.dart';
+ import 'package:otzaria/text_book/utils/book_versions_action.dart';
+ import 'package:otzaria/theme/theme_exports.dart';
+@@ -33,26 +32,6 @@ String truncateBookCardDescription(String description) {
+   return '${trimmed.substring(0, contentLength).trimRight()}...';
+ }
+ 
+-String? _bookInfoTooltipText(Book book) {
+-  final fullDescription = book.heDesc?.trim();
+-  if (fullDescription != null && fullDescription.isNotEmpty) {
+-    return fullDescription;
+-  }
+-  final shortDescription = book.heShortDesc?.trim();
+-  return shortDescription == null || shortDescription.isEmpty
+-      ? null
+-      : shortDescription;
+-}
+-
+-/// הטקסט שיוצג ב־Tooltip של לחצן המידע לקטגוריה.
+-String? categoryInfoText(Category category) {
+-  final fullDescription = category.description.trim();
+-  if (fullDescription.isNotEmpty) return fullDescription;
+-
+-  final shortDescription = category.shortDescription.trim();
+-  return shortDescription.isEmpty ? null : shortDescription;
+-}
+-
+ /// מחזיר את נתיב הלוגו של הקטלוג החיצוני שממנו מגיע הספר, או null אם זהו
+ /// ספר מקומי רגיל ללא מקור חיצוני.
+ ///
+@@ -292,7 +271,6 @@ class CategoryGridItem extends StatelessWidget {
+   Widget build(BuildContext context) {
+     final theme = Theme.of(context);
+     final cs = theme.colorScheme;
+-    final infoText = categoryInfoText(category);
+     return AppCard(
+       onTap: onCategoryClickCallback,
+       focusNode: focusNode,
+@@ -327,44 +305,7 @@ class CategoryGridItem extends StatelessWidget {
+               ),
+             ),
+             const SizedBox(width: 18),
+-            if (infoText != null)
+-              ExcludeFocusTraversal(
+-                child: Tooltip(
+-                  message: infoText,
+-                  waitDuration: const Duration(milliseconds: 400),
+-                  textAlign: TextAlign.right,
+-                  padding: const EdgeInsets.symmetric(
+-                    horizontal: 12,
+-                    vertical: 10,
+-                  ),
+-                  margin: const EdgeInsets.all(12),
+-                  constraints: const BoxConstraints(maxWidth: 320),
+-                  textStyle: _libraryTooltipTextStyle(context),
+-                  decoration: _libraryTooltipDecoration(context),
+-                  child: Container(
+-                    width: 28,
+-                    height: 28,
+-                    decoration: BoxDecoration(
+-                      color: theme.colorScheme.surfaceContainerHighest,
+-                      borderRadius: BorderRadius.circular(8),
+-                    ),
+-                    child: IconButton(
+-                      onPressed: () =>
+-                          showCategoryDetailsDialog(context, category),
+-                      padding: EdgeInsets.zero,
+-                      constraints: const BoxConstraints.tightFor(
+-                        width: 28,
+-                        height: 28,
+-                      ),
+-                      icon: Icon(
+-                        FluentIcons.info_24_regular,
+-                        size: 15,
+-                        color: theme.colorScheme.onSurfaceVariant,
+-                      ),
+-                    ),
+-                  ),
+-                ),
+-              ),
++            // כפתור המידע של הקטגוריה הוסר ב-fork (התיאורים הוסרו).
+             const SizedBox(width: 4),
+             Container(
+               width: 32,
+@@ -664,7 +605,6 @@ class _BookGridActionColumn extends StatelessWidget {
+   @override
+   Widget build(BuildContext context) {
+     final theme = Theme.of(context);
+-    final infoTooltipText = _bookInfoTooltipText(book);
+ 
+     final infoButton = Container(
+       width: 28,
+@@ -690,20 +630,7 @@ class _BookGridActionColumn extends StatelessWidget {
+       child: Column(
+         mainAxisSize: MainAxisSize.min,
+         children: [
+-          if (infoTooltipText != null)
+-            Tooltip(
+-              message: infoTooltipText,
+-              waitDuration: const Duration(milliseconds: 400),
+-              textAlign: TextAlign.right,
+-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+-              margin: const EdgeInsets.all(12),
+-              constraints: const BoxConstraints(maxWidth: 320),
+-              textStyle: _libraryTooltipTextStyle(context),
+-              decoration: _libraryTooltipDecoration(context),
+-              child: infoButton,
+-            )
+-          else
+-            infoButton,
++          infoButton,
+           BookActionsMenuButton(book: book, onBookDeleted: onBookDeleted),
+         ],
+       ),

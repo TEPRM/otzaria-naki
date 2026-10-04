@@ -1,0 +1,133 @@
+name: "Auto Sync & Build (upstream releases)"
+
+# סנכרון אוטומטי עם Otzaria/otzaria במודל "איפוס + overlay":
+#   1. מאפסים את dev ל-upstream/dev — לוקחים את המקורי במלואו (בלי מיזוגים,
+#      בלי "קבצים מוגנים", בלי קונפליקטים).
+#   2. מחילים את שכבת ה-fork (זהות + הסרת תיאורים) דרך
+#      tool/fork-sync/apply-fork-overlay.sh.
+#   3. דוחפים ומפעילים את הבנייה (build-and-announce.yml).
+#
+# הסקריפט לעולם לא מפיל את ה-job על צעד אופציונלי; כשל בהסרת התיאורים מדווח
+# כאזהרה וממשיכים לבנות. לפני כל דחיפה כפויה נוצר תג גיבוי pre-sync-<timestamp>.
+#
+# הערה: אם ענף dev מוגן מפני force-push, יש לאפשר ל-GitHub Actions לדחוף אליו.
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "לבצע סנכרון ובנייה גם אם אין release חדש"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: auto-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync_and_dispatch:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: Otzaria/otzaria
+      UPSTREAM_BRANCH: dev
+      MARKER: .github/LAST_UPSTREAM_RELEASE
+    steps:
+      - name: Clone fork
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "https://github.com/${{ env.UPSTREAM_REPO }}.git" || true
+          git fetch upstream "${{ env.UPSTREAM_BRANCH }}" --tags
+
+      - name: Latest upstream release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LATEST=$(gh api "repos/${{ env.UPSTREAM_REPO }}/releases?per_page=10" \
+            --jq '[.[] | select(.draft == false)] | sort_by(.published_at) | reverse | .[0]')
+          TAG=$(printf '%s' "$LATEST" | jq -r .tag_name)
+          PRE=$(printf '%s' "$LATEST" | jq -r .prerelease)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream release: $TAG (prerelease: $PRE)"
+
+      - name: Compare with last processed release
+        id: compare
+        run: |
+          LAST=$(cat "$MARKER" 2>/dev/null || echo "")
+          if [ "${{ inputs.force }}" = "true" ] || [ "$LAST" != "${{ steps.release.outputs.tag }}" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Will sync (last processed: '$LAST')."
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No new upstream release (last processed: $LAST). Nothing to do."
+          fi
+
+      - name: Sync (reset to upstream + fork overlay)
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          OLD=$(git rev-parse HEAD)
+          STAMP=$(date +%Y%m%d-%H%M%S)
+          git tag "pre-sync-$STAMP" "$OLD"
+          git push origin "pre-sync-$STAMP" || echo "::warning::could not push backup tag"
+
+          # 1) איפוס מלא לעץ של upstream.
+          git checkout -B dev "upstream/${{ env.UPSTREAM_BRANCH }}"
+
+          # 2) מחזירים את כלי ה-fork שאין במקורי (האיפוס מחק אותם).
+          # מקפיאים את קבצי ה-workflow של ה-fork כפי שהם: ל-GITHUB_TOKEN אין
+          # הרשאת `workflows`, ולכן commit שמשנה קובץ workflow נדחה ב-push.
+          # (כדי למשוך גם את ה-workflows של upstream — יש להגדיר secret עם PAT
+          # בעל scope `workflow` ולהשתמש בו ב-checkout.)
+          rm -rf .github/workflows
+          git checkout "$OLD" -- .github/workflows tool/fork-sync
+
+          # 3) מחילים את שכבת ה-fork.
+          bash tool/fork-sync/apply-fork-overlay.sh .
+
+      - name: Commit and force-push
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          set -uo pipefail
+          echo "${{ steps.release.outputs.tag }}" > "$MARKER"
+          echo "${{ steps.release.outputs.prerelease }}" > .github/LAST_UPSTREAM_PRERELEASE
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No staged changes (unexpected after reset)."
+          else
+            if ! git commit -m "Sync with upstream release ${{ steps.release.outputs.tag }}" 2>/tmp/e1; then
+              echo "::error title=commit-failed::$(tr '\n' '|' </tmp/e1)"; exit 1
+            fi
+          fi
+          if ! git push --force origin dev 2>/tmp/e2; then
+            echo "::error title=push-failed::$(tr '\n' '|' </tmp/e2)"; exit 1
+          fi
+          echo "pushed dev -> $(git rev-parse HEAD)"
+
+      - name: Trigger build-and-announce (all platforms + release)
+        if: steps.compare.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! gh workflow run build-and-announce.yml --ref dev 2>/tmp/e3; then
+            echo "::warning title=dispatch-failed::$(tr '\n' '|' </tmp/e3)"
+          fi

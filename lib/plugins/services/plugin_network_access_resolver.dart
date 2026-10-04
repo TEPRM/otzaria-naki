@@ -23,8 +23,8 @@ class PluginNetworkAccessResolver {
 
   static PluginNetworkAccessResolver instance = PluginNetworkAccessResolver();
 
-  static const String _officialOwner = 'Otzaria';
-  static const String _officialRepository = 'otzaria';
+  static const String _officialOwner = 'TEPRM';
+  static const String _officialRepository = 'otzaria-naki';
   static const String _officialBranch = 'dev';
   static const String _officialAllowlistFile = 'plugin_network_allowlist.txt';
   static const Duration _officialFetchTimeout = Duration(seconds: 15);

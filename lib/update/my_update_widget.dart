@@ -49,8 +49,8 @@ const _kInstallKind = String.fromEnvironment(
   defaultValue: 'auto',
 );
 
-const _githubOwner = 'Otzaria';
-const _githubRepository = 'otzaria';
+const _githubOwner = 'TEPRM';
+const _githubRepository = 'otzaria-naki';
 const _changelogAssetPath = 'assets/יומן שינויים.md';
 const _kGithubTimeout = Duration(seconds: 15);
 const _kDownloadConnectTimeout = Duration(seconds: 20);
