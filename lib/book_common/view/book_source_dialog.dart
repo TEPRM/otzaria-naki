@@ -257,18 +257,7 @@ Widget _buildBookDetailsContent(
               icon: FluentIcons.tag_24_regular,
               value: information.topics.join(', '),
             ),
-          if (information.shortDescription != null)
-            DetailsInfoSection(
-              title: 'תיאור קצר:',
-              icon: OtzariaIcons.book_information_24_regular,
-              value: information.shortDescription!,
-            ),
-          if (information.fullDescription != null)
-            DetailsInfoSection(
-              title: 'תיאור מורחב:',
-              icon: FluentIcons.document_text_24_regular,
-              value: information.fullDescription!,
-            ),
+          // תיאורי הספר (קצר ומורחב) הוסרו ב-fork.
           const Divider(height: 24),
           Row(
             children: [
