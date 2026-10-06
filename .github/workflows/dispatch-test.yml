@@ -1,0 +1,41 @@
+name: Dispatch Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      do_dispatch:
+        description: "Fire test dispatches at this workflow"
+        type: boolean
+        default: false
+  repository_dispatch:
+    types: [self-test]
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  test:
+    if: github.event_name == 'workflow_dispatch' && inputs.do_dispatch
+    runs-on: ubuntu-latest
+    steps:
+      - name: repository_dispatch via GITHUB_TOKEN
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh api -X POST "repos/$GH_REPO/actions/repository-dispatches" -f event_type=self-test; then
+            echo "RESULT repo-dispatch: ACCEPTED"
+          else
+            echo "::error title=repo-dispatch-failed::api call failed"
+          fi
+      - name: workflow_dispatch via GITHUB_TOKEN
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh workflow run dispatch-test.yml --ref dev -f do_dispatch=false; then
+            echo "RESULT wf-dispatch: ACCEPTED"
+          else
+            echo "::error title=wf-dispatch-failed::api call failed"
+          fi
