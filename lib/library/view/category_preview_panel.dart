@@ -36,7 +36,6 @@ class CategoryPreviewPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
-    final description = categoryInfoText(category);
     final counts = categoryContentCountsText(
       subCategories: subCategories.length,
       books: books.length,
@@ -63,13 +62,6 @@ class CategoryPreviewPanel extends StatelessWidget {
               padding: headerInset,
               child: _header(theme, cs),
             ),
-            if (description != null) ...[
-              const SizedBox(height: 16),
-              Padding(
-                padding: headerInset,
-                child: Text(description, style: theme.textTheme.bodyMedium),
-              ),
-            ],
             if (counts != null) ...[
               const SizedBox(height: 16),
               Padding(
