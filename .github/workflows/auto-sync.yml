@@ -128,6 +128,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          if ! gh workflow run build-and-announce.yml --ref dev 2>/tmp/e3; then
-            echo "::warning title=dispatch-failed::$(tr '\n' '|' </tmp/e3)"
-          fi
+              sleep 10
+              PREV=$(gh run list --workflow build-and-announce.yml --limit 1 --json createdAt --jq '.[0].createdAt' 2>/dev/null || true)
+              for i in 1 2 3; do
+                if gh workflow run build-and-announce.yml --ref dev 2>/tmp/e3; then
+                  sleep 25
+                  NEW=$(gh run list --workflow build-and-announce.yml --limit 1 --json createdAt --jq '.[0].createdAt' 2>/dev/null || true)
+                  if [ -n "$NEW" ] && [ "$NEW" != "$PREV" ]; then
+                    echo "dispatch verified: run created at $NEW (attempt $i)"
+                    exit 0
+                  fi
+                  echo "attempt $i: dispatch accepted but no new run appeared (newest: $NEW) - retrying"
+                else
+                  echo "::error title=dispatch-failed::attempt $i: $(tr '\n' '|' </tmp/e3)"
+                fi
+                sleep 15
+              done
+              echo "::error title=dispatch-gave-up::could not create build run after 3 attempts"
+              exit 1
