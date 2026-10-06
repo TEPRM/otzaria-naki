@@ -179,3 +179,28 @@ index 9cf451e..3fdeb3b 100644
            const Divider(height: 24),
            Row(
              children: [
+diff --git a/lib/library/view/category_preview_panel.dart b/lib/library/view/category_preview_panel.dart
+--- a/lib/library/view/category_preview_panel.dart
++++ b/lib/library/view/category_preview_panel.dart
+@@ -36,7 +36,6 @@
+   Widget build(BuildContext context) {
+     final theme = Theme.of(context);
+     final cs = theme.colorScheme;
+-    final description = categoryInfoText(category);
+     final counts = categoryContentCountsText(
+       subCategories: subCategories.length,
+       books: books.length,
+@@ -63,13 +62,6 @@
+               padding: headerInset,
+               child: _header(theme, cs),
+             ),
+-            if (description != null) ...[
+-              const SizedBox(height: 16),
+-              Padding(
+-                padding: headerInset,
+-                child: Text(description, style: theme.textTheme.bodyMedium),
+-              ),
+-            ],
+             if (counts != null) ...[
+               const SizedBox(height: 16),
+               Padding(
