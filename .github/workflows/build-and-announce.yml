@@ -2,6 +2,7 @@ name: "Build, Release and Announce"
 
 permissions:
   contents: write
+  actions: write
 
 on:
   workflow_dispatch:
@@ -42,6 +43,14 @@ on:
         description: "מספר תיקון חירום לגרסה שהוזנה (0–99)"
         type: string
         default: "0"
+      release_repo:
+        description: "הריפו שאליו עולה ה-release עם הגרסאות הבנויות (ריפו פרטי)"
+        type: string
+        default: "TEPRM/otzaria-naki-releases"
+      wipe_public_traces:
+        description: "מחיקת כל ה-artifacts, הלוגים ורשומת הריצה מהריפו הציבורי בסוף הבנייה"
+        type: boolean
+        default: true
 
   # טריגר לפרסום בלבד. published נשלח גם על prerelease —
   # הוספת prereleased לרשימה גורמת להרצה כפולה (שני פוסטים בפורום)
@@ -2562,7 +2571,7 @@ jobs:
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       title: ${{ steps.version.outputs.title }}
-      url: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}
+      url: https://github.com/${{ inputs.release_repo || 'TEPRM/otzaria-naki-releases' }}/releases/tag/${{ steps.version.outputs.tag }}
     needs: [bump_version, build_windows, build_windows_arm64, build_linux, build_android, build_macos, build_windows_indexed_full]
     runs-on: ubuntu-latest
 
@@ -2842,7 +2851,7 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
-          RELEASE_URL="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}"
+          RELEASE_URL="https://github.com/${{ inputs.release_repo || 'TEPRM/otzaria-naki-releases' }}/releases/download/${RELEASE_TAG}"
 
           windows_installers=()
           windows_arm64_installers=()
@@ -3160,7 +3169,8 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v3.0.3
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASE_PAT }}
+          repository: ${{ inputs.release_repo || 'TEPRM/otzaria-naki-releases' }}
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.title }}
           prerelease: ${{ steps.version.outputs.prerelease }}
@@ -3177,9 +3187,9 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         continue-on-error: true
         env:
-          UPDATE_PACKAGES_SOURCE_REPO: ${{ github.repository }}
+          UPDATE_PACKAGES_SOURCE_REPO: ${{ inputs.release_repo || 'TEPRM/otzaria-naki-releases' }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
         run: |
           set -euo pipefail
           flutter pub get --enforce-lockfile
@@ -3206,9 +3216,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: 90
         env:
-          UPDATE_PACKAGES_SOURCE_REPO: ${{ github.repository }}
+          UPDATE_PACKAGES_SOURCE_REPO: ${{ inputs.release_repo || 'TEPRM/otzaria-naki-releases' }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
         run: |
           set -euo pipefail
           # bsdtar משחזר symlinks מ-zip של ditto; unzip אינו מבטיח זאת.
@@ -3248,6 +3258,7 @@ jobs:
       always() &&
       (github.event_name == 'release' ||
        (github.event_name == 'workflow_dispatch' && inputs.announce_release &&
+        inputs.wipe_public_traces != true &&
         needs.create_release.result == 'success'))
     runs-on: ubuntu-latest
     steps:
@@ -3287,3 +3298,39 @@ jobs:
           TOKEN_YEMOT: ${{ secrets.TOKEN_YEMOT }}
         run: |
           python webhooks/main.py
+
+  # מחיקת עקבות ציבוריות: אחרי שהגרסאות הבנויות עלו לריפו הפרטי, מוחק את כל
+  # ה-artifacts, הלוגים ורשומת הריצה מהריפו הציבורי כדי שלא יהיה מה להוריד ממנו.
+  # רץ תמיד בסוף (גם כשבנייה נכשלה באמצע). נשלט ע"י wipe_public_traces.
+  wipe_public_traces:
+    if: always() && !(inputs.wipe_public_traces == false)
+    needs: [bump_version, check_version, build_windows, build_windows_arm64, build_linux, build_android, build_macos, build_windows_indexed_full, create_release, trigger_google_play_deploy, announce_release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete run artifacts, logs and the run record
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          echo "wiping public traces of run $RUN_ID in $REPO"
+          page=1
+          while :; do
+            ids=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100&page=$page" --jq '.artifacts[].id')
+            [ -z "$ids" ] && break
+            for id in $ids; do
+              gh api -X DELETE "repos/$REPO/actions/artifacts/$id" >/dev/null \
+                && echo "deleted artifact $id" \
+                || echo "::warning::failed to delete artifact $id"
+            done
+            [ "$(printf '%s\n' "$ids" | wc -l)" -lt 100 ] && break
+            page=$((page + 1))
+          done
+          gh api -X DELETE "repos/$REPO/actions/runs/$RUN_ID/logs" >/dev/null \
+            && echo "deleted logs" \
+            || echo "::warning::failed to delete logs"
+          # מחיקת רשומת הריצה עצמה — צעד אחרון, כי אחריו אין יותר ריצה לדווח ממנה.
+          gh api -X DELETE "repos/$REPO/actions/runs/$RUN_ID" >/dev/null \
+            && echo "deleted run record" \
+            || echo "::warning::failed to delete run record"
