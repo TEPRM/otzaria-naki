@@ -18,15 +18,15 @@ on:
       build_linux:
         description: בניית גרסת Linux
         type: boolean
-        default: true
+        default: false
       build_android:
         description: בניית גרסת Android
         type: boolean
-        default: true
+        default: false
       build_macos:
         description: בניית גרסת macOS
         type: boolean
-        default: true
+        default: false
       create_release:
         description: יצירת release ב-GitHub
         type: boolean
@@ -2473,7 +2473,7 @@ jobs:
           if-no-files-found: warn
 
   build_windows_indexed_full:
-    if: github.event_name != 'release' && github.event_name != 'pull_request'
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.build_windows && inputs.build_linux)
     needs: [bump_version, build_windows, build_linux]
     runs-on: windows-latest
 
@@ -2560,14 +2560,12 @@ jobs:
       github.event_name != 'release' &&
       github.event_name != 'pull_request' &&
       (github.event_name != 'workflow_dispatch' || inputs.create_release) &&
-      inputs.build_windows && inputs.build_linux &&
-      inputs.build_android && inputs.build_macos &&
       needs.build_windows.result == 'success' &&
-      needs.build_linux.result == 'success' &&
-      needs.build_android.result == 'success' &&
-      needs.build_macos.result == 'success' &&
-      needs.build_windows_indexed_full.result == 'success' &&
-      (needs.build_windows_arm64.result == 'success' || needs.build_windows_arm64.result == 'skipped')
+      (needs.build_windows_arm64.result == 'success' || needs.build_windows_arm64.result == 'skipped') &&
+      (needs.build_linux.result == 'success' || needs.build_linux.result == 'skipped') &&
+      (needs.build_android.result == 'success' || needs.build_android.result == 'skipped') &&
+      (needs.build_macos.result == 'success' || needs.build_macos.result == 'skipped') &&
+      (needs.build_windows_indexed_full.result == 'success' || needs.build_windows_indexed_full.result == 'skipped')
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       title: ${{ steps.version.outputs.title }}
