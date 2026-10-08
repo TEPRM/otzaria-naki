@@ -3299,22 +3299,22 @@ jobs:
         run: |
           python webhooks/main.py
 
-  # מחיקת עקבות ציבוריות: אחרי שהגרסאות הבנויות עלו לריפו הפרטי, מוחק את כל
-  # ה-artifacts, הלוגים ורשומת הריצה מהריפו הציבורי כדי שלא יהיה מה להוריד ממנו.
-  # רץ תמיד בסוף (גם כשבנייה נכשלה באמצע). נשלט ע"י wipe_public_traces.
+  # מחיקת עקבות ציבוריות, שלב א': מוחק מיד את כל ה-artifacts של הריצה כדי
+  # שלא יהיה מה להוריד מהריפו הציבורי. רשומת הריצה והלוגים נמחקים ע"י
+  # cleanup-build-traces (ריצה שעוד רצה אי אפשר למחוק). נשלט ע"י wipe_public_traces.
   wipe_public_traces:
     if: always() && !(inputs.wipe_public_traces == false)
     needs: [bump_version, check_version, build_windows, build_windows_arm64, build_linux, build_android, build_macos, build_windows_indexed_full, create_release, trigger_google_play_deploy, announce_release]
     runs-on: ubuntu-latest
     steps:
-      - name: Delete run artifacts, logs and the run record
+      - name: Delete run artifacts immediately
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.run_id }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          echo "wiping public traces of run $RUN_ID in $REPO"
+          echo "deleting public artifacts of run $RUN_ID in $REPO"
           page=1
           while :; do
             ids=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100&page=$page" --jq '.artifacts[].id')
@@ -3327,10 +3327,4 @@ jobs:
             [ "$(printf '%s\n' "$ids" | wc -l)" -lt 100 ] && break
             page=$((page + 1))
           done
-          gh api -X DELETE "repos/$REPO/actions/runs/$RUN_ID/logs" >/dev/null \
-            && echo "deleted logs" \
-            || echo "::warning::failed to delete logs"
-          # מחיקת רשומת הריצה עצמה — צעד אחרון, כי אחריו אין יותר ריצה לדווח ממנה.
-          gh api -X DELETE "repos/$REPO/actions/runs/$RUN_ID" >/dev/null \
-            && echo "deleted run record" \
-            || echo "::warning::failed to delete run record"
+          echo "public downloads removed; run record and logs are removed by cleanup-build-traces"
