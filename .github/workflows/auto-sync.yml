@@ -21,6 +21,14 @@ on:
         description: "לבצע סנכרון ובנייה גם אם אין release חדש"
         type: boolean
         default: false
+      publish_private:
+        description: "העלאת הגרסאות לריפו הפרטי ומחיקת העקבות מהציבורי"
+        type: boolean
+        default: true
+      release_repo:
+        description: "הריפו שאליו עולה ה-release עם הגרסאות הבנויות"
+        type: string
+        default: "TEPRM/otzaria-naki-releases"
 
 permissions:
   contents: write
@@ -131,7 +139,7 @@ jobs:
               sleep 10
               PREV=$(gh run list --workflow build-and-announce.yml --limit 1 --json createdAt --jq '.[0].createdAt' 2>/dev/null || true)
               for i in 1 2 3; do
-                if gh workflow run build-and-announce.yml --ref dev 2>/tmp/e3; then
+                if gh workflow run build-and-announce.yml --ref dev -F wipe_public_traces=${{ inputs.publish_private }} -F announce_release=false -f release_repo=${{ inputs.release_repo }} 2>/tmp/e3; then
                   sleep 25
                   NEW=$(gh run list --workflow build-and-announce.yml --limit 1 --json createdAt --jq '.[0].createdAt' 2>/dev/null || true)
                   if [ -n "$NEW" ] && [ "$NEW" != "$PREV" ]; then
