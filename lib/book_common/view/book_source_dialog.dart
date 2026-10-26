@@ -247,6 +247,7 @@ Widget _buildBookDetailsContent(
               icon: FluentIcons.tag_24_regular,
               value: information.topics.join(', '),
             ),
+<<<<<<< ours
           if (mergedDescription != null)
             _MergedDescriptionSection(
               lead: mergedDescription.lead,
@@ -266,6 +267,9 @@ Widget _buildBookDetailsContent(
                 value: information.fullDescription!,
               ),
           ],
+=======
+          // תיאורי הספר (קצר ומורחב) הוסרו ב-fork.
+>>>>>>> theirs
           const Divider(height: 24),
           Row(
             children: [

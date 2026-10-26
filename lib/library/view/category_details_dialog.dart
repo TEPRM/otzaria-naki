@@ -25,9 +25,6 @@ class _CategoryDetailsDialogContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final shortDescription = category.shortDescription.trim();
-    final fullDescription = category.description.trim();
-
     return SizedBox(
       width: 450,
       child: AppSelectionArea(
@@ -43,18 +40,7 @@ class _CategoryDetailsDialogContent extends StatelessWidget {
                 icon: FluentIcons.folder_24_regular,
                 value: category.title,
               ),
-              if (shortDescription.isNotEmpty)
-                DetailsInfoSection(
-                  title: 'תיאור קצר:',
-                  icon: OtzariaIcons.book_information_24_regular,
-                  value: category.shortDescription,
-                ),
-              if (fullDescription.isNotEmpty)
-                DetailsInfoSection(
-                  title: 'תיאור מורחב:',
-                  icon: FluentIcons.document_text_24_regular,
-                  value: category.description,
-                ),
+              // תיאורי הקטגוריה (קצר ומורחב) הוסרו ב-fork — מוצג רק שם הקטגוריה.
             ],
           ),
         ),
