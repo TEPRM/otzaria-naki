@@ -44,6 +44,7 @@ class _CategoryDetailsDialogContentState
 
   @override
   Widget build(BuildContext context) {
+<<<<<<< ours
     final category = widget.category;
     final shortDescription = category.shortDescription.trim();
     // התיאור הקצר כבר בכותרת; כשהמורחב מתחיל בו, בכרטיס נשאר רק ההמשך.
@@ -57,6 +58,8 @@ class _CategoryDetailsDialogContentState
 
     // פס גלילה קבוע: תיאור מורחב ארוך נחתך בתחתית הדיאלוג, ובלי פס אין סימן
     // שיש המשך.
+=======
+>>>>>>> theirs
     return SizedBox(
       width: 500,
       child: RawScrollbar(
@@ -66,6 +69,7 @@ class _CategoryDetailsDialogContentState
         thickness: 6,
         radius: const Radius.circular(3),
         child: SingleChildScrollView(
+<<<<<<< ours
           controller: _scroll,
           padding: const EdgeInsetsDirectional.only(end: AppTokens.spaceMD),
           child: AppSelectionArea(
@@ -87,6 +91,21 @@ class _CategoryDetailsDialogContentState
                 ],
               ],
             ),
+=======
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // אותם אייקונים כמו ב"אודות הספר", כדי ששני הדיאלוגים ייקראו
+              // כאותה טבלת פרטים.
+              DetailsInfoSection(
+                title: 'שם הקטגוריה:',
+                icon: FluentIcons.folder_24_regular,
+                value: category.title,
+              ),
+              // תיאורי הקטגוריה (קצר ומורחב) הוסרו ב-fork — מוצג רק שם הקטגוריה.
+            ],
+>>>>>>> theirs
           ),
         ),
       ),

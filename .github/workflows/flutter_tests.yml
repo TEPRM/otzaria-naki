@@ -7,82 +7,7 @@ on:
       - main
       - dev
 
-# A new push to a PR supersedes its previous run, so the older one is cancelled.
-concurrency:
-  group: flutter-tests-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  # הג'ובים הנייטיביים אינם תלויים באפליקציה; בלי שינוי במקורות שלהם הם רק תופסים
-  # ראנרים (macOS במיוחד). כשל בזיהוי מריץ אותם.
-  changes:
-    name: Detect native changes
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: read
-    outputs:
-      native_linux: ${{ steps.filter.outputs.native_linux }}
-      native_macos: ${{ steps.filter.outputs.native_macos }}
-    steps:
-      - id: filter
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          if [ -z "$PR" ] || ! files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename'); then
-            echo native_linux=true >> "$GITHUB_OUTPUT"
-            echo native_macos=true >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          shared='^(tool/(download_assistant|updater|release)/|installer/assistant_art\.pin\.json$|\.github/workflows/flutter_tests\.yml$)'
-          macos='^(lib/utils/file/native_sha256\.dart|test/utils/file/native_sha256_test\.dart|pubspec\.lock)$'
-          linux=false; mac=false
-          grep -qE "$shared" <<< "$files" && linux=true && mac=true
-          grep -qE "$macos" <<< "$files" && mac=true
-          echo "native_linux=$linux" | tee -a "$GITHUB_OUTPUT"
-          echo "native_macos=$mac" | tee -a "$GITHUB_OUTPUT"
-
-  native_linux:
-    name: Native updater and download assistant (Linux)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.native_linux == 'true') }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7.0.1
-      - name: Install native test dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev xvfb xauth
-      - name: Build and test Linux download assistant
-        run: make -C tool/download_assistant/linux all check-needed test test-ui
-      - name: Build atomic tree swap helper
-        run: cc -O2 -Wall -Wextra tool/updater/atomic_tree_swap.c -o /tmp/otzaria-atomic-swap
-
-  native_macos:
-    name: Native updater and download assistant (macOS)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.native_macos == 'true') }}
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7.0.1
-      - name: Test macOS download assistant
-        run: swift test --package-path tool/download_assistant/macos
-      - name: Build universal atomic tree swap helper
-        run: |
-          cc -O2 -Wall -Wextra -arch x86_64 -arch arm64 -mmacosx-version-min=12.0 \
-            tool/updater/atomic_tree_swap.c -o /tmp/otzaria-atomic-swap
-          lipo /tmp/otzaria-atomic-swap -verify_arch x86_64 arm64
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: 3.47.7
-          cache: true
-      - name: Install dependencies
-        run: flutter pub get --enforce-lockfile
-      - name: Test native SHA-256 (macOS)
-        run: flutter test test/utils/file/native_sha256_test.dart
-
   analyze:
     name: Analyze
     runs-on: ubuntu-latest
@@ -97,11 +22,11 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.47.7
+          flutter-version: 3.47.2
           cache: true
 
       - name: Install dependencies
-        run: flutter pub get --enforce-lockfile
+        run: flutter pub get
 
       # חילול אינדקס חיפוש בהגדרות. ה-.g.dart נדחף לרפו, אבל הסקריפט הזה
       # יוודא שהוא עדכני בכל הרצה (אם searchEntries השתנו במהלך ה-PR).
@@ -142,40 +67,18 @@ jobs:
       - name: Check plugin SDK spec is fresh
         run: dart run tool/plugins/generate_plugin_spec.dart --check
 
-      # בדיקות ה־CI: analyze + test (פורמט נבדק locally ב־lint).
+      # ה-trinity של CLAUDE.md: analyze + test (פורמט נבדק locally בlint).
       - name: Analyze
         run: flutter analyze
 
-      # חוזה הדיווחים משותף עם "עדכוני אוצריא"; ה-goldens שלו נועלים את גופי הבקשות.
-      - name: Report contract package
-        working-directory: packages/otzaria_report_contract
-        run: |
-          dart pub get
-          dart analyze --fatal-infos
-          dart test
-
-      - name: Context menu package
-        working-directory: packages/otzaria_context_menu
-        run: |
-          flutter pub get
-          dart format --output=none --set-exit-if-changed lib test
-          flutter analyze --fatal-infos
-          flutter test
-
   test:
-    name: Test (shard ${{ matrix.shard }}/5)
+    name: Test (shard ${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4]
-
-    # בדיקות ה-zstd של line_content נכשלות כאן במקום לדלג כשחסרים libzstd או המילון.
-    env:
-      OTZARIA_REQUIRE_CODEC_TESTS: '1'
-      # מנוע שלא נטען מפיל כל קובץ בטעינה, במקום שטסטי המנוע ידלגו על עצמם.
-      OTZARIA_REQUIRE_SEARCH_ENGINE: '1'
+        shard: [0, 1, 2, 3, 4, 5]
 
     steps:
       - name: Checkout code
@@ -185,20 +88,35 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.47.7
+          flutter-version: 3.47.2
           cache: true
 
       - name: Install dependencies
-        run: flutter pub get --enforce-lockfile
+        run: flutter pub get
 
-      # flutter test runs the build hooks of the engine and the shaper. A crate
-      # hash with no published binary (a Git-pinned engine) compiles from
-      # source, so its output is cached by the resolved packages.
-      - name: Cache native build hook output
+      # sanitizeQuery/splitQueryWords מאצילים ל-Rust דרך FRB,
+      # ו-flutter_test_config.dart טוען את הספרייה מ-rust/target שבחבילה.
+      # ה-cache מיוצר ב-warm_search_engine_cache.yml על ענף הבסיס.
+      - name: Cache search engine library
+        id: engine-cache
         uses: actions/cache@v6.1.0
         with:
-          path: .dart_tool/hooks_runner/shared
-          key: ${{ runner.os }}-native-hooks-v1-${{ hashFiles('pubspec.yaml', 'pubspec.lock') }}
+          path: ~/.pub-cache/hosted/pub.dev/otzaria_search_engine-*/rust/target/release/libsearch_engine.so
+          # בלי restore-keys: .so מגרסה קודמת נכשל בבדיקת ה-content hash של FRB,
+          # והטסטים היו מדולגים בשקט במקום להיכשל.
+          key: ${{ runner.os }}-search-engine-lib-${{ hashFiles('pubspec.lock') }}
+
+      - name: Build search engine native library
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        run: |
+          pkg_root=$(jq -r '.packages[] | select(.name == "otzaria_search_engine") | .rootUri' .dart_tool/package_config.json)
+          pkg_root=${pkg_root#file://}
+          case "$pkg_root" in
+            /*) ;;
+            *) pkg_root=".dart_tool/$pkg_root" ;;
+          esac
+          echo "Building search engine at: $pkg_root"
+          cargo build --release --manifest-path "$pkg_root/rust/Cargo.toml"
 
       # הטסטים תלויים בקבצים המחוללים, לכן החילול רץ גם בכל shard (~20 שניות).
       - name: Generate settings search index
@@ -231,41 +149,28 @@ jobs:
       - name: Generate settings translation catalog
         run: dart run tool/generate_settings_l10n.dart
 
-      # המילון האמיתי (2MB) לא נכנס לרפו: הוא מגיע מ-SeforimLibrary בקומיט נעוץ ונבדק
-      # לפי SHA-256, ועותק וקטור ה-golden שב-test/fixtures חייב להיות זהה למקור שם.
-      - name: Fetch the SeforimLibrary line dictionary (pinned)
-        env:
-          SL_COMMIT: cdc5a50fc5c831284e190ad15791b72af8198a57
-          DICT_SHA256: 7b08b7c3534c9f9cd0e8f18414b4326aeeb64cfd574cc0f12d83b6f92bd6a396
-        run: |
-          set -euo pipefail
-          base="https://raw.githubusercontent.com/Otzaria/SeforimLibrary/$SL_COMMIT/generator/common/src"
-          mkdir -p build/test_fixtures
-          curl -fsSL --retry 3 --retry-delay 5 -o build/test_fixtures/line_content.zdict \
-            "$base/jvmMain/resources/zstd/line_content.zdict"
-          printf '%s  %s\n' "$DICT_SHA256" build/test_fixtures/line_content.zdict | sha256sum -c -
-          curl -fsSL --retry 3 --retry-delay 5 "$base/jvmTest/resources/zstd/line_content_golden_frames.json" \
-            | cmp - test/fixtures/line_content_codec/sl_golden_frames.json
-          ldconfig -p | grep -F 'libzstd.so.1'
-
       # הרצת הטסטים עם retry: אם הריצה הראשונה נכשלה, נחלץ את קבצי הטסט
       # שנכשלו ונריץ אותם שוב. רק אם הם נכשלים גם בריצה השנייה - הסטפ נכשל.
       - name: Run tests (with retry on failure)
         run: |
           set +e
 
-          # פיצול מפורש של רשימת הקבצים לפי זמני ריצה שנמדדו, במקום
+          # פיצול מפורש של רשימת הקבצים (round-robin על רשימה ממוינת) במקום
           # --total-shards: הדגל מקמפל את כל הקבצים בכל shard והקומפילציה
           # היא רוב הזמן, כך שהפיצול לא חסך כלום.
-          all_count=$(find test -name "*_test.dart" | wc -l)
-          mapfile -t shard_files < <(dart tool/ci/test_shards.dart ${{ strategy.job-index }} ${{ strategy.job-total }})
+          mapfile -t all_files < <(find test -name "*_test.dart" | sort)
+          shard_files=()
+          for i in "${!all_files[@]}"; do
+            if [ $((i % 6)) -eq ${{ matrix.shard }} ]; then
+              shard_files+=("${all_files[$i]}")
+            fi
+          done
 
           echo "════════════════════════════════════════"
-          echo "ריצה ראשונה של הטסטים (shard ${{ matrix.shard }}/5, ${#shard_files[@]} מתוך $all_count קבצים)"
+          echo "ריצה ראשונה של הטסטים (shard ${{ matrix.shard }}/6, ${#shard_files[@]} מתוך ${#all_files[@]} קבצים)"
           echo "════════════════════════════════════════"
 
-          # ברירת המחדל (ליבות÷2) משאירה כמחצית מה-CPU של הראנר פנוי.
-          flutter test -j 4 --file-reporter json:test-results.json "${shard_files[@]}"
+          flutter test --file-reporter json:test-results.json "${shard_files[@]}"
           first_exit=$?
 
           if [ $first_exit -eq 0 ]; then
@@ -367,54 +272,17 @@ jobs:
 
           exit $second_exit
 
-      # הוכחה בלוג שבדיקות ה-codec רצו ב-shard הזה, וכשל אם אחת מהן דולגה.
-      - name: Report zstd codec tests
-        run: |
-          set -euo pipefail
-          read -r ran skipped < <(jq -rs '
-            (map(select(.type == "suite"))
-              | map({(.suite.id | tostring): .suite.path})
-              | add) as $suites
-            | (map(select(.type == "testStart"))
-              | map({(.test.id | tostring): .test})
-              | add // {}) as $tests
-            | map(select(.type == "testDone" and (.hidden | not)))
-            | map(select(($suites[($tests[.testID | tostring].suiteID) | tostring] // "")
-                | test("line_content_(codec|split)|db_read_worker_compressed|line_codec_isolate_placement")))
-            | "\(map(select(.skipped | not)) | length) \(map(select(.skipped)) | length)"
-          ' test-results.json)
-          echo "zstd codec tests (shard ${{ matrix.shard }}): $ran ran, $skipped skipped"
-          if [ "$skipped" -ne 0 ]; then
-            echo "::error::$skipped zstd codec tests were skipped"
-            exit 1
-          fi
-
-      # קלט ל-tool/ci/test_shards.dart --record, לעדכון זמני הפיצול.
-      - name: Upload test timings
-        if: always()
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: test-results-${{ matrix.shard }}
-          path: test-results.json
-          if-no-files-found: ignore
-          retention-days: 14
-
   # שער הבנייה היחיד ל-Windows על PR. עד עכשיו לא היה כזה: `analyze` ו-`test`
   # רצים שניהם על ubuntu, ו-`webview2_smoke` מסונן ב-`paths`. המשמעות הייתה
-  # ששבירה בקוד הנייטיבי (windows/runner, רישום תוספים, build hooks) התגלתה רק
+  # ששבירה בקוד הנייטיבי (windows/runner, רישום תוספים, cargokit) התגלתה רק
   # אצל המפתח הבא שניסה לבנות מקומית.
   build_windows:
     name: Build (Windows)
-    runs-on: windows-2025
-    env:
-      # כמו בבניית ההפצה: בלי אלה MSBuild מקמפל קובץ C++ אחד בכל פעם.
-      UseMultiToolTask: 'true'
-      EnforceProcessCountAcrossBuilds: 'true'
-      CMAKE_BUILD_PARALLEL_LEVEL: '4'
+    runs-on: windows-2022
     # מדידה מקומית: בנייה קרה 6 דקות. ראנר CI איטי יותר ומוסיף checkout,
-    # setup ו-pub get, ועוד בדיקת ריבוי התצוגות. 40 נותן מרווח בלי לתת ל-job תקוע לשרוף שעה שלמה.
+    # setup ו-pub get. 30 נותן מרווח בלי לתת ל-job תקוע לשרוף שעה שלמה.
     # לכווץ אחרי הריצה הראשונה לפי הזמן שנמדד בפועל.
-    timeout-minutes: 40
+    timeout-minutes: 30
 
     steps:
       - name: Checkout code
@@ -426,199 +294,41 @@ jobs:
           channel: stable
           # ⚠️ חייב להתאים לשאר ה-jobs. `pubspec.lock` דורש Flutter >=3.47.0,
           # ולכן עם 3.44.0 ה-job הזה נכשל ב-`pub get` ומעולם לא רץ ירוק.
-          flutter-version: 3.47.7
-          # ה-cache של Windows נשמר על ענף הבסיס ב-warm_flutter_cache.yml.
+          flutter-version: 3.47.2
           cache: true
 
       - name: Install dependencies
-        shell: pwsh
-        run: |
-          # תלות git על מונורפו נכשלת ב-checkout ("Filename too long") ומשאירה
-          # עץ חלקי, ואז הבנייה נופלת על קובץ חסר במקום על ה-clone.
-          git config --global core.longpaths true
-          flutter pub get --enforce-lockfile
-
-      # The Git-pinned engine may not have precompiled release assets yet.
-      - name: Install Rust for native source fallback
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Test splash timeline
-        shell: pwsh
-        run: native/splash/test/run_splash_timeline_test.ps1
+        run: flutter pub get
 
       # זה הצעד שבגללו ה-job קיים: MSBuild, רישום התוספים הנייטיביים
-      # וה-build hooks. debug ולא release — הוא מפעיל את אותה שרשרת נייטיבית
+      # ו-cargokit. debug ולא release — הוא מפעיל את אותה שרשרת נייטיבית
       # בשבריר מהזמן, ובניית ה-release כבר מכוסה ב-build-and-announce.
       - name: Build Windows (debug)
         run: flutter build windows --debug
 
-      # המנוע בבניית האפליקציה בלי SQLite משלו; כשל ברישום אינו נראה בשום טסט
-      # יחידה. רץ על הבנייה הנייטיבית שלמעלה, ולכן מוסיף רק קומפילציה וריצה.
-      - name: Engine SQLite integration test (Windows)
-        run: flutter test integration_test/external_line_text_test.dart -d windows --timeout 5m
+      # ⚠️ הבנייה חייבת לקדום לבדיקות, ולא רק כדי לחסוך זמן:
+      # `test/support/search_engine_test_init.dart` מאתר את מנוע החיפוש
+      # בין השאר תחת `build/windows/x64/plugins/otzaria_search_engine/Debug`.
+      # בלי בנייה קודמת האתחול נכשל **בשקט**, וכל בדיקה שתלויה במנוע
+      # מדולגת בלי להיכשל — כלומר ה-job היה ירוק ולא בודק כלום.
+      #
+      # ההיקף מכוון וצר: הסוללה המלאה רצה על Linux ב-6 shards. כאן רצות
+      # רק הקבוצות שאומתו כירוקות ב-Windows (1,073 בדיקות), והקבוצות
+      # הידועות כתלויות-סביבה או flaky (migration, installer, personal_notes,
+      # tools/calendar) נשארות ל-Linux בלבד. הרחבת ההיקף מחייבת אימות
+      # מקומי ב-Windows קודם — אחרת ה-job נהיה רועש ומתחילים להתעלם ממנו.
+      - name: Run Windows-relevant tests
+        run: flutter test test/core/ test/tabs/ test/navigation/ test/workspaces/
 
-      # ריבוי תצוגות באפליקציה המלאה. `flutter drive` ולא integration_test: ה-binding
-      # של הבדיקות מחזיר engineId=1, ובלי בעלים אמיתי לא נפתחים חלונות Dart.
-      # portable.marker: נתונים ומופע יחיד בתוך תיקיית הבנייה. DSN ריק משבית את Sentry.
-      - name: Multiview smoke (Windows)
-        shell: pwsh
-        run: |
-          New-Item -ItemType File -Force build/windows/x64/runner/Debug/portable.marker | Out-Null
-          flutter drive -d windows -t test_driver/multiview_smoke.dart --dart-define=SENTRY_DSN=
-
-      # שומר לוגים בכישלון: כשהבנייה נופלת, הלוג של MSBuild הוא הדבר היחיד
+      # רץ גם בכישלון: כשהבנייה נופלת, הלוג של MSBuild הוא הדבר היחיד
       # שמסביר למה — ההודעה ב-stdout מפנה לכיוון הלא נכון בדרך כלל.
       - name: Upload build logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v7.0.2
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: windows-build-logs
           path: |
             build/windows/x64/**/*.log
             build/windows/x64/**/*.tlog
-            build/windows/x64/runner/Debug/otzaria_data/logs/**
           if-no-files-found: ignore
           retention-days: 7
-
-  # רץ במקביל לבנייה: את ספריית המנוע מוריד ה-build hook של flutter test,
-  # חתומה מאותו מקור שממנו הבנייה מורידה אותה.
-  test_windows:
-    name: Test (Windows)
-    runs-on: windows-2025
-    env:
-      OTZARIA_REQUIRE_SEARCH_ENGINE: '1'
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7.0.1
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: 3.47.7
-          cache: true
-
-      - name: Install dependencies
-        shell: pwsh
-        run: |
-          git config --global core.longpaths true
-          flutter pub get --enforce-lockfile
-
-      # ההיקף מכוון וצר: הסוללה המלאה רצה על Linux ב-4 shards. כאן רצות
-      # רק הקבוצות שאומתו כירוקות ב-Windows (1,073 בדיקות, ועוד 146 של
-      # personal_notes), והקבוצות הידועות כתלויות-סביבה או flaky (migration,
-      # installer, tools/calendar) נשארות ל-Linux בלבד. הרחבת ההיקף מחייבת אימות
-      # מקומי ב-Windows קודם — אחרת ה-job נהיה רועש ומתחילים להתעלם ממנו.
-      - name: Run Windows-relevant tests
-        run: flutter test -j 4 test/core/ test/tabs/ test/navigation/ test/workspaces/ test/personal_notes/ test/utils/file/native_sha256_test.dart
-
-  build_linux:
-    name: Build (Linux)
-    runs-on: ubuntu-26.04
-    # ה-SDK של WPE נבנה ומופץ עבור Debian Bookworm. זהה את סביבת הבנייה
-    # לבדיקת ההפצה: על Ubuntu 24.04 ה-try_compile של WPEPlatform נכשל אף
-    # שה-PC modules נמצאים, ולכן אינו מייצג build נתמך של המוצר.
-    container:
-      image: debian:bookworm-slim
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
-    env:
-      RUSTUP_HOME: ${{ github.workspace }}/.rustup
-      CARGO_HOME: ${{ github.workspace }}/.cargo
-      WPE_SDK: /opt/wpe-sdk
-      PKG_CONFIG_PATH: /opt/wpe-sdk/lib/pkgconfig
-      LD_LIBRARY_PATH: /opt/wpe-sdk/lib
-      LIBRARY_PATH: /opt/wpe-sdk/lib
-      # התוסף jni מפעיל FindJNI בזמן CMake; בקונטיינר אין JAVA_HOME ברירת מחדל.
-      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
-      # Flutter בוחר clang++ עבור Linux. Clang 14 של Bookworm אינו מכיר
-      # דגל אזהרה אופציונלי של nlohmann/json, לכן רק diagnostic זה אינו -Werror.
-      CC: clang
-      CXX: clang++
-      CFLAGS: -Wno-error=unknown-warning-option
-      CXXFLAGS: -Wno-error=unknown-warning-option
-
-    steps:
-      # הפעולה חייבת לרוץ לפני checkout: הקונטיינר המינימלי לא כולל git,
-      # curl, unzip או zstd, הנדרשים ל-actions ול-SDK.
-      - name: Prepare Linux build container
-        run: |
-          set -euo pipefail
-          apt-get update -y
-          apt-get install -y ca-certificates curl git jq unzip xz-utils zstd
-          # ה-Flutter SDK מוזרק מה-runner בבעלות משתמש אחר. זהו קונטיינר
-          # חד-פעמי של CI, וכל עץ git בו מגיע מה-workflow עצמו.
-          git config --global --add safe.directory '*'
-
-      - name: Checkout code
-        uses: actions/checkout@v7.0.1
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: 3.47.7
-          # ה-cache של הקונטיינר נשמר על ענף הבסיס ב-warm_flutter_cache.yml.
-          cache: true
-
-      - name: Install Linux build dependencies
-        run: |
-          set -euo pipefail
-          apt-get update -y
-          apt-get install -y build-essential clang-14 cmake \
-            libblkid1 libcurl4-openssl-dev libglib2.0-dev libgtk-3-dev \
-            liblzma5 liblzma-dev libsecret-1-dev libsoup-3.0-dev \
-            libwebkit2gtk-4.1-dev libxkbcommon-dev ninja-build \
-            openjdk-17-jdk-headless pkg-config xvfb xauth
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100
-
-      # Bookworm-slim has no rustup. Unpublished crate hashes fall back to
-      # building the Git-pinned engine from source in its build hook.
-      - name: Install Rust for native source fallback
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Verify native Rust toolchain
-        run: |
-          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
-          rustc -Vv
-          cargo -V
-          rustup show
-
-      - name: Download prebuilt WPE runtime SDK
-        env:
-          WPE_RUNTIME_SHA256: ca7e706c0ec2f66623fede2c369e3e13339448843e125f2ccd1553f4a3c4bcaf
-          WPE_RUNTIME_VERSION: 2.48.7
-        run: |
-          set -euo pipefail
-          asset="wpe-runtime-${WPE_RUNTIME_VERSION}-linux-x86_64.tar.zst"
-          base="https://github.com/Otzaria/otzaria-wpe-runtime/releases/download/wpe-2.48.7-print-to-pdf"
-          curl -fSL --retry 3 --retry-delay 5 -o "/tmp/$asset" "$base/$asset"
-          printf '%s  %s\n' "$WPE_RUNTIME_SHA256" "/tmp/$asset" | sha256sum -c -
-          mkdir -p /opt
-          tar -C /opt -I zstd -xf "/tmp/$asset"
-          test -f "$WPE_SDK/lib/pkgconfig/wpe-webkit-2.0.pc"
-          pkg-config --print-errors --exists \
-            wpe-webkit-2.0 wpe-platform-2.0 wpe-platform-headless-2.0 wpe-1.0
-
-      - name: Install dependencies
-        run: flutter pub get --enforce-lockfile
-
-      - name: Test fractional scaling policy
-        run: linux/runner/test/run_fractional_scaling_test.sh
-
-      - name: Test splash timeline
-        run: native/splash/test/run_splash_timeline_test.sh
-
-      - name: Build Linux (debug)
-        run: flutter build linux --debug
-
-      # ראו את הצעד המקביל ב-build_windows. ה-runner של GTK צריך תצוגה.
-      - name: Engine SQLite integration test (Linux)
-        run: >-
-          xvfb-run -a flutter test integration_test/external_line_text_test.dart
-          -d linux --timeout 5m

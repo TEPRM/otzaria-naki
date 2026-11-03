@@ -298,12 +298,74 @@ Widget _buildBookDetailsContent(
             icon: OtzariaIcons.book_information_24_regular,
             children: facts,
           ),
+<<<<<<< ours
           gap,
         ],
         if (mergedDescription != null) ...[
           DetailsCard(
             title: 'תיאור',
             icon: FluentIcons.document_text_24_regular,
+=======
+          if (information.authors.isNotEmpty)
+            DetailsInfoSection(
+              title: 'מחבר:',
+              icon: OtzariaIcons.person_24_regular,
+              value: information.authors.join(', '),
+            ),
+          if (information.generation != null)
+            DetailsInfoSection(
+              icon: FluentIcons.people_team_24_regular,
+              title: 'דור:',
+              value: information.generation!,
+            ),
+          if (book.heEra != null && book.heEra!.isNotEmpty)
+            DetailsInfoSection(
+              icon: FluentIcons.history_24_regular,
+              title: 'תקופה:',
+              value: book.heEra!,
+            ),
+          if (information.categories != null)
+            DetailsInfoSection(
+              title: 'קטגוריות:',
+              icon: FluentIcons.folder_24_regular,
+              value: information.categories!,
+            ),
+          if (book.compDateStringHe != null &&
+              book.compDateStringHe!.isNotEmpty)
+            DetailsInfoSection(
+              title: 'תאריך חיבור:',
+              icon: OtzariaIcons.calendar_24_regular,
+              value: book.compDateStringHe!,
+            ),
+          if (book.compPlaceStringHe != null &&
+              book.compPlaceStringHe!.isNotEmpty)
+            DetailsInfoSection(
+              title: 'מקום חיבור:',
+              icon: FluentIcons.location_24_regular,
+              value: book.compPlaceStringHe!,
+            ),
+          if (information.publicationDates.isNotEmpty)
+            DetailsInfoSection(
+              title: 'תאריך פרסום:',
+              icon: FluentIcons.print_24_regular,
+              value: information.publicationDates.join(', '),
+            ),
+          if (information.publicationPlaces.isNotEmpty)
+            DetailsInfoSection(
+              title: 'מקום פרסום:',
+              icon: FluentIcons.building_24_regular,
+              value: information.publicationPlaces.join(', '),
+            ),
+          if (information.topics.isNotEmpty)
+            DetailsInfoSection(
+              title: 'נושאים:',
+              icon: FluentIcons.tag_24_regular,
+              value: information.topics.join(', '),
+            ),
+          // תיאורי הספר (קצר ומורחב) הוסרו ב-fork.
+          const Divider(height: 24),
+          Row(
+>>>>>>> theirs
             children: [
               _MergedDescriptionSection(
                 lead: mergedDescription.lead,

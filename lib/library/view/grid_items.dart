@@ -20,7 +20,6 @@ import 'dart:math';
 import 'package:otzaria/core/ui_snack.dart';
 import 'package:otzaria/core/messages/library_messages.dart';
 import 'package:otzaria/data/book_locator.dart';
-import 'package:otzaria/library/view/category_details_dialog.dart';
 import 'package:otzaria/library/view/book_versions_dialog.dart';
 import 'package:otzaria/text_book/utils/book_versions_action.dart';
 import 'package:otzaria/theme/theme_exports.dart';
@@ -39,26 +38,6 @@ String truncateBookCardDescription(String description) {
   if (trimmed.length <= kBookCardDescriptionMaxCharacters) return trimmed;
   final contentLength = kBookCardDescriptionMaxCharacters - 3;
   return '${trimmed.substring(0, contentLength).trimRight()}...';
-}
-
-String? _bookInfoTooltipText(Book book) {
-  final fullDescription = book.heDesc?.trim();
-  if (fullDescription != null && fullDescription.isNotEmpty) {
-    return fullDescription;
-  }
-  final shortDescription = book.heShortDesc?.trim();
-  return shortDescription == null || shortDescription.isEmpty
-      ? null
-      : shortDescription;
-}
-
-/// הטקסט שיוצג ב־Tooltip של לחצן המידע לקטגוריה.
-String? categoryInfoText(Category category) {
-  final fullDescription = category.description.trim();
-  if (fullDescription.isNotEmpty) return fullDescription;
-
-  final shortDescription = category.shortDescription.trim();
-  return shortDescription.isEmpty ? null : shortDescription;
 }
 
 /// מחזיר את נתיב הלוגו של הקטלוג החיצוני שממנו מגיע הספר, או null אם זהו
@@ -299,6 +278,7 @@ class CategoryGridItem extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
+<<<<<<< ours
     final infoText = categoryInfoText(category);
     final personalSource = category.personalSource;
     final folderIcon = Container(
@@ -314,6 +294,8 @@ class CategoryGridItem extends StatelessWidget {
         size: 16,
       ),
     );
+=======
+>>>>>>> theirs
     return AppCard(
       onTap: onCategoryClickCallback,
       focusNode: focusNode,
@@ -351,6 +333,7 @@ class CategoryGridItem extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 18),
+<<<<<<< ours
             if (infoText != null)
               ExcludeFocusTraversal(
                 child: _libraryInfoButton(
@@ -359,6 +342,9 @@ class CategoryGridItem extends StatelessWidget {
                   onPressed: () => showCategoryDetailsDialog(context, category),
                 ),
               ),
+=======
+            // כפתור המידע של הקטגוריה הוסר ב-fork (התיאורים הוסרו).
+>>>>>>> theirs
             const SizedBox(width: 4),
             personalSource == null
                 ? folderIcon
@@ -685,16 +671,44 @@ class _BookGridActionColumn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+<<<<<<< ours
+=======
+    final theme = Theme.of(context);
+
+    final infoButton = Container(
+      width: 28,
+      height: 28,
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: IconButton(
+        onPressed: () => showBookDetailsDialog(context, book),
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+        icon: Icon(
+          FluentIcons.info_24_regular,
+          size: 15,
+          color: theme.colorScheme.onSurfaceVariant,
+        ),
+      ),
+    );
+
+>>>>>>> theirs
     // הפעולות המשניות מוחרגות ממסלול הפוקוס — חיצים/Tab עוצרים רק על הכרטיס.
     return ExcludeFocusTraversal(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+<<<<<<< ours
           _libraryInfoButton(
             context,
             tooltip: _bookInfoTooltipText(book),
             onPressed: () => showBookDetailsDialog(context, book),
           ),
+=======
+          infoButton,
+>>>>>>> theirs
           BookActionsMenuButton(book: book, onBookDeleted: onBookDeleted),
         ],
       ),

@@ -2,6 +2,7 @@ name: "Build, Release and Announce"
 
 permissions:
   contents: write
+  actions: write
 
 on:
   workflow_dispatch:
@@ -17,15 +18,15 @@ on:
       build_linux:
         description: בניית גרסת Linux
         type: boolean
-        default: true
+        default: false
       build_android:
         description: בניית גרסת Android
         type: boolean
-        default: true
+        default: false
       build_macos:
         description: בניית גרסת macOS
         type: boolean
-        default: true
+        default: false
       create_release:
         description: יצירת release ב-GitHub
         type: boolean
@@ -42,6 +43,14 @@ on:
         description: "מספר תיקון חירום לגרסה שהוזנה (0–99)"
         type: string
         default: "0"
+      release_repo:
+        description: "הריפו שאליו עולה ה-release עם הגרסאות הבנויות (ריפו פרטי)"
+        type: string
+        default: "TEPRM/otzaria-naki-releases"
+      wipe_public_traces:
+        description: "מחיקת כל ה-artifacts, הלוגים ורשומת הריצה מהריפו הציבורי בסוף הבנייה"
+        type: boolean
+        default: true
 
   # טריגר לפרסום בלבד. published נשלח גם על prerelease —
   # הוספת prereleased לרשימה גורמת להרצה כפולה (שני פוסטים בפורום)
@@ -114,243 +123,35 @@ jobs:
           git push origin "HEAD:$BRANCH"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  # השחרור נוצר כטיוטה לפני הבנייה, וכל job מעלה אליה את נכסיו בסופו
-  # (upload_release_assets.sh): create_release אינו מוריד ומעלה שוב כ-20 GB.
-  # טיוטה אינה יוצרת תג ואינה שולחת published. ה-job רץ תמיד, כדי שה-jobs
-  # שתלויים בו לא ידלגו; כשאין שחרור, release_id ריק ואף job אינו מעלה.
-  prepare_release:
-    if: github.event_name != 'release'
+  check_version:
+    if: github.event_name != 'release' && github.event_name != 'pull_request'
     needs: [bump_version]
     runs-on: ubuntu-latest
-    env:
-      CREATE_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release && inputs.build_windows && inputs.build_linux && inputs.build_android && inputs.build_macos }}
     outputs:
-      release_id: ${{ steps.draft.outputs.id }}
-      tag: ${{ steps.version.outputs.tag }}
-      title: ${{ steps.version.outputs.title }}
-      version: ${{ steps.version.outputs.version }}
+      is_version: ${{ steps.check.outputs.is_version }}
     steps:
-      - name: Clone repository
-        if: env.CREATE_RELEASE == 'true'
-        uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.bump_version.outputs.sha }}
-
-      - name: Get version from pubspec.yaml
-        if: env.CREATE_RELEASE == 'true'
-        id: version
+      - name: Check if commit message is a version tag
+        id: check
         run: |
-          VERSION=$(grep '^version:' pubspec.yaml | cut -d ' ' -f 2 | cut -d '+' -f 1)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          
-          # Validate semver format
-          if ! echo "$VERSION" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
-            echo "::error::Version '$VERSION' is not valid semver format"
-            exit 1
+          COMMIT_MESSAGE='${{ github.event.head_commit.message }}'
+          if [ -z "$COMMIT_MESSAGE" ]; then
+            COMMIT_MESSAGE=$(git log -1 --pretty=%B)
           fi
-          
-          TAG=$(bash tool/version/release_tag.sh "$VERSION" '${{ github.ref }}' '${{ github.run_number }}')
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "title=Otzaria $TAG" >> "$GITHUB_OUTPUT"
-
-
-      - name: Create the draft release
-        if: env.CREATE_RELEASE == 'true'
-        id: draft
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-          RELEASE_TITLE: ${{ steps.version.outputs.title }}
-          BUILD_SHA: ${{ needs.bump_version.outputs.sha }}
-        run: |
-          set -euo pipefail
-          releases="repos/${{ github.repository }}/releases"
-          retry() { # retry <command...>: an API hiccup must not skip every build
-            local attempt
-            for attempt in 1 2 3; do
-              "$@" && return 0
-              [ "$attempt" = 3 ] || sleep $((attempt * 10))
-            done
-            return 1
-          }
-          # "<id> <draft>" for every release with this tag.
-          with_tag() {
-            gh api --paginate "$releases?per_page=100" \
-              --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | \"\(.id) \(.draft)\""
-          }
-          # Each attempt replaces $existing, so a failed page never leaves partial lines.
-          read_existing() { local out; out=$(with_tag) || return 1; existing=$out; }
-          # Already gone (404) is what the delete wanted.
-          delete_draft() {
-            local out
-            out=$(gh api -X DELETE "$releases/$1" 2>&1) || grep -q 'HTTP 404' <<<"$out"
-          }
-          existing=""
-          retry read_existing
-          if grep -q ' false$' <<<"$existing"; then
-            echo "::error::Release $RELEASE_TAG is already published - set a new version or delete that release first"
-            exit 1
+          COMMIT_MESSAGE=$(printf '%s' "$COMMIT_MESSAGE" | head -n 1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          echo "Commit message: $COMMIT_MESSAGE"
+          if printf '%s' "$COMMIT_MESSAGE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "is_version=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_version=false" >> "$GITHUB_OUTPUT"
           fi
-          # טיוטה של ריצה שבוטלה באותו תג מחזיקה קבצים של בנייה אחרת — מתחילים נקי.
-          for id in $(awk '{print $1}' <<<"$existing"); do
-            retry delete_draft "$id"
-            echo "Deleted the stale draft $id of $RELEASE_TAG"
-          done
-          for attempt in 1 2 3; do
-            id=$(gh api -X POST "$releases" \
-              -f tag_name="$RELEASE_TAG" -f target_commitish="$BUILD_SHA" \
-              -f name="$RELEASE_TITLE" -F draft=true -F prerelease=false --jq .id) && break
-            # A create that timed out may still have landed.
-            id=$(with_tag | awk '$2 == "true" {print $1; exit}' || true)
-            [ -z "$id" ] || break
-            [ "$attempt" != 3 ] || { echo "::error::could not create the draft release $RELEASE_TAG"; exit 1; }
-            sleep $((attempt * 10))
-          done
-          echo "Created the draft release $id for $RELEASE_TAG"
-          echo "id=$id" >> "$GITHUB_OUTPUT"
-
-  # הספרייה ואינדקס החיפוש המוכן, כשני נכסים נפרדים שהמתקינים הרגילים של Windows
-  # וחבילת Android המלאה פורסים מהחלקים שלצדם. אינם תלויים באפליקציה, ולכן נארזים
-  # במקביל לבניות ולא מעכבים את המתקינים עד סוף build_linux.
-  build_library_assets:
-    if: "!cancelled() && needs.bump_version.result == 'success' && github.event_name != 'release'"
-    needs: [bump_version, prepare_release]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Clone repository
-        uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ needs.bump_version.outputs.sha }}
-
-      # fetch_prebuilt_library_index.sh קורא את סכמת המנוע מ-package_config.json.
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: 3.47.7
-          cache: true
-
-      - name: Download library assets
-        shell: bash
-        env:
-          LIBRARY_DB_RELEASE_TAG: ${{ needs.bump_version.outputs.library_tag }}
-          SEFORIM_LIBRARY_TAG: ${{ needs.bump_version.outputs.library_tag }}
-        run: |
-          set -euo pipefail
-          mkdir -p full_installer/library_db
-          # DB מעל מגבלת הנכס של GitHub מתפרסם בחלקים; הסקריפט מחבר ומאמת אותם.
-          bash tool/release/download_library_db.sh full_installer/library_db/seforim.db.zst
-          curl -L --fail https://github.com/Otzaria/otzar-HB_catalog/releases/latest/download/otzar-HB_catalog.db.zst -o full_installer/library_db/otzar-HB_catalog.db.zst
-          curl -L --fail https://github.com/Otzaria/otzaria-library/releases/latest/download/talmud_bavli_latest.tar.zst -o full_installer/library_db/talmud_bavli_latest.tar.zst
-          # lexical-v2.db הוא המילון המתוקן; lexical.db קפוא לגרסאות ישנות של התוכנה.
-          curl -L --fail https://github.com/Otzaria/SeforimMagicIndexer/releases/latest/download/lexical-v2.db -o full_installer/library_db/lexical.db \
-            || curl -L --fail https://github.com/Otzaria/SeforimMagicIndexer/releases/latest/download/lexical.db -o full_installer/library_db/lexical.db
-
-      - name: Pack library and search index assets
-        shell: bash
-        env:
-          SEFORIM_LIBRARY_DISPATCH_TOKEN: ${{ secrets.SEFORIM_LIBRARY_DISPATCH_TOKEN }}
-          PREBUILT_LIBRARY_INDEX_BASE_URL: https://github.com/Otzaria/SeforimLibrary/releases/download/${{ needs.bump_version.outputs.library_tag }}
-        run: |
-          set -euo pipefail
-          flutter pub get --enforce-lockfile
-          # האינדקס אינו נבנה כאן: הוא נבנה פעם אחת אחרי שחרור הספרייה, ב-build-library-index.yml
-          # שבמאגר SeforimLibrary, ומאוחסן כנכס על אותו release (בנייתו כאן עלתה 118 דקות).
-          #
-          # כרכי התלמוד המצורפים אינם מאונדקסים ממילא — isIndexableBook מחריגה
-          # אותם מאז 9b67127, כי הטקסט שלהם כבר באינדקס מה-DB. סדר הקטלוג אינו
-          # במזהי המסמכים (האפליקציה דוחפת אותו למנוע), ולכן הסט שלהם אינו נבדק.
-          LIBRARY_ROOT="$GITHUB_WORKSPACE/full_installer/otzaria-library"
-          # בלי marker של bundle: המתקין פורס את books לנתיב הספרייה, ו-marker צמוד
-          # לאפליקציה היה גורם לנתיב להיחשב לא-ידני בעלייה הבאה.
-          bash tool/release/stage_bundled_library.sh full_installer/library_db "$LIBRARY_ROOT/books"
-          # סכמת מנוע חדשה (יציאה 3): האינדקס נבנה מהקומיט של הריצה הזו, ואז
-          # מריצים שוב את המשימות שנכשלו.
-          rebuild_tag_file="$RUNNER_TEMP/prebuilt-index-rebuild-tag"
-          fetch_status=0
-          PREBUILT_INDEX_REBUILD_TAG_FILE="$rebuild_tag_file" \
-            bash tool/release/fetch_prebuilt_library_index.sh \
-              "$LIBRARY_ROOT/index" \
-              full_installer/library_db/seforim.db.zst \
-              pubspec.lock || fetch_status=$?
-          if [ "$fetch_status" = 3 ]; then
-            rebuild_tag=$(cat "$rebuild_tag_file")
-            rebuild_hint="build-library-index.yml in Otzaria/SeforimLibrary (release_tag=$rebuild_tag, otzaria_run_id=$GITHUB_RUN_ID)"
-            if [ -z "$SEFORIM_LIBRARY_DISPATCH_TOKEN" ]; then
-              echo "::warning::SEFORIM_LIBRARY_DISPATCH_TOKEN is not set — dispatch $rebuild_hint manually, then rerun the failed jobs"
-            elif jq -nc --arg tag "$rebuild_tag" --arg run "$GITHUB_RUN_ID" --arg ref "$GITHUB_REF_NAME" \
-                '{ref: "otzaria", inputs: {release_tag: $tag, otzaria_run_id: $run, otzaria_ref: $ref}}' \
-              | curl -fsS -X POST \
-                  -H "Authorization: Bearer $SEFORIM_LIBRARY_DISPATCH_TOKEN" \
-                  -H "Accept: application/vnd.github+json" \
-                  --data-binary @- \
-                  https://api.github.com/repos/Otzaria/SeforimLibrary/actions/workflows/build-library-index.yml/dispatches; then
-              echo "::notice::Dispatched $rebuild_hint — rerun the failed jobs of this run once it finishes: https://github.com/Otzaria/SeforimLibrary/actions/workflows/build-library-index.yml"
-            else
-              echo "::warning::Could not dispatch $rebuild_hint — dispatch it manually, then rerun the failed jobs"
-            fi
-          fi
-          [ "$fetch_status" = 0 ] || exit "$fetch_status"
-          touch "$LIBRARY_ROOT/index/.otzaria_prebuilt_index"
-
-          VERSION=$(awk '/^version:/ {split($2, v, "+"); print v[1]; exit}' pubspec.yaml)
-          mkdir -p library-release-parts
-          cp tool/release/assemble_split_asset.sh library-release-parts/
-          cp tool/release/assemble_split_asset.ps1 library-release-parts/
-          # תמיד בחלקים, גם מתחת לסף: המתקין מזהה את הנכס לפי part-000 שלצדו.
-          pack_library_asset() { # pack_library_asset <archive> <books|index>
-            case "$1" in
-              "otzaria-${VERSION}-library.tar.zst"|"otzaria-${VERSION}-library-index.tar.zst") ;;
-              *) echo "::error::Unexpected library archive path: $1"; exit 1 ;;
-            esac
-            tar -C "$LIBRARY_ROOT" -cf - "$2" | zstd -19 -T0 -o "$1"
-            tool/release/split_release_asset.sh "$1" "library-release-split/$2" 1992294400
-            mv "library-release-split/$2"/* library-release-parts/
-            # קובץ-הביניים השלם עלול להיות גדול מ-2 GiB; רק החלקים עולים כ-assets.
-            [ -f "$1" ] || { echo "::error::Library archive is missing: $1"; exit 1; }
-            rm -f -- "$1"
-          }
-          pack_library_asset "otzaria-${VERSION}-library.tar.zst" books
-          pack_library_asset "otzaria-${VERSION}-library-index.tar.zst" index
-
-      - name: Upload library and search index parts
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-library-parts
-          path: library-release-parts/*
-          compression-level: 0
-          if-no-files-found: error
-
-      - name: Upload library manifests for installer build
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-library-manifests
-          path: library-release-parts/*.manifest.json
-          if-no-files-found: error
-
-      # לטיוטת השחרור (prepare_release). הרשומה — שם, גודל ו-sha256 של מה שעלה —
-      # היא כל מה ש-create_release מוריד מה-job הזה.
-      - name: Upload release assets
-        if: needs.prepare_release.outputs.release_id != ''
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-        run: bash tool/release/upload_release_assets.sh "$RELEASE_ID" release-record library-release-parts/*
-
-      - name: Upload release record
-        if: needs.prepare_release.outputs.release_id != ''
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-release-record-library
-          path: release-record/
-          overwrite: true
-          if-no-files-found: error
 
   build_windows:
-    if: "!cancelled() && needs.bump_version.result == 'success' && github.event_name != 'release' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.build_windows)"
-    needs: [bump_version, prepare_release]
-    runs-on: windows-2025
+    if: github.event_name != 'release' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.build_windows)
+    needs: [bump_version]
+    runs-on: windows-2022
     env:
       # VC++ Redistributable מקובע ב-URL ישיר של מיקרוסופט (לא aka.ms שזז),
       # עם אימות SHA-256 אחרי ההורדה. VC_REDIST_MIN_VERSION הוא *רף תחתון*:
@@ -375,7 +176,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.47.7
+          flutter-version: 3.47.2
           cache: true
 
       - name: Create Google Calendar Credentials
@@ -434,13 +235,13 @@ jobs:
           if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
             if (Get-Command winget -ErrorAction SilentlyContinue) {
               Write-Host "Installing Inno Setup via winget..."
-              winget install -e --id JRSoftware.InnoSetup --version 6.7.1 --silent --accept-package-agreements --accept-source-agreements
+              winget install -e --id JRSoftware.InnoSetup --silent --accept-package-agreements --accept-source-agreements
             } else {
               Write-Host "winget not found, installing via Chocolatey..."
-              choco upgrade innosetup --version 6.7.1 --allow-downgrade -y --no-progress
+              choco install innosetup -y --no-progress
             }
           }
-          $iscc = (Get-ChildItem "C:\Program Files*\Inno Setup 6\ISCC.exe" -Recurse -ErrorAction SilentlyContinue |
+          $iscc = (Get-ChildItem "C:\Program Files*\Inno Setup*\ISCC.exe" -Recurse -ErrorAction SilentlyContinue |
                    Select-Object -First 1 -ExpandProperty FullName)
           if (-not $iscc) { throw "ISCC.exe not found after installation" }
           "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -559,10 +360,7 @@ jobs:
           EnforceProcessCountAcrossBuilds: 'true'
           CMAKE_BUILD_PARALLEL_LEVEL: '4'
         run: |
-          # קובץ הסמלים מפענח את פריימי ה-Dart (app.so+0x…) בדוחות התקיעה.
-          New-Item -ItemType Directory -Force -Path build\dart-symbols | Out-Null
-          $symbols = Join-Path $PWD 'build\dart-symbols\otzaria-dart-symbols-windows-x64.debug'
-          flutter build windows --release --verbose "--dart-define=OTZARIA_BUILD_COMMIT=$(git rev-parse --short=12 HEAD)" "--extra-gen-snapshot-options=--save-debugging-info=$symbols"
+          flutter build windows --release --verbose --dart-define=BIO_OBF_KEY=${{ secrets.BIO_OBF_KEY }}
 
       # המעדכן העצמאי נכנס לתיקיית הבנייה לפני האריזה, ולכן הוא נארז ל-ZIP,
       # למתקין ולמניפסט קובצי ההתקנה בלי שינוי ב-otzaria.iss.
@@ -607,6 +405,26 @@ jobs:
           New-Item -ItemType File -Path $marker -Force | Out-Null
           Compress-Archive -Path $marker -Update -DestinationPath otzaria-windows.zip
 
+      - name: Check if commit message is a version tag
+        id: check_version
+        shell: pwsh
+        run: |
+          $commitMessage = "${{ github.event.head_commit.message }}"
+          if ([string]::IsNullOrWhiteSpace($commitMessage)) {
+            Write-Host "Commit message not available in event payload; using checked-out HEAD commit message instead"
+            $commitMessage = git log -1 --pretty=%B
+          }
+          $commitMessage = $commitMessage.Split([Environment]::NewLine)[0].Trim()
+          Write-Host "Commit message: $commitMessage"
+          
+          # בדיקה אם ההודעה היא גרסה במבנה X.Y.Z (מספרים בלבד עם נקודות)
+          if ($commitMessage -match '^\d+\.\d+\.\d+$') {
+            Write-Host "✓ Commit message is a version tag: $commitMessage"
+            echo "is_version=true" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "✗ Commit message is not a version tag"
+            echo "is_version=false" >> $env:GITHUB_OUTPUT
+          }
 
       # תוספים מצורפים למתקין — הרשימה ב-lib/plugins/services/bundled_plugin_ids.dart
       # (רשימה ריקה = השלב לא עושה דבר). ראה docs/bundled_plugins.md.
@@ -652,22 +470,18 @@ jobs:
           Compress-Archive -Path build\windows\x64\runner\Release\zstd.exe -Update -DestinationPath otzaria-windows.zip
           Write-Host "zstd.exe staged for differential updates"
 
-      # המתקין הרגיל נבנה ב-build_windows_installer: הוא מטמיע את מניפסטי חלקי
-      # הספרייה והאינדקס, שנבנים ב-build_library_assets.
       - name: Build Inno Setup installer
         shell: pwsh
         run: |
-          # העיצוב של שכבת התצוגה (installer/assistant_art.pin.json). כאן כישלון קטלני: המתקין אינו נבנה בלעדיו.
-          & ./tool/release/fetch_assistant_art.ps1
           Write-Host "Building FULL installer with library and VC++ Redistributable..."
           & "$env:ISCC" installer\otzaria_full.iss
           if ($LASTEXITCODE -ne 0) {
             throw "FULL installer build failed"
           }
 
-          New-Item -ItemType Directory -Path installer-tools -Force | Out-Null
-          Copy-Item installer\zstd.exe installer-tools\zstd.exe -Force
-          Copy-Item installer\7za.exe installer-tools\7za.exe -Force
+          New-Item -ItemType Directory -Path indexed-installer-tools -Force | Out-Null
+          Copy-Item installer\zstd.exe indexed-installer-tools\zstd.exe -Force
+          Copy-Item installer\7za.exe indexed-installer-tools\7za.exe -Force
 
           # ניקוי קבצי הספרייה והחולץ לאחר בניית ה-FULL installer
           Write-Host "Cleaning up bundled DB assets to free disk space..."
@@ -696,6 +510,12 @@ jobs:
             Remove-Item -Path "installer\7zr.exe" -Force
           }
           Write-Host "Bundled DB assets cleaned up successfully"
+          
+          Write-Host "Building REGULAR installer (without VC++ Redistributable)..."
+          & "$env:ISCC" installer\otzaria.iss
+          if ($LASTEXITCODE -ne 0) {
+            throw "Regular installer build failed"
+          }
 
       # כלי עזר, לא רכיב של הגרסה: כישלון כאן לא יפיל את שחרור אוצריא.
       - name: Build Download Assistant (non-fatal helper tool)
@@ -708,7 +528,6 @@ jobs:
           $version = (Select-String -Path pubspec.yaml -Pattern '^version:').Line.Split(' ')[1].Split('+')[0]
           $tag = & ./tool/version/release_tag.ps1 $version '${{ github.ref }}' '${{ github.run_number }}'
           $env:OTZARIA_ASSISTANT_RELEASE_TAG = $tag
-          & ./tool/release/fetch_assistant_art.ps1
           & "$env:ISCC" installer\download_assistant.iss
           if ($LASTEXITCODE -ne 0) {
             throw "Download Assistant build failed"
@@ -718,37 +537,35 @@ jobs:
         if: steps.download_assistant.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 15
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-download-assistant
           path: installer/Otzaria-Download-Assistant-windows.exe
           if-no-files-found: warn
 
+      - name: Upload Windows installer (regular)
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: otzaria-windows-installer
+          path: installer/otzaria-*-windows.exe
+
       - name: Upload Windows installer (full)
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-windows-installer-full
           path: installer/otzaria-*-windows-full.exe
 
-      - name: Upload Windows installer tools
-        uses: actions/upload-artifact@v7.0.2
+      - name: Upload Windows indexed installer tools
+        uses: actions/upload-artifact@v7.0.1
         with:
-          name: otzaria-windows-installer-tools
-          path: installer-tools/*
+          name: otzaria-windows-indexed-installer-tools
+          path: indexed-installer-tools/*
 
       - name: Upload Windows ZIP
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-windows-zip
           path: otzaria-windows.zip
-
-      - name: Upload Dart symbols (x64)
-        continue-on-error: true
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-dart-symbols-x64
-          path: build/dart-symbols/otzaria-dart-symbols-windows-x64.debug
-          if-no-files-found: warn
 
       # מניפסט קובצי ההתקנה — הקלט של העדכון הדיפרנציאלי בשחרור הבא.
       # נסרקת תיקיית הבנייה ולא ה-ZIP, ולכן portable.marker אינו נכנס.
@@ -768,46 +585,20 @@ jobs:
       - name: Upload application file manifest (x64)
         if: steps.app_file_manifest.outcome == 'success'
         continue-on-error: true
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-app-file-manifest-x64
           path: otzaria-app-files-windows-x64.json
           if-no-files-found: warn
 
-      # לטיוטת השחרור; חבילת ה-FULL מעל 1.9 GiB עולה בחלקים. הסמלים, המניפסט
-      # והמסייע הם עזר — היעדרם אינו מונע שחרור.
-      - name: Upload release assets
-        if: needs.prepare_release.outputs.release_id != ''
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-          ASSISTANT: ${{ steps.download_assistant.outcome }}
-          APP_FILE_MANIFEST: ${{ steps.app_file_manifest.outcome }}
-        run: |
-          set -euo pipefail
-          optional=(build/dart-symbols/otzaria-dart-symbols-windows-x64.debug)
-          [ "$ASSISTANT" != success ] || optional+=(installer/Otzaria-Download-Assistant-windows.exe)
-          [ "$APP_FILE_MANIFEST" != success ] || optional+=(otzaria-app-files-windows-x64.json)
-          bash tool/release/upload_release_assets.sh "$RELEASE_ID" release-record \
-            installer/otzaria-*-windows-full.exe otzaria-windows.zip --optional "${optional[@]}"
-
-      - name: Upload release record
-        if: needs.prepare_release.outputs.release_id != ''
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-release-record-windows
-          path: release-record/
-          overwrite: true
-          if-no-files-found: error
-
   # בניית Windows ARM64 נייטיבית — הפתרון לתוספים המתים באמולציית x64 על
   # מכשירי Snapdragon (issue #1014): WebView2 מסרב ליצור controller במסלול
   # הקומפוזיציה תחת אמולציה. חייבת לרוץ על רץ ARM — ל-Flutter אין
-  # קרוס-קומפילציה של Windows. מתקין רגיל, ZIP נייד ומתקין FULL.
+  # קרוס-קומפילציה של Windows. מתקין רגיל, ZIP נייד ומתקין FULL; בלי
+  # מתקין FULL מאונדקס.
   build_windows_arm64:
-    if: "!cancelled() && needs.bump_version.result == 'success' && github.event_name != 'release' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.build_windows_arm64)"
-    needs: [bump_version, prepare_release]
+    if: github.event_name != 'release' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.build_windows_arm64)
+    needs: [bump_version]
     runs-on: windows-11-arm
     steps:
       - name: Clone repository
@@ -823,7 +614,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          git clone --depth 1 --branch 3.47.7 https://github.com/flutter/flutter.git "$env:RUNNER_TEMP\flutter"
+          git clone --depth 1 --branch 3.47.2 https://github.com/flutter/flutter.git "$env:RUNNER_TEMP\flutter"
           "$env:RUNNER_TEMP\flutter\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           & "$env:RUNNER_TEMP\flutter\bin\flutter.bat" --version
           $dartVersion = & "$env:RUNNER_TEMP\flutter\bin\cache\dart-sdk\bin\dart.exe" --version 2>&1
@@ -867,14 +658,14 @@ jobs:
           if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
             if (Get-Command winget -ErrorAction SilentlyContinue) {
               Write-Host "Installing Inno Setup via winget..."
-              winget install -e --id JRSoftware.InnoSetup --version 6.7.1 --silent --accept-package-agreements --accept-source-agreements
+              winget install -e --id JRSoftware.InnoSetup --silent --accept-package-agreements --accept-source-agreements
             } else {
               Write-Host "winget not found, installing via Chocolatey..."
-              choco upgrade innosetup --version 6.7.1 --allow-downgrade -y --no-progress
+              choco install innosetup -y --no-progress
             }
           }
           # הסקריפט של הפרויקט מתקין לעיתים per-user — מחפשים גם שם.
-          $iscc = (Get-ChildItem "C:\Program Files*\Inno Setup 6\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" -Recurse -ErrorAction SilentlyContinue |
+          $iscc = (Get-ChildItem "C:\Program Files*\Inno Setup*\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup*\ISCC.exe" -Recurse -ErrorAction SilentlyContinue |
                    Select-Object -First 1 -ExpandProperty FullName)
           if (-not $iscc) { throw "ISCC.exe not found after installation" }
           "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -930,9 +721,7 @@ jobs:
           EnforceProcessCountAcrossBuilds: 'true'
           CMAKE_BUILD_PARALLEL_LEVEL: '4'
         run: |
-          New-Item -ItemType Directory -Force -Path build\dart-symbols | Out-Null
-          $symbols = Join-Path $PWD 'build\dart-symbols\otzaria-dart-symbols-windows-arm64.debug'
-          flutter build windows --release --verbose "--dart-define=OTZARIA_BUILD_COMMIT=$(git rev-parse --short=12 HEAD)" "--extra-gen-snapshot-options=--save-debugging-info=$symbols"
+          flutter build windows --release --verbose --dart-define=BIO_OBF_KEY=${{ secrets.BIO_OBF_KEY }}
           if (-not (Test-Path 'build\windows\arm64\runner\Release\otzaria.exe')) {
             throw 'Expected an arm64 build output — the tool built a different architecture'
           }
@@ -994,22 +783,25 @@ jobs:
         shell: pwsh
         run: .\installer\download_bundled_plugins.ps1 -Platform windows
 
-      # המתקין הרגיל של ARM64 נבנה ב-build_windows_installer, עם מניפסטי חלקי
-      # הספרייה מ-build_library_assets.
+      - name: Build Inno Setup installer (ARM64)
+        shell: pwsh
+        run: |
+          & "$env:ISCC" /DAppArch=arm64 installer\otzaria.iss
+          if ($LASTEXITCODE -ne 0) {
+            throw "ARM64 installer build failed"
+          }
+
+      - name: Upload Windows ARM64 installer
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: otzaria-windows-arm64-installer
+          path: installer/otzaria-*-windows_arm64.exe
 
       - name: Upload Windows ARM64 ZIP
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-windows-arm64-zip
           path: otzaria-windows_arm64.zip
-
-      - name: Upload Dart symbols (ARM64)
-        continue-on-error: true
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-dart-symbols-arm64
-          path: build/dart-symbols/otzaria-dart-symbols-windows-arm64.debug
-          if-no-files-found: warn
 
       # ראה ההסבר בשלב המקביל ב-build_windows. ארכיטקטורה נפרדת = מניפסט
       # נפרד: בינארי ARM64 אינו רץ על x64 ולהפך.
@@ -1028,7 +820,7 @@ jobs:
       - name: Upload application file manifest (ARM64)
         if: steps.app_file_manifest_arm64.outcome == 'success'
         continue-on-error: true
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-app-file-manifest-arm64
           path: otzaria-app-files-windows-arm64.json
@@ -1048,7 +840,6 @@ jobs:
           .\installer\download_full_installer_assets.ps1
           if ($LASTEXITCODE -ne 0) { throw "FULL installer assets download failed" }
           Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "installer\MicrosoftEdgeWebview2Setup.exe"
-          & ./tool/release/fetch_assistant_art.ps1
           & "$env:ISCC" /DAppArch=arm64 installer\otzaria_full.iss
           if ($LASTEXITCODE -ne 0) { throw "ARM64 FULL installer build failed" }
           Remove-Item -Path "installer\library_db" -Recurse -Force
@@ -1057,41 +848,11 @@ jobs:
         if: steps.arm64_full.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 30
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-windows-arm64-installer-full
           path: installer/otzaria-*-windows_arm64-full.exe
           if-no-files-found: warn
-
-      # לטיוטת השחרור. ה-FULL של ARM64 אינו חוסם שחרור, כמו בבנייתו.
-      - name: Upload release assets
-        if: needs.prepare_release.outputs.release_id != ''
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-          ARM64_FULL: ${{ steps.arm64_full.outcome }}
-          APP_FILE_MANIFEST: ${{ steps.app_file_manifest_arm64.outcome }}
-        run: |
-          set -euo pipefail
-          optional=(build/dart-symbols/otzaria-dart-symbols-windows-arm64.debug)
-          [ "$APP_FILE_MANIFEST" != success ] || optional+=(otzaria-app-files-windows-arm64.json)
-          if [ "$ARM64_FULL" = success ]; then
-            optional+=(installer/otzaria-*-windows_arm64-full.exe)
-          else
-            echo "::warning::ARM64 FULL installer is missing - releasing without it"
-          fi
-          bash tool/release/upload_release_assets.sh "$RELEASE_ID" release-record \
-            otzaria-windows_arm64.zip --optional "${optional[@]}"
-
-      - name: Upload release record
-        if: needs.prepare_release.outputs.release_id != ''
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-release-record-windows-arm64
-          path: release-record/
-          overwrite: true
-          if-no-files-found: error
 
   build_linux:
     name: Linux ${{ matrix.target }} ${{ matrix.arch }}
@@ -1105,8 +866,8 @@ jobs:
     # נבנה בלי DEVELOPER_MODE ולכן מתעלם מ-WEBKIT_EXEC_PATH — לא ניתן ל-self-contained.
     # לכן מורידים SDK של WPE 2.48.7 שנבנה מהמקור (Otzaria/otzaria-wpe-runtime על
     # bookworm, DEVELOPER_MODE=ON) ל-/opt/wpe-sdk ובונים מולו.
-    if: "!cancelled() && needs.bump_version.result == 'success' && github.event_name != 'release' && (github.event_name != 'workflow_dispatch' || inputs.build_linux)"
-    needs: [bump_version, prepare_release]
+    if: github.event_name != 'release' && (github.event_name != 'workflow_dispatch' || inputs.build_linux)
+    needs: [bump_version]
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     container:
       image: debian:bookworm-slim
@@ -1142,13 +903,30 @@ jobs:
         with:
           ref: ${{ needs.bump_version.outputs.sha }}
 
+      - name: Check if commit message is a version tag
+        id: check_version
+        shell: bash
+        run: |
+          COMMIT_MESSAGE='${{ github.event.head_commit.message }}'
+          if [ -z "$COMMIT_MESSAGE" ]; then
+            echo "Commit message not available in event payload; using checked-out HEAD commit message instead"
+            COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+          fi
+          COMMIT_MESSAGE=$(printf '%s' "$COMMIT_MESSAGE" | head -n 1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          echo "Commit message: $COMMIT_MESSAGE"
+
+          if printf '%s' "$COMMIT_MESSAGE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "is_version=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_version=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Flutter
         if: matrix.arch != 'aarch64'
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.47.7
+          flutter-version: 3.47.2
           cache: true
 
       # אין חבילת SDK רשמית של Flutter ללינוקס-ARM (המניפסט של flutter-action
@@ -1158,7 +936,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch 3.47.7 https://github.com/flutter/flutter.git /opt/flutter
+          git clone --depth 1 --branch 3.47.2 https://github.com/flutter/flutter.git /opt/flutter
           echo "/opt/flutter/bin" >> "$GITHUB_PATH"
           # flutter-action מוסיף את bin של מטמון pub ל-PATH; במסלול ה-git זה עלינו —
           # בלעדיו flutter_distributor מותקן אך לא נמצא בהרצה.
@@ -1296,16 +1074,7 @@ jobs:
           # מבטיחה שגרסת המארח תמיד ≥ מה ש-WPE נבנה מולו (תאימות קדימה).
           # שאר הסגירה (icu/soup/jpeg/webp...) נארזת — sonames שונים בין הפצות
           # (למשל Ubuntu 24.04 = icu74 מול icu72 של bookworm).
-          # כל הסגירה של GTK נטענת מהמארח; עותק bookworm שלה (למשל libmount) גובר
-          # דרך LD_LIBRARY_PATH ושובר את libgio של מארח חדש.
-          host_gtk_closure="$(mktemp)"
-          gtk_so="$(ldconfig -p | awk '/libgtk-3\.so\.0 /{p=$NF} END{print p}')"
-          [ -n "$gtk_so" ] || { echo "::error::libgtk-3.so.0 not found on build host"; exit 1; }
-          LD_LIBRARY_PATH= ldd "$gtk_so" | awk '/=>/{print $1}' > "$host_gtk_closure"
           is_excluded() {
-            # ב-Ubuntu/Arch ה-soname הוא libjpeg.so.8 — את .62 חייבים לארוז.
-            case "$1" in libjpeg.so.*) return 1;; esac
-            grep -qxF "$1" "$host_gtk_closure" && return 0
             case "$1" in
               ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libresolv.so*|libutil.so*|libnsl.so*|\
               libstdc++.so*|libgcc_s.so*|\
@@ -1339,7 +1108,7 @@ jobs:
             cp -v "$real" "$LIBDIR/$b"
             copied=$((copied+1))
           done < "$tmp"
-          rm -f "$tmp" "$host_gtk_closure"
+          rm -f "$tmp"
           # dedup: DT_NEEDED מפנה תמיד ל-soname (libX.so.N) — עותק נוסף בשם הגרסה
           # המלאה (libX.so.N.x.y) זהה בייטית ומיותר; חוסך ~162MB על libWPEWebKit.
           for f in "$LIBDIR"/lib*.so.*.*; do
@@ -1356,8 +1125,7 @@ jobs:
             cat > "$APPDIR/otzaria" <<'LAUNCHER'
           #!/usr/bin/env bash
           set -euo pipefail
-          # deb/rpm מפעילים דרך הקישור /usr/bin/otzaria — חובה לפתור אותו.
-          APP_DIR="$(dirname -- "$(readlink -f -- "$0")")"
+          APP_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
           export LD_LIBRARY_PATH="$APP_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export WEBKIT_EXEC_PATH="$APP_DIR/lib"
           export WEBKIT_INJECTED_BUNDLE_PATH="$APP_DIR/lib"
@@ -1421,9 +1189,6 @@ jobs:
           dart run tool/generate_search_index.dart
           dart run tool/generate_settings_l10n.dart
 
-      # The container's glibc decides compatibility, so native code is compiled
-      # here instead of downloaded: the user define reaches the engine's build
-      # hook, cargokit_options.yaml the cargokit plugins (super_native_extensions).
       - name: Build the search engine inside the compatibility container
         shell: bash
         run: |
@@ -1432,13 +1197,6 @@ jobs:
             'use_precompiled_binaries: false' \
             'verbose_logging: true' \
             > cargokit_options.yaml
-          printf '%s\n' \
-            '' \
-            'hooks:' \
-            '  user_defines:' \
-            '    otzaria_search_engine:' \
-            '      build_from_source: true' \
-            >> pubspec.yaml
 
       # התוסף קורא ל-webkit_web_view_get_theme_color (קיים רק מ-WebKit 2.50) בלי guard גרסה;
       # ה-SDK הוא 2.48 — עוטפים ב-WEBKIT_CHECK_VERSION עד שיתוקן בחבילה.
@@ -1474,7 +1232,7 @@ jobs:
           : > "$GITHUB_WORKSPACE/build_linux.log"
           until [ $tries -ge 3 ]
           do
-            if flutter build linux --verbose "--dart-define=OTZARIA_BUILD_COMMIT=$(git rev-parse --short=12 HEAD)" 2>&1 | tee -a "$GITHUB_WORKSPACE/build_linux.log"; then
+            if flutter build linux --verbose --dart-define=BIO_OBF_KEY=${{ secrets.BIO_OBF_KEY }} 2>&1 | tee -a "$GITHUB_WORKSPACE/build_linux.log"; then
               break
             fi
             tries=$((tries+1))
@@ -1608,9 +1366,6 @@ jobs:
           mkdir -p "$DEB_DIR/usr/share/metainfo"
           cp linux/packaging/otzaria.metainfo.xml "$DEB_DIR/usr/share/metainfo/otzaria.metainfo.xml"
 
-          # make_config תומך רק ב-Name אחד — השם העברי נוסף כתרגום.
-          sed -i '/^Name=/a Name[he]=אוצריא' "$DEB_DIR/usr/share/applications/otzaria.desktop"
-
           # שם קובץ מובחן ל-arm64 — אחרת שני ה-deb מתנגשים באותו שם ב-release.
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
             DEB_OUTPUT_FILE="${DEB_OUTPUT_FILE%.deb}-arm64.deb"
@@ -1671,9 +1426,6 @@ jobs:
           RPM_LIB_SO=$(find "$RPM_TOP_DIR_ABS/BUILD" -name 'libWPEWebKit-2.0.so*' -print -quit)
           [ -n "$RPM_LIB_SO" ] || { echo "::error::libWPEWebKit-2.0 לא נמצא בעץ ה-rpm (BUILD)"; exit 1; }
           bash /tmp/bundle_wpe.sh "$(dirname "$RPM_LIB_SO")"
-
-          # ראה שלב ה-deb: השם העברי כתרגום. %install מעתיק את ה-desktop מ-BUILD/.
-          sed -i '/^Name=/a Name[he]=אוצריא' "$RPM_TOP_DIR_ABS/BUILD/otzaria.desktop"
 
           # ארכיוני התוספים המצורפים — ליד ה-executable (ההורה של lib ב-bundle).
           if [ -d installer/bundled_plugins ]; then
@@ -1760,21 +1512,21 @@ jobs:
       
       - name: Upload Linux DEB package
         if: matrix.target == 'deb' && steps.find_packages.outputs.deb_file != ''
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-linux-deb${{ matrix.arch == 'aarch64' && '-arm64' || '' }}
           path: ${{ steps.find_packages.outputs.deb_file }}
           
       - name: Upload Linux RPM package
         if: github.event_name != 'pull_request' && matrix.target == 'rpm' && steps.find_packages.outputs.rpm_file != ''
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-linux-rpm${{ matrix.arch == 'aarch64' && '-arm64' || '' }}
           path: ${{ steps.find_packages.outputs.rpm_file }}
        
       - name: Upload linux build (raw)
         if: matrix.target == 'raw'
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-linux-raw${{ matrix.arch == 'aarch64' && '-arm64' || '' }}
           path: linux-build/*
@@ -1784,7 +1536,7 @@ jobs:
       # נוסעת לשם כארטיפקט לצד החבילה — הבנייה כאן מסרבת לאינדקס שנבנה בגרסה אחרת.
       - name: Upload index build inputs
         if: matrix.target == 'raw' && matrix.arch == 'x86_64'
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-index-inputs
           path: pubspec.lock
@@ -1821,6 +1573,9 @@ jobs:
       - name: Create Linux FULL portable bundle
         if: matrix.target == 'full'
         shell: bash
+        env:
+          SEFORIM_LIBRARY_DISPATCH_TOKEN: ${{ secrets.SEFORIM_LIBRARY_DISPATCH_TOKEN }}
+          PREBUILT_LIBRARY_INDEX_BASE_URL: https://github.com/Otzaria/SeforimLibrary/releases/download/${{ needs.bump_version.outputs.library_tag }}
         run: |
           set -euo pipefail
           BUNDLE_ROOT="full_installer/otzaria-linux-full"
@@ -1831,7 +1586,18 @@ jobs:
           # חבילת ה-FULL אינה ניידת (נתוני המשתמש נשארים בתיקיית המשתמש);
           # ה-marker שייך רק לחבילת ה-raw — מסירים את העותק שהגיע מ-linux-build.
           rm -f "$BUNDLE_ROOT/app/portable.marker"
-          bash tool/release/stage_bundled_library.sh full_installer/library_db "$BUNDLE_ROOT/אוצריא"
+          zstd -d -c --long=31 --memory=2048MB full_installer/library_db/seforim.db.zst > "$BUNDLE_ROOT/אוצריא/seforim.db"
+          zstd -d -c --long=31 --memory=2048MB full_installer/library_db/otzar-HB_catalog.db.zst > "$BUNDLE_ROOT/אוצריא/otzar-HB_catalog.db"
+          zstd -d -c --long=31 --memory=2048MB full_installer/library_db/talmud_bavli_latest.tar.zst | tar -xf - -C "$BUNDLE_ROOT/אוצריא"
+          # בלי קובץ הגרסה בתיקייה, בדיקת העדכון הראשונה של האפליקציה מורידה את
+          # התלמוד (~440MB) מחדש; ה-sha256 של הארכיון הוא ה-digest שהיא משווה מולו.
+          sha256sum full_installer/library_db/talmud_bavli_latest.tar.zst \
+            | cut -d' ' -f1 > "$BUNDLE_ROOT/אוצריא/תלמוד בבלי/.version"
+          # מילון החיפוש המקורב (lexical.db) — אינו דחוס, מועתק כמות שהוא ליד seforim.db.
+          cp full_installer/library_db/lexical.db "$BUNDLE_ROOT/אוצריא/lexical.db"
+          # אותו כלל כמו בתלמוד: בלי סימון גרסה המילון (~57MB) יורד מחדש בבדיקה הראשונה.
+          sha256sum full_installer/library_db/lexical.db \
+            | cut -d' ' -f1 > "$BUNDLE_ROOT/אוצריא/lexical.db.version"
           # קובץ marker שמסמן לאפליקציה שהתיקייה היא ספרייה מצורפת של חבילת FULL.
           # ראה lib/core/app_paths.dart → _detectBundledLibraryPath.
           touch "$BUNDLE_ROOT/אוצריא/.otzaria_bundled_library"
@@ -1852,15 +1618,97 @@ jobs:
           EOF
 
           # --long=27 הוא חלון שכל zstd מחלץ בלי דגלים נוספים. חבילה מעל מגבלת
-          # הנכס של GitHub מפוצלת בהעלאה לטיוטה (split_oversized_assets.sh).
+          # הנכס של GitHub מפוצלת בשלב השחרור (split_oversized_assets.sh).
           pack_full_bundle() {
             tar -C full_installer -cf - otzaria-linux-full | zstd -19 -T0 --long=27 -o "$1"
           }
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
             pack_full_bundle otzaria-linux-full-arm64.tar.zst
-          else
-            pack_full_bundle otzaria-linux-full.tar.zst
+            # הספרייה המאונדקסת חוצת-פלטפורמות — עותק אחד נבנה ב-x86_64 בלבד.
+            exit 0
           fi
+          pack_full_bundle otzaria-linux-full.tar.zst
+
+          # חבילת ספרייה נוספת עם אינדקס חיפוש מוכן. האינדקס אינו נבנה כאן:
+          # הוא נבנה פעם אחת אחרי שחרור הספרייה, ב-build-library-index.yml
+          # שבמאגר SeforimLibrary, ומאוחסן כנכס על אותו release. בנייתו כאן
+          # עלתה 118 דקות מול 12 דקות לאותה חבילה בלעדיה (ריצה 34779834547),
+          # ותוצאתה נקבעת רק ע"י seforim.db ומנוע החיפוש — שניהם אינם משתנים
+          # בין בניות של האפליקציה.
+          #
+          # כרכי התלמוד המצורפים אינם מאונדקסים ממילא — isIndexableBook מחריגה
+          # אותם מאז 9b67127, כי הטקסט שלהם כבר באינדקס מה-DB. הם כן נוכחים
+          # בבניית האינדקס בצד השני, כי catalogueOrder הוא מיקום בעץ הקטלוג
+          # כולו; הסקריפט מאמת שזה אותו ארכיון תלמוד בדיוק.
+          INDEXED_LIBRARY_ROOT="$GITHUB_WORKSPACE/full_installer/otzaria-library-full-indexed"
+          mkdir -p "$INDEXED_LIBRARY_ROOT"
+          cp -al "$GITHUB_WORKSPACE/$BUNDLE_ROOT/אוצריא" "$INDEXED_LIBRARY_ROOT/books"
+          # בחבילה הכללית המשתמש בוחר את books ידנית; marker של bundle צמוד
+          # לאפליקציה היה גורם לנתיב להיחשב לא-ידני בעלייה הבאה.
+          BUNDLED_MARKER="$INDEXED_LIBRARY_ROOT/books/.otzaria_bundled_library"
+          case "$BUNDLED_MARKER" in
+            "$GITHUB_WORKSPACE/full_installer/otzaria-library-full-indexed/books/.otzaria_bundled_library") ;;
+            *) echo "::error::Unexpected bundled marker path: $BUNDLED_MARKER"; exit 1 ;;
+          esac
+          [ ! -L "$BUNDLED_MARKER" ] || { echo "::error::Bundled marker must not be a symlink"; exit 1; }
+          [ ! -e "$BUNDLED_MARKER" ] || rm -f -- "$BUNDLED_MARKER"
+          # סכמת מנוע חדשה (יציאה 3): האינדקס נבנה מהריצה הזו עצמה — ה-raw
+          # וה-index-inputs שלה כבר הועלו — ואז מריצים שוב את המשימות שנכשלו.
+          rebuild_tag_file="$RUNNER_TEMP/prebuilt-index-rebuild-tag"
+          fetch_status=0
+          PREBUILT_INDEX_REBUILD_TAG_FILE="$rebuild_tag_file" \
+            bash tool/release/fetch_prebuilt_library_index.sh \
+              "$INDEXED_LIBRARY_ROOT/index" \
+              full_installer/library_db/seforim.db.zst \
+              full_installer/library_db/talmud_bavli_latest.tar.zst \
+              pubspec.lock || fetch_status=$?
+          if [ "$fetch_status" = 3 ]; then
+            rebuild_tag=$(cat "$rebuild_tag_file")
+            rebuild_hint="build-library-index.yml in Otzaria/SeforimLibrary (release_tag=$rebuild_tag, otzaria_run_id=$GITHUB_RUN_ID)"
+            if [ -z "$SEFORIM_LIBRARY_DISPATCH_TOKEN" ]; then
+              echo "::warning::SEFORIM_LIBRARY_DISPATCH_TOKEN is not set — dispatch $rebuild_hint manually, then rerun the failed jobs"
+            elif jq -nc --arg tag "$rebuild_tag" --arg run "$GITHUB_RUN_ID" --arg ref "$GITHUB_REF_NAME" \
+                '{ref: "otzaria", inputs: {release_tag: $tag, otzaria_run_id: $run, otzaria_ref: $ref}}' \
+              | curl -fsS -X POST \
+                  -H "Authorization: Bearer $SEFORIM_LIBRARY_DISPATCH_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  --data-binary @- \
+                  https://api.github.com/repos/Otzaria/SeforimLibrary/actions/workflows/build-library-index.yml/dispatches; then
+              echo "::notice::Dispatched $rebuild_hint — rerun the failed jobs of this run once it finishes: https://github.com/Otzaria/SeforimLibrary/actions/workflows/build-library-index.yml"
+            else
+              echo "::warning::Could not dispatch $rebuild_hint — dispatch it manually, then rerun the failed jobs"
+            fi
+          fi
+          [ "$fetch_status" = 0 ] || exit "$fetch_status"
+          touch "$INDEXED_LIBRARY_ROOT/index/.otzaria_prebuilt_index"
+
+          cat > "$INDEXED_LIBRARY_ROOT/README.txt" << 'EOF'
+          Otzaria indexed FULL library
+
+          Extract the complete multipart archive and choose its books directory in Otzaria.
+          Keep books and index next to each other; the application resolves this layout automatically.
+          The package includes a prebuilt search index, so no indexing runs after
+          installation. The bundled Talmud Bavli scans are searchable through the
+          text of the same tractates, which the index covers.
+          EOF
+
+          VERSION=$(awk '/^version:/ {split($2, v, "+"); print v[1]; exit}' pubspec.yaml)
+          INDEXED_ARCHIVE="otzaria-${VERSION}-library-full-indexed.tar.zst"
+          tar -C full_installer -cf - otzaria-library-full-indexed \
+            | zstd -19 -T0 -o "$INDEXED_ARCHIVE"
+          mkdir -p indexed-release-parts
+          tool/release/split_release_asset.sh \
+            "$INDEXED_ARCHIVE" indexed-release-parts 1992294400
+          cp tool/release/assemble_split_asset.sh indexed-release-parts/
+          cp tool/release/assemble_split_asset.ps1 indexed-release-parts/
+
+          # קובץ-הביניים השלם עלול להיות גדול מ-2 GiB; רק החלקים עולים כ-assets.
+          case "$INDEXED_ARCHIVE" in
+            otzaria-*-library-full-indexed.tar.zst) ;;
+            *) echo "::error::Unexpected indexed archive path: $INDEXED_ARCHIVE"; exit 1 ;;
+          esac
+          [ -f "$INDEXED_ARCHIVE" ] || { echo "::error::Indexed archive is missing"; exit 1; }
+          rm -f -- "$INDEXED_ARCHIVE"
 
       # נסרק app של חבילת ה-FULL — העץ שהמשתמש פורס. portable.marker הוסר ממנו.
       - name: Generate application file manifest (Linux)
@@ -1879,7 +1727,7 @@ jobs:
       - name: Upload application file manifest (Linux)
         if: matrix.target == 'full' && steps.app_file_manifest_linux.outcome == 'success'
         continue-on-error: true
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-app-file-manifest-linux-${{ matrix.arch == 'aarch64' && 'arm64' || 'x64' }}
           path: otzaria-app-files-linux-${{ matrix.arch == 'aarch64' && 'arm64' || 'x64' }}.json
@@ -1887,10 +1735,27 @@ jobs:
 
       - name: Upload Linux FULL bundle
         if: matrix.target == 'full'
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-linux-full${{ matrix.arch == 'aarch64' && '-arm64' || '' }}
           path: otzaria-linux-full${{ matrix.arch == 'aarch64' && '-arm64' || '' }}.tar.zst
+
+      - name: Upload indexed FULL library parts
+        if: matrix.target == 'full' && matrix.arch == 'x86_64'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: otzaria-library-full-indexed
+          path: indexed-release-parts/*
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Upload indexed FULL manifest for installer build
+        if: matrix.target == 'full' && matrix.arch == 'x86_64'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: otzaria-library-full-indexed-manifest
+          path: indexed-release-parts/*.manifest.json
+          if-no-files-found: error
 
       # כלי עזר, לא רכיב של הגרסה: כישלון כאן לא יפיל את שחרור אוצריא.
       # C + GTK3 בלבד (docs/download_assistant.md, "מסייע ההורדה ל-Linux").
@@ -1921,62 +1786,15 @@ jobs:
         if: matrix.target == 'raw' && steps.download_assistant_linux.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 15
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-download-assistant-linux-${{ matrix.arch == 'aarch64' && 'arm64' || 'x64' }}
           path: tool/download_assistant/linux/build/Otzaria-Download-Assistant-linux-${{ matrix.arch == 'aarch64' && 'arm64' || 'x64' }}.tar.gz
           if-no-files-found: warn
 
-      # לטיוטת השחרור; release_id ריק נבדק בתוך הסקריפט. חבילת ה-raw אינה נכס:
-      # ה-DEB מכסה אותה. full_installer נמחק כדי שיהיה מקום לחלקי הפיצול.
-      - name: Upload release assets
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-          TARGET: ${{ matrix.target }}
-          ARCH: ${{ matrix.arch == 'aarch64' && 'arm64' || 'x64' }}
-          DEB_FILE: ${{ steps.find_packages.outputs.deb_file }}
-          RPM_FILE: ${{ steps.find_packages.outputs.rpm_file }}
-          ASSISTANT: ${{ steps.download_assistant_linux.outcome }}
-          APP_FILE_MANIFEST: ${{ steps.app_file_manifest_linux.outcome }}
-        run: |
-          set -euo pipefail
-          if [ -z "$RELEASE_ID" ]; then
-            echo "No draft release in this run - nothing to upload"
-            exit 0
-          fi
-          files=()
-          optional=()
-          case "$TARGET" in
-            deb) [ -z "$DEB_FILE" ] || optional+=("$DEB_FILE") ;;
-            rpm) [ -z "$RPM_FILE" ] || optional+=("$RPM_FILE") ;;
-            raw)
-              [ "$ASSISTANT" != success ] \
-                || optional+=("tool/download_assistant/linux/build/Otzaria-Download-Assistant-linux-$ARCH.tar.gz")
-              ;;
-            full)
-              rm -rf full_installer
-              full=otzaria-linux-full.tar.zst
-              [ "$ARCH" = x64 ] || full="otzaria-linux-full-$ARCH.tar.zst"
-              files+=("$full")
-              [ "$APP_FILE_MANIFEST" != success ] || optional+=("otzaria-app-files-linux-$ARCH.json")
-              ;;
-          esac
-          bash tool/release/upload_release_assets.sh "$RELEASE_ID" release-record \
-            ${files[@]+"${files[@]}"} --optional ${optional[@]+"${optional[@]}"}
-
-      - name: Upload release record
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-release-record-linux-${{ matrix.target }}-${{ matrix.arch }}
-          path: release-record/
-          overwrite: true
-          if-no-files-found: ignore
-
   build_android:
-    if: "!cancelled() && needs.bump_version.result == 'success' && github.event_name != 'release' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.build_android)"
-    needs: [bump_version, prepare_release]
+    if: github.event_name != 'release' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.build_android)
+    needs: [bump_version]
     runs-on: ubuntu-latest
     env:
       RUSTUP_HOME: ${{ github.workspace }}/.rustup
@@ -1987,6 +1805,23 @@ jobs:
         with:
           ref: ${{ needs.bump_version.outputs.sha }}
 
+      - name: Check if commit message is a version tag
+        id: check_version
+        shell: bash
+        run: |
+          COMMIT_MESSAGE='${{ github.event.head_commit.message }}'
+          if [ -z "$COMMIT_MESSAGE" ]; then
+            echo "Commit message not available in event payload; using checked-out HEAD commit message instead"
+            COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+          fi
+          COMMIT_MESSAGE=$(printf '%s' "$COMMIT_MESSAGE" | head -n 1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          echo "Commit message: $COMMIT_MESSAGE"
+
+          if printf '%s' "$COMMIT_MESSAGE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "is_version=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_version=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Free up disk space
         run: |
@@ -2002,7 +1837,7 @@ jobs:
 
       # ברירת המחדל ב-ubuntu-26.04 היא JDK 25, ו-Gradle 8.x אינו רץ עליו.
       - name: Set up Java
-        uses: actions/setup-java@v6.1.0
+        uses: actions/setup-java@v6.0.1
         with:
           distribution: temurin
           java-version: '17'
@@ -2011,7 +1846,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.47.7
+          flutter-version: 3.47.2
           cache: true
 
       - name: Install Rust (stable)
@@ -2144,6 +1979,23 @@ jobs:
             ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager --install "build-tools;36.0.0"
           fi
 
+      - name: Download library assets for Android FULL bundle
+        if: true
+        shell: bash
+        env:
+          LIBRARY_DB_RELEASE_TAG: ${{ needs.bump_version.outputs.library_tag }}
+          SEFORIM_LIBRARY_TAG: ${{ needs.bump_version.outputs.library_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p full_installer/library_db
+          # DB מעל מגבלת הנכס של GitHub מתפרסם בחלקים; הסקריפט מחבר ומאמת אותם.
+          bash tool/release/download_library_db.sh full_installer/library_db/seforim.db.zst
+          curl -L --fail https://github.com/Otzaria/otzar-HB_catalog/releases/latest/download/otzar-HB_catalog.db.zst -o full_installer/library_db/otzar-HB_catalog.db.zst
+          curl -L --fail https://github.com/Otzaria/otzaria-library/releases/latest/download/talmud_bavli_latest.tar.zst -o full_installer/library_db/talmud_bavli_latest.tar.zst
+          # lexical-v2.db הוא המילון המתוקן; lexical.db קפוא לגרסאות ישנות של התוכנה.
+          curl -L --fail https://github.com/Otzaria/SeforimMagicIndexer/releases/latest/download/lexical-v2.db -o full_installer/library_db/lexical.db \
+            || curl -L --fail https://github.com/Otzaria/SeforimMagicIndexer/releases/latest/download/lexical.db -o full_installer/library_db/lexical.db
+
       # תוספים מצורפים — במובייל אין "ליד ה-executable", לכן הארכיונים נארזים
       # כ-assets בתוך ה-APK והאפליקציה רושמת אותם משם (docs/bundled_plugins.md).
       - name: Download bundled plugins into Android assets
@@ -2169,7 +2021,7 @@ jobs:
           # Generate the settings .g.dart files: search index + translation catalog.
           dart run tool/generate_search_index.dart
           dart run tool/generate_settings_l10n.dart
-          flutter build apk --verbose "--dart-define=OTZARIA_BUILD_COMMIT=$(git rev-parse --short=12 HEAD)"
+          flutter build apk --verbose --dart-define=BIO_OBF_KEY=${{ secrets.BIO_OBF_KEY }}
           # ניקוי מיידי של קבצים מיותרים מהבנייה (לא ה-APK הסופי)
           rm -rf build/app/intermediates || true
           rm -rf build/app/.transforms || true
@@ -2177,28 +2029,41 @@ jobs:
           df -h
       
       - name: Upload apk
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-android.apk
           path: build/app/outputs/flutter-apk/app-release.apk
 
-      # לטיוטת השחרור, לפני שהניקוי מוחק את build.
-      - name: Upload release assets
-        if: needs.prepare_release.outputs.release_id != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-        run: bash tool/release/upload_release_assets.sh "$RELEASE_ID" release-record build/app/outputs/flutter-apk/app-release.apk
+      - name: Create Android FULL bundle
+        if: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_ROOT="full_installer/otzaria-android-full"
+          rm -rf "$BUNDLE_ROOT"
+          mkdir -p "$BUNDLE_ROOT/library_db"
+          cp build/app/outputs/flutter-apk/app-release.apk "$BUNDLE_ROOT/otzaria-android.apk"
+          cp full_installer/library_db/* "$BUNDLE_ROOT/library_db/"
+          cat > "$BUNDLE_ROOT/README.txt" << 'EOF'
+          Otzaria Android FULL bundle
 
-      - name: Upload release record
-        if: needs.prepare_release.outputs.release_id != ''
-        uses: actions/upload-artifact@v7.0.2
+          This bundle includes the APK and the offline library payload.
+          The APK itself cannot preinstall external library files automatically.
+          Use this bundle when distributing the APK together with the library payload.
+          A bundle above GitHub's file limit comes as several ZIP files: extract all
+          of them into the same folder. Files named *.part-NNN with a *.manifest.json
+          stay as they are; importing the library_db folder in Otzaria joins them.
+          EOF
+          # מעל מגבלת GitHub — כרכי ZIP עצמאיים, כי בטלפון אי אפשר לחבר חלקים גולמיים.
+          bash tool/release/pack_android_full.sh full_installer otzaria-android-full .
+
+      - name: Upload Android FULL bundle
+        if: true
+        uses: actions/upload-artifact@v7.0.1
         with:
-          name: otzaria-release-record-android
-          path: release-record/
-          overwrite: true
-          if-no-files-found: error
-
+          name: otzaria-android-full
+          path: otzaria-android-full*.zip
+      
       - name: Final cleanup
         if: always()
         run: |
@@ -2207,99 +2072,9 @@ jobs:
           echo "Disk space after final cleanup:"
           df -h
 
-  # ה-APK עם חלקי חבילת הספרייה והאינדקס מ-build_library_assets — בדיוק הקבצים
-  # ש"ייבוא מתיקיית קובצי הספרייה" באוצריא קורא (lib/empty_library/services/library_package).
-  build_android_full:
-    if: "!cancelled() && needs.build_android.result == 'success' && needs.build_library_assets.result == 'success'"
-    needs: [bump_version, prepare_release, build_android, build_library_assets]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Clone repository
-        uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ needs.bump_version.outputs.sha }}
-
-      - name: Download APK
-        uses: actions/download-artifact@v8.0.2
-        with:
-          name: otzaria-android.apk
-          path: android-apk
-
-      - name: Download library and search index parts
-        uses: actions/download-artifact@v8.0.2
-        with:
-          name: otzaria-library-parts
-          path: full_installer/otzaria-android-full
-
-      - name: Create Android FULL bundle
-        shell: bash
-        run: |
-          set -euo pipefail
-          BUNDLE_ROOT="full_installer/otzaria-android-full"
-          VERSION=$(awk '/^version:/ {split($2, v, "+"); print v[1]; exit}' pubspec.yaml)
-          for kind in library library-index; do
-            [ -f "$BUNDLE_ROOT/otzaria-${VERSION}-${kind}.tar.zst.manifest.json" ] \
-              || { echo "::error::Missing otzaria-${VERSION}-${kind}.tar.zst.manifest.json"; exit 1; }
-          done
-          # כלי ההרכבה מיועדים למחשב; בטלפון הייבוא מחבר את החלקים בעצמו.
-          rm -f -- "$BUNDLE_ROOT/assemble_split_asset.sh" "$BUNDLE_ROOT/assemble_split_asset.ps1"
-          mv android-apk/app-release.apk "$BUNDLE_ROOT/otzaria-android.apk"
-          cat > "$BUNDLE_ROOT/README.txt" << 'EOF'
-          אוצריא ל-Android — חבילה מלאה
-
-          1. חלצו את כל קובצי ה-ZIP. מותר שמנהל הקבצים יחלץ כל ZIP לתיקייה משלו.
-          2. התקינו את otzaria-android.apk.
-          3. פתחו את אוצריא, לחצו 'בחר מיקום או הורד ספרייה' (או בהגדרות: 'מיקום
-             הספרייה והאינדקס'), בחרו 'ייבוא מתיקיית קובצי הספרייה' → 'בחר תיקייה',
-             ובחרו את התיקייה שאליה חולצו קובצי ה-ZIP (גם אם כל אחד חולץ לתיקייה
-             משלו — בחרו את התיקייה שמכילה את כולן).
-          אין לחלץ או לשנות את שמות קובצי ה-part וה-manifest.json: אוצריא מאמתת אותם
-          ופורסת מהם את הספרייה ואת אינדקס החיפוש.
-
-          Otzaria for Android — FULL bundle
-
-          1. Extract all the ZIP files. It is fine if your file manager puts each ZIP
-             in a folder of its own.
-          2. Install otzaria-android.apk.
-          3. Open Otzaria, tap the setup button on the empty-library screen (or, in
-             Settings, "Library and Index Folder"), choose "Import from the Library
-             Files Folder" → "Select Folder", and pick the folder you extracted the ZIP
-             files into (if each one got a folder of its own, pick the folder that
-             contains all of them).
-          Do not extract or rename the part and manifest.json files: Otzaria verifies
-          them and installs the library and the search index from them.
-          EOF
-          bash tool/release/pack_android_full.sh full_installer otzaria-android-full .
-          rm -rf full_installer
-          df -h .
-
-      - name: Upload Android FULL bundle
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-android-full
-          path: otzaria-android-full*.zip
-          compression-level: 0
-          if-no-files-found: error
-
-      - name: Upload release assets
-        if: needs.prepare_release.outputs.release_id != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-        run: bash tool/release/upload_release_assets.sh "$RELEASE_ID" release-record otzaria-android-full*.zip
-
-      - name: Upload release record
-        if: needs.prepare_release.outputs.release_id != ''
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-release-record-android-full
-          path: release-record/
-          overwrite: true
-          if-no-files-found: error
-
   build_macos:
-    if: "!cancelled() && needs.bump_version.result == 'success' && github.event_name != 'release' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.build_macos)"
-    needs: [bump_version, prepare_release]
+    if: github.event_name != 'release' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.build_macos)
+    needs: [bump_version]
     runs-on: macos-latest
     env:
       # אחסון יציב בתוך ה-workspace כדי למנוע תקלות rename של rustup
@@ -2311,12 +2086,29 @@ jobs:
         with:
           ref: ${{ needs.bump_version.outputs.sha }}
 
+      - name: Check if commit message is a version tag
+        id: check_version
+        shell: bash
+        run: |
+          COMMIT_MESSAGE='${{ github.event.head_commit.message }}'
+          if [ -z "$COMMIT_MESSAGE" ]; then
+            echo "Commit message not available in event payload; using checked-out HEAD commit message instead"
+            COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+          fi
+          COMMIT_MESSAGE=$(printf '%s' "$COMMIT_MESSAGE" | head -n 1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          echo "Commit message: $COMMIT_MESSAGE"
+
+          if printf '%s' "$COMMIT_MESSAGE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "is_version=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_version=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.47.7
+          flutter-version: 3.47.2
           # ב-macOS ה-cache (~2.5GB) כמעט לא נמצא בין ריצות, ושמירתו איטית מהתקנה.
           cache: false
 
@@ -2344,6 +2136,7 @@ jobs:
 
       # התקנת Rust יציבה לפני flutter build
       - name: Install Rust (stable)
+      # מחליף את ההתקנה האוטומטית של cargokit
         uses: dtolnay/rust-toolchain@stable
 
       - name: Add cargo to PATH & verify toolchain
@@ -2372,7 +2165,7 @@ jobs:
           tries=0
           until [ $tries -ge 3 ]
           do
-            if flutter build macos --release --verbose "--dart-define=OTZARIA_BUILD_COMMIT=$(git rev-parse --short=12 HEAD)"; then
+            if flutter build macos --release --verbose --dart-define=BIO_OBF_KEY=${{ secrets.BIO_OBF_KEY }}; then
               break
             fi
             tries=$((tries+1))
@@ -2522,7 +2315,7 @@ jobs:
       - name: Upload application file manifest (macOS)
         if: steps.app_file_manifest_macos.outcome == 'success'
         continue-on-error: true
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-app-file-manifest-macos
           path: otzaria-app-files-macos-universal.json
@@ -2622,26 +2415,26 @@ jobs:
           Start the app using Run Otzaria.command so the app can detect the bundled library folder.
           EOF
 
-          # חבילה מעל מגבלת הנכס של GitHub מפוצלת בהעלאה לטיוטה (split_oversized_assets.sh).
+          # חבילה מעל מגבלת הנכס של GitHub מפוצלת בשלב השחרור (split_oversized_assets.sh).
           tar -C full_installer -cf - otzaria-macos-full | zstd -19 -T0 --long=27 -o otzaria-macos-full.tar.zst
 
       - name: Upload macOS DMG
         if: always()
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-macos.dmg
           path: otzaria-macos.dmg
 
       - name: Upload macOS update zip
         if: always()
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-macos-update
           path: otzaria-macos.zip
 
       - name: Upload macOS FULL bundle
         if: true
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-macos-full
           path: otzaria-macos-full.tar.zst
@@ -2673,51 +2466,16 @@ jobs:
         if: steps.download_assistant_macos.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 15
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: otzaria-download-assistant-macos
           path: ${{ runner.temp }}/download-assistant-macos/Otzaria-Download-Assistant-macos.zip
           if-no-files-found: warn
 
-      # לטיוטת השחרור; חבילת ה-FULL מעל 1.9 GiB עולה בחלקים.
-      - name: Upload release assets
-        if: needs.prepare_release.outputs.release_id != ''
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-          ASSISTANT: ${{ steps.download_assistant_macos.outcome }}
-          APP_FILE_MANIFEST: ${{ steps.app_file_manifest_macos.outcome }}
-        run: |
-          set -euo pipefail
-          # מקום לחלקי הפיצול: עץ החבילה כבר ארוז.
-          rm -rf full_installer
-          optional=()
-          [ "$APP_FILE_MANIFEST" != success ] || optional+=(otzaria-app-files-macos-universal.json)
-          [ "$ASSISTANT" != success ] \
-            || optional+=("$RUNNER_TEMP/download-assistant-macos/Otzaria-Download-Assistant-macos.zip")
-          bash tool/release/upload_release_assets.sh "$RELEASE_ID" release-record \
-            otzaria-macos.dmg otzaria-macos.zip otzaria-macos-full.tar.zst --optional ${optional[@]+"${optional[@]}"}
-
-      - name: Upload release record
-        if: needs.prepare_release.outputs.release_id != ''
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-release-record-macos
-          path: release-record/
-          overwrite: true
-          if-no-files-found: error
-
-  # המתקינים הרגילים (x64 ו-ARM64; ISCC רק אורז) מטמיעים את מניפסטי חלקי הספרייה
-  # והאינדקס מ-build_library_assets. כשהוא לא הצליח, הם נבנים בלי התמיכה בהם.
-  build_windows_installer:
-    if: >-
-      !cancelled() &&
-      github.event_name != 'release' &&
-      github.event_name != 'pull_request' &&
-      needs.build_windows.result == 'success'
-    needs: [bump_version, prepare_release, build_windows, build_windows_arm64, build_library_assets]
-    runs-on: windows-2025
+  build_windows_indexed_full:
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.build_windows && inputs.build_linux)
+    needs: [bump_version, build_windows, build_linux]
+    runs-on: windows-latest
 
     steps:
       - name: Clone repository
@@ -2726,358 +2484,93 @@ jobs:
           ref: ${{ needs.bump_version.outputs.sha }}
 
       - name: Download Windows app bundle
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@v8.0.1
         with:
           name: otzaria-windows-zip
-          path: installer-inputs/windows
+          path: indexed-inputs/windows
 
-      - name: Download installer tools
-        uses: actions/download-artifact@v8.0.2
+      - name: Download indexed installer tools
+        uses: actions/download-artifact@v8.0.1
         with:
-          name: otzaria-windows-installer-tools
-          path: installer-inputs/tools
+          name: otzaria-windows-indexed-installer-tools
+          path: indexed-inputs/tools
 
-      - name: Download Windows ARM64 app bundle
-        if: needs.build_windows_arm64.result == 'success'
-        uses: actions/download-artifact@v8.0.2
+      - name: Download indexed library manifest
+        uses: actions/download-artifact@v8.0.1
         with:
-          name: otzaria-windows-arm64-zip
-          path: installer-inputs/windows-arm64
-
-      - name: Download library manifests
-        if: needs.build_library_assets.result == 'success'
-        uses: actions/download-artifact@v8.0.2
-        with:
-          name: otzaria-library-manifests
-          path: installer-inputs/library
+          name: otzaria-library-full-indexed-manifest
+          path: indexed-inputs/library
 
       - name: Install Inno Setup
         shell: pwsh
         run: |
           .\installer\install_inno_setup.ps1
-          $iscc = Get-ChildItem "C:\Program Files*\Inno Setup 6\ISCC.exe" -Recurse |
+          $iscc = Get-ChildItem "C:\Program Files*\Inno Setup*\ISCC.exe" -Recurse |
             Select-Object -First 1 -ExpandProperty FullName
           if (-not $iscc) { throw 'ISCC.exe not found after installation' }
           "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      # כל ZIP הוא תיקיית הבנייה של ה-job שלו ועוד portable.marker, שאסור בהתקנה רגילה.
-      # zstd ו-7za של x64 משמשים גם את ARM64 (אמולציה; otzaria.iss חוסם שם Windows 10).
-      - name: Prepare regular installer inputs
+      - name: Prepare indexed FULL bootstrap inputs
         shell: pwsh
-        env:
-          LIBRARY_RESULT: ${{ needs.build_library_assets.result }}
-          ARM64_RESULT: ${{ needs.build_windows_arm64.result }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $bundles = @(@{ Dir = 'installer-inputs\windows'; Arch = 'x64' })
-          if ($env:ARM64_RESULT -eq 'success') {
-            $bundles += @{ Dir = 'installer-inputs\windows-arm64'; Arch = 'arm64' }
-          }
-          foreach ($bundle in $bundles) {
-            $zip = Get-ChildItem "$($bundle.Dir)\*.zip" | Select-Object -First 1
-            if (-not $zip) { throw "Windows $($bundle.Arch) app bundle is missing" }
-            $releaseDir = "build\windows\$($bundle.Arch)\runner\Release"
-            New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
-            Expand-Archive -LiteralPath $zip.FullName -DestinationPath $releaseDir -Force
-            Remove-Item "$releaseDir\portable.marker" -Force -ErrorAction SilentlyContinue
-          }
+          $zip = Get-ChildItem indexed-inputs\windows\*.zip | Select-Object -First 1
+          if (-not $zip) { throw 'Windows app bundle is missing' }
+          $releaseDir = 'build\windows\x64\runner\Release'
+          New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath $releaseDir -Force
+          Remove-Item "$releaseDir\portable.marker" -Force -ErrorAction SilentlyContinue
 
-          $library = @(Get-ChildItem installer-inputs\library\*-library.tar.zst.manifest.json -ErrorAction SilentlyContinue)
-          $index = @(Get-ChildItem installer-inputs\library\*-library-index.tar.zst.manifest.json -ErrorAction SilentlyContinue)
-          if ($env:LIBRARY_RESULT -ne 'success') {
-            Write-Host "::warning::build_library_assets did not succeed - the regular installers are built without library support"
-          } elseif ($library.Count -ne 1 -or $index.Count -ne 1) {
-            throw "Expected one library and one index manifest, found $($library.Count) and $($index.Count)"
-          } else {
-            Copy-Item $library[0].FullName installer\library.manifest.json -Force
-            Copy-Item $index[0].FullName installer\library_index.manifest.json -Force
-            Copy-Item installer-inputs\tools\zstd.exe installer\zstd.exe -Force
-            Copy-Item installer-inputs\tools\7za.exe installer\7za.exe -Force
+          Copy-Item indexed-inputs\tools\zstd.exe installer\zstd.exe -Force
+          Copy-Item indexed-inputs\tools\7za.exe installer\7za.exe -Force
+          $manifests = @(Get-ChildItem indexed-inputs\library\*library-full-indexed*.manifest.json)
+          if ($manifests.Count -ne 1) {
+            throw "Expected one indexed library manifest, found $($manifests.Count)"
           }
+          $manifest = $manifests[0]
+          Copy-Item $manifest.FullName installer\indexed_library.manifest.json -Force
 
-      # תוספים מצורפים — כמו בשאר מתקיני Windows (docs/bundled_plugins.md).
-      - name: Download bundled plugins for installer (regular)
+          Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' `
+            -OutFile installer\MicrosoftEdgeWebview2Setup.exe
+
+      - name: Download bundled plugins for installer (indexed FULL)
         shell: pwsh
         run: .\installer\download_bundled_plugins.ps1 -Platform windows
 
-      - name: Build regular installer
+      - name: Build indexed FULL bootstrap installer
         shell: pwsh
         run: |
-          # העיצוב של שכבת התצוגה (installer/assistant_art.pin.json). כאן כישלון קטלני: המתקין אינו נבנה בלעדיו.
-          & ./tool/release/fetch_assistant_art.ps1
-          & "$env:ISCC" installer\otzaria.iss
+          $version = ((Get-Content pubspec.yaml | Select-String '^version:').Line -split '\s+')[1].Split('+')[0]
+          $releaseTag = & ./tool/version/release_tag.ps1 $version $env:GITHUB_REF $env:GITHUB_RUN_NUMBER
+          $env:OTZARIA_INDEXED_RELEASE_TAG = $releaseTag
+          & "$env:ISCC" '/DIndexedSplitFull=1' installer\otzaria_full.iss
           if ($LASTEXITCODE -ne 0) {
-            throw 'Regular installer build failed'
+            throw 'Indexed FULL bootstrap installer build failed'
           }
 
-      - name: Build regular installer (ARM64)
-        if: needs.build_windows_arm64.result == 'success'
-        shell: pwsh
-        run: |
-          # העיצוב של שכבת התצוגה (installer/assistant_art.pin.json). כאן כישלון קטלני: המתקין אינו נבנה בלעדיו.
-          & ./tool/release/fetch_assistant_art.ps1
-          & "$env:ISCC" /DAppArch=arm64 installer\otzaria.iss
-          if ($LASTEXITCODE -ne 0) {
-            throw 'ARM64 installer build failed'
-          }
-
-      - name: Upload Windows installer (regular)
-        uses: actions/upload-artifact@v7.0.2
+      - name: Upload Windows indexed FULL bootstrap installer
+        uses: actions/upload-artifact@v7.0.1
         with:
-          name: otzaria-windows-installer
-          path: installer/otzaria-*-windows.exe
+          name: otzaria-windows-installer-full-indexed
+          path: installer/otzaria-*-windows-full-indexed.exe
 
-      - name: Upload Windows ARM64 installer
-        if: needs.build_windows_arm64.result == 'success'
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-windows-arm64-installer
-          path: installer/otzaria-*-windows_arm64.exe
-
-      - name: Upload release assets
-        if: needs.prepare_release.outputs.release_id != ''
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-          ARM64_RESULT: ${{ needs.build_windows_arm64.result }}
-        run: |
-          set -euo pipefail
-          installers=(installer/otzaria-*-windows.exe)
-          [ "$ARM64_RESULT" != success ] || installers+=(installer/otzaria-*-windows_arm64.exe)
-          bash tool/release/upload_release_assets.sh "$RELEASE_ID" release-record "${installers[@]}"
-
-      - name: Upload release record
-        if: needs.prepare_release.outputs.release_id != ''
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-release-record-windows-installer
-          path: release-record/
-          overwrite: true
-          if-no-files-found: error
-
-  # עדכון דיפרנציאלי — אופטימיזציה בלבד: כישלון משאיר את המשתמשים על המתקין המלא.
-  # כל פלטפורמה רצה ברגע שהבנייה שלה הסתיימה, במקביל לשאר, ומעלה לטיוטה נכסים
-  # שאינם מוזכרים בגוף השחרור. create_release מחכה להן אך אינו דורש שיצליחו.
-  update_packages_windows:
-    if: "!cancelled() && needs.prepare_release.outputs.release_id != '' && needs.build_windows.result == 'success'"
-    needs: [bump_version, prepare_release, build_windows, build_windows_arm64]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Clone repository
-        uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ needs.bump_version.outputs.sha }}
-
-      - name: Download the portable ZIPs
-        uses: actions/download-artifact@v8.0.2
-        with:
-          pattern: otzaria-windows*-zip
-          path: release-files
-          merge-multiple: true
-
-      - name: Download the application file manifests
-        uses: actions/download-artifact@v8.0.2
-        with:
-          pattern: otzaria-app-file-manifest-*
-          path: release-files
-          merge-multiple: true
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: 3.47.7
-          cache: true
-
-      - name: Publish differential update packages
-        continue-on-error: true
-        timeout-minutes: 30
-        env:
-          UPDATE_PACKAGES_SOURCE_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.prepare_release.outputs.tag }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          flutter pub get --enforce-lockfile
-          mkdir -p update-packages
-          for arch in x64 arm64; do
-            manifest="release-files/otzaria-app-files-windows-$arch.json"
-            zip="release-files/otzaria-windows.zip"
-            [ "$arch" = "x64" ] || zip="release-files/otzaria-windows_$arch.zip"
-            bash tool/release/build_update_packages.sh \
-              "$arch" "$RELEASE_TAG" "$manifest" "$zip" update-packages 2
-          done
-          if [ -z "$(ls -A update-packages)" ]; then
-            echo "::warning::no differential update packages were produced"
-            exit 0
-          fi
-          bash tool/release/upload_release_assets.sh "$RELEASE_ID" release-record update-packages/*
-
-      - name: Upload release record
-        if: always()
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-release-record-update-packages-windows
-          path: release-record/
-          overwrite: true
-          if-no-files-found: ignore
-
-  # Linux נייד: חבילות עץ (symlinks, הרשאות). הבסיסים הם app של חבילות ה-FULL
-  # הקודמות — נמשכים בזרם, בלי לשמור 2GB לדיסק.
-  update_packages_linux:
-    if: "!cancelled() && needs.prepare_release.outputs.release_id != '' && needs.build_linux.result == 'success'"
-    needs: [bump_version, prepare_release, build_linux]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Clone repository
-        uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ needs.bump_version.outputs.sha }}
-
-      - name: Download the Linux FULL bundles
-        uses: actions/download-artifact@v8.0.2
-        with:
-          pattern: otzaria-linux-full*
-          path: artifacts
-
-      - name: Download the application file manifests
-        uses: actions/download-artifact@v8.0.2
-        with:
-          pattern: otzaria-app-file-manifest-linux-*
-          path: release-files
-          merge-multiple: true
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: 3.47.7
-          cache: true
-
-      - name: Publish differential update packages (Linux)
-        continue-on-error: true
-        timeout-minutes: 30
-        env:
-          UPDATE_PACKAGES_SOURCE_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.prepare_release.outputs.tag }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          flutter pub get --enforce-lockfile
-          rm -rf tree-update-packages
-          mkdir -p tree-update-packages
-          for arch in x64 arm64; do
-            archive="artifacts/otzaria-linux-full/otzaria-linux-full.tar.zst"
-            [ "$arch" = "x64" ] || archive="artifacts/otzaria-linux-full-$arch/otzaria-linux-full-$arch.tar.zst"
-            UPDATE_PACKAGES_PLATFORM=linux bash tool/release/build_update_packages.sh \
-              "$arch" "$RELEASE_TAG" "release-files/otzaria-app-files-linux-$arch.json" \
-              "$archive" tree-update-packages 2 || true
-          done
-          if [ -z "$(ls -A tree-update-packages)" ]; then
-            echo "::warning::no Linux differential update packages were produced"
-            exit 0
-          fi
-          bash tool/release/upload_release_assets.sh "$RELEASE_ID" release-record tree-update-packages/*
-
-      - name: Upload release record
-        if: always()
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-release-record-update-packages-linux
-          path: release-record/
-          overwrite: true
-          if-no-files-found: ignore
-
-  update_packages_macos:
-    if: "!cancelled() && needs.prepare_release.outputs.release_id != '' && needs.build_macos.result == 'success'"
-    needs: [bump_version, prepare_release, build_macos]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Clone repository
-        uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ needs.bump_version.outputs.sha }}
-
-      - name: Download the macOS update zip
-        uses: actions/download-artifact@v8.0.2
-        with:
-          name: otzaria-macos-update
-          path: release-files
-
-      - name: Download the application file manifest
-        uses: actions/download-artifact@v8.0.2
-        with:
-          name: otzaria-app-file-manifest-macos
-          path: release-files
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: 3.47.7
-          cache: true
-
-      - name: Publish differential update packages (macOS)
-        continue-on-error: true
-        timeout-minutes: 30
-        env:
-          UPDATE_PACKAGES_SOURCE_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.prepare_release.outputs.tag }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # bsdtar משחזר symlinks מ-zip של ditto; unzip אינו מבטיח זאת.
-          command -v bsdtar >/dev/null || sudo apt-get install -y libarchive-tools
-          flutter pub get --enforce-lockfile
-          rm -rf tree-update-packages
-          mkdir -p tree-update-packages
-          UPDATE_PACKAGES_PLATFORM=macos bash tool/release/build_update_packages.sh \
-            universal "$RELEASE_TAG" release-files/otzaria-app-files-macos-universal.json \
-            release-files/otzaria-macos.zip tree-update-packages 2 || true
-          if [ -z "$(ls -A tree-update-packages)" ]; then
-            echo "::warning::no macOS differential update packages were produced"
-            exit 0
-          fi
-          bash tool/release/upload_release_assets.sh "$RELEASE_ID" release-record tree-update-packages/*
-
-      - name: Upload release record
-        if: always()
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: otzaria-release-record-update-packages-macos
-          path: release-record/
-          overwrite: true
-          if-no-files-found: ignore
-
-  # מפרסם את הטיוטה שה-jobs מילאו, בלי להוריד את הנכסים עצמם: מאמת אותה מול
-  # הרשומות הקטנות שלהם, ובונה מהן את מניפסט ה-release ואת הערות השחרור.
   create_release:
-    concurrency:
-      group: publish-release
-      cancel-in-progress: false
-      queue: max
     if: >-
       !cancelled() &&
-      needs.prepare_release.result == 'success' &&
-      needs.prepare_release.outputs.release_id != '' &&
+      github.event_name != 'release' &&
+      github.event_name != 'pull_request' &&
+      (github.event_name != 'workflow_dispatch' || inputs.create_release) &&
       needs.build_windows.result == 'success' &&
-      needs.build_linux.result == 'success' &&
-      needs.build_library_assets.result == 'success' &&
-      needs.build_android.result == 'success' &&
-      needs.build_android_full.result == 'success' &&
-      needs.build_macos.result == 'success' &&
-      needs.build_windows_installer.result == 'success' &&
-      (needs.build_windows_arm64.result == 'success' || needs.build_windows_arm64.result == 'skipped')
+      (needs.build_windows_arm64.result == 'success' || needs.build_windows_arm64.result == 'skipped') &&
+      (needs.build_linux.result == 'success' || needs.build_linux.result == 'skipped') &&
+      (needs.build_android.result == 'success' || needs.build_android.result == 'skipped') &&
+      (needs.build_macos.result == 'success' || needs.build_macos.result == 'skipped') &&
+      (needs.build_windows_indexed_full.result == 'success' || needs.build_windows_indexed_full.result == 'skipped')
     outputs:
-      is_latest: ${{ steps.publish.outputs.is_latest }}
-      tag: ${{ needs.prepare_release.outputs.tag }}
-      title: ${{ needs.prepare_release.outputs.title }}
-      url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.prepare_release.outputs.tag }}
-    needs: [bump_version, prepare_release, build_windows, build_windows_arm64, build_linux, build_library_assets, build_android, build_android_full, build_macos, build_windows_installer, update_packages_windows, update_packages_linux, update_packages_macos]
+      tag: ${{ steps.version.outputs.tag }}
+      title: ${{ steps.version.outputs.title }}
+      url: https://github.com/${{ inputs.release_repo || 'TEPRM/otzaria-naki-releases' }}/releases/tag/${{ steps.version.outputs.tag }}
+    needs: [bump_version, build_windows, build_windows_arm64, build_linux, build_android, build_macos, build_windows_indexed_full]
     runs-on: ubuntu-latest
 
     steps:
@@ -3085,45 +2578,221 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.bump_version.outputs.sha }}
-
-      # רק הרשומות (שם, גודל, sha256 ומניפסטי JSON) — לא הנכסים, שכבר בטיוטה.
-      - name: Download release records
-        uses: actions/download-artifact@v8.0.2
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8.0.1
         with:
-          pattern: otzaria-release-record-*
-          path: release-records
+          path: artifacts
+      
+      - name: Get version from pubspec.yaml
+        id: version
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | cut -d ' ' -f 2 | cut -d '+' -f 1)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+          # Validate semver format
+          if ! echo "$VERSION" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
+            echo "::error::Version '$VERSION' is not valid semver format"
+            exit 1
+          fi
+          
+          TAG=$(bash tool/version/release_tag.sh "$VERSION" '${{ github.ref }}' '${{ github.run_number }}')
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "title=Otzaria $TAG" >> $GITHUB_OUTPUT
+          else
+            # Use proper semver pre-release format with dots instead of hyphens
+            BRANCH_NAME="${{ github.ref_name }}"
+            # Replace any invalid characters in branch name for semver
+            CLEAN_BRANCH=$(echo "$BRANCH_NAME" | sed 's/[^A-Za-z0-9.-]/-/g')
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "title=Otzaria ${TAG%%+*} (Preview from ${{ github.ref_name }})" >> $GITHUB_OUTPUT
+          fi
+
 
       - name: Get commit message
         id: commit
         run: echo "message=$(git log -1 --pretty=%s)" >> $GITHUB_OUTPUT
 
-      # הכנה לאימות הטיוטה ולגנרטור המניפסט (הריפו הוא פרויקט Flutter; crypto נפתר מ-pub).
+      - name: Organize release files
+        run: |
+          mkdir -p release-files
+          
+          # Windows installer (regular)
+          if [ -d "artifacts/otzaria-windows-installer" ]; then
+            cp artifacts/otzaria-windows-installer/*.exe release-files/ || true
+          fi
+
+          # Windows installer (full)
+          if [ -d "artifacts/otzaria-windows-installer-full" ]; then
+            cp artifacts/otzaria-windows-installer-full/*.exe release-files/ || true
+          fi
+
+          # Windows indexed FULL bootstrap (app only; library parts stay separate)
+          if [ -d "artifacts/otzaria-windows-installer-full-indexed" ]; then
+            cp artifacts/otzaria-windows-installer-full-indexed/*.exe release-files/ || true
+          fi
+
+          # Windows ZIP
+          if [ -d "artifacts/otzaria-windows-zip" ]; then
+            cp artifacts/otzaria-windows-zip/*.zip release-files/ || true
+          fi
+
+          # Windows ARM64 installer + ZIP
+          if [ -d "artifacts/otzaria-windows-arm64-installer" ]; then
+            cp artifacts/otzaria-windows-arm64-installer/*.exe release-files/ || true
+          fi
+          if [ -d "artifacts/otzaria-windows-arm64-zip" ]; then
+            cp artifacts/otzaria-windows-arm64-zip/*.zip release-files/ || true
+          fi
+
+          # Windows ARM64 installer (full) — non-fatal in build_windows_arm64
+          if [ -d "artifacts/otzaria-windows-arm64-installer-full" ]; then
+            cp artifacts/otzaria-windows-arm64-installer-full/*.exe release-files/ || true
+          elif [ -d "artifacts/otzaria-windows-arm64-installer" ]; then
+            echo "::warning::ARM64 FULL installer is missing - releasing without it"
+          fi
+
+          # Linux DEB package
+          if [ -d "artifacts/otzaria-linux-deb" ]; then
+            cp artifacts/otzaria-linux-deb/*.deb release-files/ || true
+          fi
+          
+          # Linux RPM package  
+          if [ -d "artifacts/otzaria-linux-rpm" ]; then
+            cp artifacts/otzaria-linux-rpm/*.rpm release-files/ || true
+          fi
+          
+          # Linux raw build (fallback)
+          if [ -d "artifacts/otzaria-linux-raw" ] && [ ! -f release-files/*.deb ]; then
+            cd artifacts/otzaria-linux-raw
+            zip -r ../../release-files/otzaria-linux-raw.zip *
+            cd ../..
+          fi
+
+          # Linux DEB (arm64)
+          if [ -d "artifacts/otzaria-linux-deb-arm64" ]; then
+            cp artifacts/otzaria-linux-deb-arm64/*.deb release-files/ || true
+          fi
+
+          # Linux raw build arm64 (fallback, כמו ב-x86_64)
+          if [ -d "artifacts/otzaria-linux-raw-arm64" ] && ! ls release-files/*arm64.deb >/dev/null 2>&1; then
+            cd artifacts/otzaria-linux-raw-arm64
+            zip -r ../../release-files/otzaria-linux-raw-arm64.zip *
+            cd ../..
+          fi
+
+          # Linux RPM (arm64)
+          if [ -d "artifacts/otzaria-linux-rpm-arm64" ]; then
+            cp artifacts/otzaria-linux-rpm-arm64/*.rpm release-files/ || true
+          fi
+
+          # Linux FULL bundle (arm64)
+          if [ -d "artifacts/otzaria-linux-full-arm64" ]; then
+            cp artifacts/otzaria-linux-full-arm64/*.tar.zst release-files/ || true
+          fi
+
+          # Linux FULL bundle
+          if [ -d "artifacts/otzaria-linux-full" ]; then
+            cp artifacts/otzaria-linux-full/*.tar.zst release-files/ || true
+          fi
+
+          # Cross-platform indexed FULL library (multipart; every part is below 2 GiB)
+          if [ -d "artifacts/otzaria-library-full-indexed" ]; then
+            cp artifacts/otzaria-library-full-indexed/* release-files/ || true
+          fi
+          
+          # Android APK
+          if [ -d "artifacts/otzaria-android.apk" ]; then
+            cp artifacts/otzaria-android.apk/*.apk release-files/ || true
+          fi
+
+          # Android FULL bundle
+          if [ -d "artifacts/otzaria-android-full" ]; then
+            cp artifacts/otzaria-android-full/*.zip release-files/ || true
+          fi
+          
+          # macOS DMG
+          if [ -d "artifacts/otzaria-macos.dmg" ]; then
+            cp artifacts/otzaria-macos.dmg/*.dmg release-files/ || true
+          fi
+
+          # macOS update zip (משמש את מנגנון העדכון הפנימי)
+          if [ -d "artifacts/otzaria-macos-update" ]; then
+            cp artifacts/otzaria-macos-update/*.zip release-files/ || true
+          fi
+
+          # macOS FULL bundle
+          if [ -d "artifacts/otzaria-macos-full" ]; then
+            cp artifacts/otzaria-macos-full/*.tar.zst release-files/ || true
+          fi
+          
+          # List files for debugging
+          echo "Release files:"
+          ls -la release-files/
+
+      # כלי עזר בלבד — היעדרו לא מונע שחרור, ולכן השלב אינו נכשל בלעדיו.
+      - name: Stage Download Assistant
+        run: |
+          set -euo pipefail
+          # כל מסייע בנפרד: היעדרו של אחד אינו מונע את פרסום האחרים.
+          for assistant in \
+            artifacts/otzaria-download-assistant/Otzaria-Download-Assistant-windows.exe \
+            artifacts/otzaria-download-assistant-macos/Otzaria-Download-Assistant-macos.zip \
+            artifacts/otzaria-download-assistant-linux-x64/Otzaria-Download-Assistant-linux-x64.tar.gz \
+            artifacts/otzaria-download-assistant-linux-arm64/Otzaria-Download-Assistant-linux-arm64.tar.gz; do
+            if [ -f "$assistant" ]; then
+              cp "$assistant" release-files/
+            else
+              echo "::warning::Download Assistant $(basename "$assistant") is missing - releasing without it"
+            fi
+          done
+
+      # מניפסטי קובצי ההתקנה עולים עם השחרור כי השחרור *הבא* קורא אותם כדי
+      # לחשב patch. היעדרם אינו חוסם — הוא רק מבטל את העדכון הדיפרנציאלי הבא.
+      - name: Stage application file manifests
+        run: |
+          set -euo pipefail
+          for arch in x64 arm64; do
+            src="artifacts/otzaria-app-file-manifest-$arch/otzaria-app-files-windows-$arch.json"
+            if [ -f "$src" ]; then
+              cp "$src" release-files/
+            else
+              echo "::warning::application file manifest for $arch is missing - the next release will have no differential update for it"
+            fi
+          done
+          for src in \
+            artifacts/otzaria-app-file-manifest-macos/otzaria-app-files-macos-universal.json \
+            artifacts/otzaria-app-file-manifest-linux-x64/otzaria-app-files-linux-x64.json \
+            artifacts/otzaria-app-file-manifest-linux-arm64/otzaria-app-files-linux-arm64.json; do
+            if [ -f "$src" ]; then
+              cp "$src" release-files/
+            else
+              echo "::warning::$(basename "$src") is missing - the next release will have no differential update for it"
+            fi
+          done
+
+      # חבילה מלאה מעל 1.9 GiB מתפרסמת כחלקים ומניפסט; מסייע ההורדה מרכיב אותם.
+      # Android אינו כאן: הוא נארז ככרכי ZIP עצמאיים (pack_android_full.sh).
+      - name: Split FULL packages that exceed GitHub's asset limit
+        run: |
+          set -euo pipefail
+          # המאונדקס (-windows-full-indexed.exe) אינו תואם לתבניות ונשאר כמות שהוא.
+          bash tool/release/split_oversized_assets.sh release-files \
+            'otzaria-*-windows-full.exe' \
+            'otzaria-*-windows_arm64-full.exe' \
+            'otzaria-linux-full.tar.zst' \
+            'otzaria-linux-full-arm64.tar.zst' \
+            'otzaria-macos-full.tar.zst'
+
+      # הכנה להרצת גנרטור המניפסט (הריפו הוא פרויקט Flutter; crypto נפתר מ-pub).
       - name: Set up Flutter for the release manifest
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.47.7
+          flutter-version: 3.47.2
           cache: true
-
-      # כל job שבנה נכסי שחרור חייב רשומה. חסר או גודל שגוי מפילים כאן, לפני
-      # הפרסום; "Re-run failed jobs" מעלה מחדש עם clobber.
-      - name: Verify the draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-          ARM64_RESULT: ${{ needs.build_windows_arm64.result }}
-        run: |
-          set -euo pipefail
-          required=(library windows windows-installer android android-full macos)
-          for target in deb rpm raw full; do
-            for arch in x86_64 aarch64; do
-              required+=("linux-$target-$arch")
-            done
-          done
-          [ "$ARM64_RESULT" != success ] || required+=(windows-arm64)
-          flutter pub get --enforce-lockfile
-          dart run tool/release/verify_release_draft.dart "$RELEASE_ID" release-records release-files \
-            "$RUNNER_TEMP/release-assets.json" "${required[@]/#/otzaria-release-record-}"
 
       # נתוני החיפוש החכם לתג הספרייה שהשחרור אורז, ממאגרים אחרים בארגון.
       # בלי vectors-<תג> הם מושמטים עם אזהרה: רכיב רשות אינו מפיל שחרור.
@@ -3147,8 +2816,8 @@ jobs:
         id: release_manifest
         continue-on-error: true
         env:
-          RELEASE_TAG: ${{ needs.prepare_release.outputs.tag }}
-          RELEASE_VERSION: ${{ needs.prepare_release.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           flutter pub get --enforce-lockfile
@@ -3160,7 +2829,6 @@ jobs:
             --tag "$RELEASE_TAG" \
             --version "$RELEASE_VERSION" \
             --dir release-files \
-            --assets "$RUNNER_TEMP/release-assets.json" \
             --out release-files/otzaria-release-manifest.json \
             "${external[@]}"
           cat release-files/otzaria-release-manifest.json
@@ -3171,26 +2839,17 @@ jobs:
           rm -f release-files/otzaria-release-manifest.json
           echo "::warning::הגנרטור של מניפסט ה-release נכשל - השחרור יוצא בלעדיו, ומסייע ההורדה יציג שגיאה ידידותית במקום רשימת רכיבים"
 
-      - name: Upload the release manifest
-        if: steps.release_manifest.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-        run: |
-          bash tool/release/upload_release_assets.sh "$RELEASE_ID" "$RUNNER_TEMP/manifest-record" \
-            release-files/otzaria-release-manifest.json
-
       - name: Generate release notes
         env:
-          RELEASE_TITLE: ${{ needs.prepare_release.outputs.title }}
+          RELEASE_TITLE: ${{ steps.version.outputs.title }}
           BUILD_SHA: ${{ needs.bump_version.outputs.sha }}
-          RELEASE_TAG: ${{ needs.prepare_release.outputs.tag }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
           COMMIT_MESSAGE: ${{ steps.commit.outputs.message }}
         run: |
           set -euo pipefail
           shopt -s nullglob
 
-          RELEASE_URL="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}"
+          RELEASE_URL="https://github.com/${{ inputs.release_repo || 'TEPRM/otzaria-naki-releases' }}/releases/download/${RELEASE_TAG}"
 
           windows_installers=()
           windows_arm64_installers=()
@@ -3200,6 +2859,7 @@ jobs:
           windows_arm64_full=()
           windows_arm64_full_parts=()
           windows_arm64_full_support=()
+          windows_indexed_full=()
           download_assistant=()
           android_apk=()
           android_full=()
@@ -3210,7 +2870,8 @@ jobs:
           linux_full_parts=()
           linux_full_support=()
           assemble_scripts=()
-          library_parts=()
+          indexed_library_parts=()
+          indexed_library_support=()
           mac_dmg=()
           mac_full=()
           mac_full_parts=()
@@ -3225,8 +2886,9 @@ jobs:
             done
           }
 
-          # הנכסים שה-jobs העלו לטיוטה, בסדר שבו glob על התיקייה החזיר אותם.
-          while IFS= read -r file; do
+          for path in release-files/*; do
+            [ -f "$path" ] || continue
+            file=$(basename "$path")
             lower=$(printf '%s' "$file" | tr '[:upper:]' '[:lower:]')
 
             case "$lower" in
@@ -3251,11 +2913,17 @@ jobs:
               *windows_arm64-full*.exe)
                 windows_arm64_full+=("$file")
                 ;;
-              # לא מקושרים: מסייע ההורדה מוריד אותם, והמתקין הרגיל קורא אותם לצדו.
-              *-library.tar.zst.part-*|*-library-index.tar.zst.part-*)
-                library_parts+=("$file")
+              *windows-full-indexed*.exe)
+                windows_indexed_full+=("$file")
+                ;;
+              *library-full-indexed*.part-*)
+                indexed_library_parts+=("$file")
+                ;;
+              *library-full-indexed*.manifest.json)
+                indexed_library_support+=("$file")
                 ;;
               assemble_split_asset.sh|assemble_split_asset.ps1)
+                indexed_library_support+=("$file")
                 assemble_scripts+=("$file")
                 ;;
               # לפני *linux-full*.tar.* ו-*macos-full*.tar.*, שהיו בולעים את החלקים.
@@ -3314,7 +2982,7 @@ jobs:
                 echo "Ignoring non-user-facing release file in notes: $file"
                 ;;
             esac
-          done < <(jq -r '.[].name' "$RUNNER_TEMP/release-assets.json" | tr -d '\r' | LC_ALL=C sort)
+          done
 
           safe_commit_message=$(printf '%s' "$COMMIT_MESSAGE" \
             | tr '\r\n' ' ' \
@@ -3342,7 +3010,30 @@ jobs:
 
           EOF
 
-          if [ ${#windows_installers[@]} -gt 0 ] || [ ${#windows_arm64_installers[@]} -gt 0 ] || [ ${#windows_full[@]} -gt 0 ] || [ ${#windows_full_parts[@]} -gt 0 ] || [ ${#windows_arm64_full[@]} -gt 0 ] || [ ${#windows_arm64_full_parts[@]} -gt 0 ]; then
+          if [ ${#indexed_library_parts[@]} -gt 0 ]; then
+            printf "## ספרייה מלאה עם אינדקס מוכן\n\n" >> release-body.md
+            emit_link_group "מתקין אוטומטי לווינדוס" "${windows_indexed_full[@]}"
+            emit_link_group "חלק מחבילת הספרייה המאונדקסת" "${indexed_library_parts[@]}"
+            emit_link_group "קובץ אימות/סקריפט הרכבה" "${indexed_library_support[@]}"
+            cat >> release-body.md <<'EOF'
+
+          **התקנה מקוונת בווינדוס:** מורידים רק את המתקין האוטומטי; הוא יוריד, יאמת ויתקין את הספרייה והאינדקס.
+
+          **התקנה לא־מקוונת בווינדוס:** מורידים את המתקין ואת כל החלקים לאותה תיקייה ומפעילים את המתקין. הוא מכיל את רשימת הקבצים, יזהה אותם ויבצע את כל העבודה ללא רשת.
+
+          להרכבה ידנית במערכות אחרות מורידים את כל החלקים, את ה־manifest ואת אחד מסקריפטי ההרכבה:
+
+          ```bash
+          bash assemble_split_asset.sh otzaria-*-library-full-indexed.tar.zst.manifest.json
+          tar --zstd -xf otzaria-*-library-full-indexed.tar.zst
+          ```
+
+          לאחר חילוץ ידני בוחרים באוצריא את תיקיית `books`; תיקיית `index` הצמודה מזוהה אוטומטית. ב־PowerShell ניתן להרכיב באמצעות `assemble_split_asset.ps1`. כל חלק קטן מ־2 GiB ומאומת ב־SHA-256.
+
+          EOF
+          fi
+
+          if [ ${#windows_installers[@]} -gt 0 ] || [ ${#windows_arm64_installers[@]} -gt 0 ] || [ ${#windows_full[@]} -gt 0 ] || [ ${#windows_full_parts[@]} -gt 0 ] || [ ${#windows_arm64_full[@]} -gt 0 ] || [ ${#windows_arm64_full_parts[@]} -gt 0 ] || [ ${#windows_indexed_full[@]} -gt 0 ]; then
             printf "## ווינדוס\n\n" >> release-body.md
 
             if [ ${#windows_installers[@]} -gt 0 ]; then
@@ -3365,10 +3056,6 @@ jobs:
               fi
               printf "\n" >> release-body.md
             fi
-
-            if [ ${#library_parts[@]} -gt 0 ]; then
-              printf "> את הספרייה המלאה לצד המתקין הרגיל (ולמחשב חלש — גם אינדקס חיפוש מוכן) מכינים במסייע ההורדה שבסוף העמוד (בחירה אישית).\n\n" >> release-body.md
-            fi
           fi
 
           if [ ${#android_apk[@]} -gt 0 ] || [ ${#android_full[@]} -gt 0 ]; then
@@ -3384,7 +3071,7 @@ jobs:
               printf "### גרסת ספרייה מלאה\n\n" >> release-body.md
               if [ ${#android_full[@]} -gt 1 ]; then
                 emit_link_group "חלק מהחבילה המלאה לאנדרואיד" "${android_full[@]}"
-                printf "\n> **החבילה גדולה ממגבלת הקובץ הבודד של GitHub ולכן חולקה לכמה קובצי ZIP רגילים.** הורידו את כולם וחלצו אותם — כל אחד נפתח בנפרד, גם בטלפון, ומותר שכל אחד ייחלץ לתיקייה משלו. באוצריא בחרו את התיקייה שמכילה את כל מה שחולץ.\n" >> release-body.md
+                printf "\n> **החבילה גדולה ממגבלת הקובץ הבודד של GitHub ולכן חולקה לכמה קובצי ZIP רגילים.** הורידו את כולם וחלצו אותם לאותה תיקייה — כל אחד נפתח בנפרד, גם בטלפון.\n" >> release-body.md
               else
                 emit_link_group "חבילה מלאה לאנדרואיד" "${android_full[@]}"
               fi
@@ -3475,31 +3162,89 @@ jobs:
 
           echo "Generated release notes:"
           cat release-body.md
-
-      # GITHUB_TOKEN בכוונה: אירוע ה-published שלו אינו מפעיל workflows, ולכן
-      # ההכרזה היחידה היא announce_release שבריצה הזו.
-      - name: Publish the release
-        id: publish
+      
+      - name: Create Release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v3.0.3
+        with:
+          token: ${{ secrets.RELEASE_PAT }}
+          repository: ${{ inputs.release_repo || 'TEPRM/otzaria-naki-releases' }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.title }}
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          files: release-files/*
+          body_path: release-body.md
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.prepare_release.outputs.release_id }}
-          RELEASE_TITLE: ${{ needs.prepare_release.outputs.title }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # עדכון דיפרנציאלי — אופטימיזציה בלבד, ולכן השלב רץ *אחרי* יצירת
+      # השחרור ונושא continue-on-error: כישלון כאן אינו יכול לגעת בשחרור,
+      # והמשתמשים פשוט מקבלים את המתקין המלא כמו היום.
+      # החבילות נוספות כנכסים לאותו release, ולא מוזכרות בגוף השחרור.
+      - name: Publish differential update packages
+        if: github.event_name == 'workflow_dispatch'
+        continue-on-error: true
+        env:
+          UPDATE_PACKAGES_SOURCE_REPO: ${{ inputs.release_repo || 'TEPRM/otzaria-naki-releases' }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
         run: |
-          python3 tool/release/latest_release_policy.py --publish "$RELEASE_ID" \
-            --title "$RELEASE_TITLE" --body-file release-body.md
+          set -euo pipefail
+          flutter pub get --enforce-lockfile
+          mkdir -p update-packages
+          for arch in x64 arm64; do
+            manifest="release-files/otzaria-app-files-windows-$arch.json"
+            zip="release-files/otzaria-windows.zip"
+            [ "$arch" = "x64" ] || zip="release-files/otzaria-windows_$arch.zip"
+            bash tool/release/build_update_packages.sh \
+              "$arch" "$RELEASE_TAG" "$manifest" "$zip" update-packages 2
+          done
+          if [ -z "$(ls -A update-packages)" ]; then
+            echo "::warning::no differential update packages were produced"
+            exit 0
+          fi
+          gh release upload "$RELEASE_TAG" --repo "$UPDATE_PACKAGES_SOURCE_REPO" \
+            --clobber update-packages/*
+
+      # macOS ו-Linux נייד: חבילות עץ (symlinks, הרשאות, העץ החדש המלא).
+      # שלב נפרד, כדי שכשל או חריגת זמן כאן לא יגעו בחבילות Windows. בסיסי
+      # Linux הם app של חבילות ה-FULL — נמשכים בזרם, בלי לשמור 2GB לדיסק.
+      - name: Publish differential update packages (macOS, Linux)
+        if: github.event_name == 'workflow_dispatch'
+        continue-on-error: true
+        timeout-minutes: 90
+        env:
+          UPDATE_PACKAGES_SOURCE_REPO: ${{ inputs.release_repo || 'TEPRM/otzaria-naki-releases' }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          # bsdtar משחזר symlinks מ-zip של ditto; unzip אינו מבטיח זאת.
+          command -v bsdtar >/dev/null || sudo apt-get install -y libarchive-tools
+          flutter pub get --enforce-lockfile
+          rm -rf tree-update-packages
+          mkdir -p tree-update-packages
+          UPDATE_PACKAGES_PLATFORM=macos bash tool/release/build_update_packages.sh \
+            universal "$RELEASE_TAG" release-files/otzaria-app-files-macos-universal.json \
+            release-files/otzaria-macos.zip tree-update-packages 2 || true
+          for arch in x64 arm64; do
+            archive="artifacts/otzaria-linux-full/otzaria-linux-full.tar.zst"
+            [ "$arch" = "x64" ] || archive="artifacts/otzaria-linux-full-$arch/otzaria-linux-full-$arch.tar.zst"
+            UPDATE_PACKAGES_PLATFORM=linux bash tool/release/build_update_packages.sh \
+              "$arch" "$RELEASE_TAG" "release-files/otzaria-app-files-linux-$arch.json" \
+              "$archive" tree-update-packages 2 || true
+          done
+          if [ -z "$(ls -A tree-update-packages)" ]; then
+            echo "::warning::no macOS/Linux differential update packages were produced"
+            exit 0
+          fi
+          gh release upload "$RELEASE_TAG" --repo "$UPDATE_PACKAGES_SOURCE_REPO" \
+            --clobber tree-update-packages/*
 
   trigger_google_play_deploy:
-    if: "!cancelled() && needs.create_release.result == 'success' && needs.create_release.outputs.is_latest == 'true' && github.event_name != 'release' && github.event_name != 'pull_request'"
-    needs: [bump_version, create_release]
+    if: "!cancelled() && needs.check_version.outputs.is_version == 'true' && needs.build_android.result == 'success' && github.event_name != 'release' && github.event_name != 'pull_request'"
+    needs: [bump_version, check_version, build_android]
     uses: ./.github/workflows/deploy-google-play.yml
-    with:
-      ref: ${{ needs.bump_version.outputs.sha }}
-    secrets: inherit
-
-  trigger_app_store_deploy:
-    if: "!cancelled() && needs.create_release.result == 'success' && needs.create_release.outputs.is_latest == 'true' && github.event_name != 'release' && github.event_name != 'pull_request'"
-    needs: [bump_version, create_release]
-    uses: ./.github/workflows/deploy-app-store.yml
     with:
       ref: ${{ needs.bump_version.outputs.sha }}
     secrets: inherit
@@ -3511,8 +3256,8 @@ jobs:
       always() &&
       (github.event_name == 'release' ||
        (github.event_name == 'workflow_dispatch' && inputs.announce_release &&
-        needs.create_release.result == 'success' &&
-        needs.create_release.outputs.is_latest == 'true'))
+        inputs.wipe_public_traces != true &&
+        needs.create_release.result == 'success'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -3521,9 +3266,9 @@ jobs:
           ref: ${{ needs.bump_version.outputs.sha }}
 
       - name: Set up Python
-        uses: actions/setup-python@v7.1.0
+        uses: actions/setup-python@v7.0.0
         with:
-          python-version: '3.15'
+          python-version: '3.14'
 
       - name: Install dependencies for webhook script
         run: pip install bs4 requests pyluach astral yemot-api
@@ -3543,13 +3288,41 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name || needs.create_release.outputs.tag }}
           RELEASE_NAME: ${{ github.event.release.name || needs.create_release.outputs.title }}
           RELEASE_URL: ${{ github.event.release.html_url || needs.create_release.outputs.url }}
-          # GitHub מתעלם מדריסת משתני GITHUB_* — לכן שם נפרד
-          RELEASE_EVENT_PATH: ${{ github.event_name == 'workflow_dispatch' && format('{0}/release-event.json', runner.temp) || github.event_path }}
+          GITHUB_EVENT_PATH: ${{ github.event_name == 'workflow_dispatch' && format('{0}/release-event.json', runner.temp) || github.event_path }}
 
           # סודות להתחברות לשירותים החיצוניים
-          GH_TOKEN: ${{ github.token }}
           USER_NAME:  ${{ secrets.USER_NAME }}
           PASSWORD:   ${{ secrets.PASSWORD }}
           TOKEN_YEMOT: ${{ secrets.TOKEN_YEMOT }}
         run: |
           python webhooks/main.py
+
+  # מחיקת עקבות ציבוריות, שלב א': מוחק מיד את כל ה-artifacts של הריצה כדי
+  # שלא יהיה מה להוריד מהריפו הציבורי. רשומת הריצה והלוגים נמחקים ע"י
+  # cleanup-build-traces (ריצה שעוד רצה אי אפשר למחוק). נשלט ע"י wipe_public_traces.
+  wipe_public_traces:
+    if: always() && !(inputs.wipe_public_traces == false)
+    needs: [bump_version, check_version, build_windows, build_windows_arm64, build_linux, build_android, build_macos, build_windows_indexed_full, create_release, trigger_google_play_deploy, announce_release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete run artifacts immediately
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          echo "deleting public artifacts of run $RUN_ID in $REPO"
+          page=1
+          while :; do
+            ids=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100&page=$page" --jq '.artifacts[].id')
+            [ -z "$ids" ] && break
+            for id in $ids; do
+              gh api -X DELETE "repos/$REPO/actions/artifacts/$id" >/dev/null \
+                && echo "deleted artifact $id" \
+                || echo "::warning::failed to delete artifact $id"
+            done
+            [ "$(printf '%s\n' "$ids" | wc -l)" -lt 100 ] && break
+            page=$((page + 1))
+          done
+          echo "public downloads removed; run record and logs are removed by cleanup-build-traces"

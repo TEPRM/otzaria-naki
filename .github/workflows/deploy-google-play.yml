@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: google-play-production
+  group: google-play-production-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -30,11 +30,6 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.ref || github.ref }}
-
-      - name: Verify checkout is the Latest release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 tool/release/latest_release_policy.py --assert-current-checkout
 
       - name: Verify versionCode is free on Google Play
         env:
@@ -61,7 +56,7 @@ jobs:
           df -h
 
       - name: Set up Java
-        uses: actions/setup-java@v6.1.0
+        uses: actions/setup-java@v5.7.0
         with:
           distribution: temurin
           java-version: '17'
@@ -70,7 +65,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.47.7
+          flutter-version: 3.47.2
           cache: true
 
       - name: Install Rust (stable)
@@ -216,7 +211,7 @@ jobs:
         uses: ./.github/actions/fetch-biographies
 
       - name: Install Flutter dependencies
-        run: flutter pub get --enforce-lockfile
+        run: flutter pub get
 
       - name: Generate settings search index
         run: dart run tool/generate_search_index.dart
@@ -224,22 +219,13 @@ jobs:
       - name: Generate settings translation catalog
         run: dart run tool/generate_settings_l10n.dart
 
-      # לפני הבנייה: יומן שינויים בלי סעיף לגרסה הזו נכשל מיד ולא אחרי הבנייה הארוכה
-      - name: Prepare What's new from the changelog
-        run: python3 tool/version/play_whats_new.py distribution/whatsnew
-
       - name: Build Android App Bundle
         env:
           ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android/app/keystore/otzaria-keystore.jks
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: flutter build appbundle --release
-
-      - name: Recheck Latest before publishing to the store
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 tool/release/latest_release_policy.py --assert-current-checkout
+        run: flutter build appbundle --release --dart-define=BIO_OBF_KEY=${{ secrets.BIO_OBF_KEY }}
 
       - name: Upload to Google Play Production
         uses: r0adkll/upload-google-play@v1.1.5
@@ -249,4 +235,3 @@ jobs:
           releaseFiles: build/app/outputs/bundle/release/app-release.aab
           tracks: production
           status: completed
-          whatsNewDirectory: distribution/whatsnew

@@ -1,0 +1,71 @@
+name: "Cleanup public build traces"
+
+# שלב ב' של מחיקת העקבות: מוחק ריצות שהסתיימו (artifacts + לוגים + רשומה)
+# של הבונה, המסנכרן ושל עצמו, כדי שלא יישאר מה להוריד או לראות בציבורי.
+# ההרצה הנוכחית תמיד מדלגת על עצמה; ריצות קודמות של המנקה עצמו נמחקות גם הן.
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      older_than_hours:
+        description: "למחוק ריצות שהסתיימו לפני כמות שעות זו"
+        type: string
+        default: "2"
+
+permissions:
+  actions: write
+
+concurrency:
+  group: cleanup-traces
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete completed runs, logs and leftover artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SELF_ID: ${{ github.run_id }}
+          OLDER_THAN_HOURS: ${{ inputs.older_than_hours || '2' }}
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d "$OLDER_THAN_HOURS hours ago" +%s)
+          deleted_runs=0
+          deleted_artifacts=0
+          for wf in build-and-announce.yml auto-sync.yml cleanup-build-traces.yml; do
+            page=1
+            while :; do
+              resp=$(gh api "repos/$REPO/actions/workflows/$wf/runs?status=completed&per_page=100&page=$page")
+              count=$(printf '%s' "$resp" | jq '.workflow_runs | length')
+              [ "$count" = "0" ] && break
+              printf '%s' "$resp" | jq -r '.workflow_runs[] | "\(.id) \(.updated_at)"' | while read -r id upd; do
+                [ "$id" = "$SELF_ID" ] && continue
+                uts=$(date -u -d "$upd" +%s)
+                [ "$uts" -ge "$cutoff" ] && continue
+                apage=1
+                while :; do
+                  aids=$(gh api "repos/$REPO/actions/runs/$id/artifacts?per_page=100&page=$apage" --jq '.artifacts[].id')
+                  [ -z "$aids" ] && break
+                  for aid in $aids; do
+                    gh api -X DELETE "repos/$REPO/actions/artifacts/$aid" >/dev/null \
+                      && deleted_artifacts=$((deleted_artifacts + 1)) \
+                      || echo "::warning::failed to delete artifact $aid of run $id"
+                  done
+                  [ "$(printf '%s\n' "$aids" | wc -l)" -lt 100 ] && break
+                  apage=$((apage + 1))
+                done
+                gh api -X DELETE "repos/$REPO/actions/runs/$id/logs" >/dev/null \
+                  || echo "::warning::failed to delete logs of run $id"
+                gh api -X DELETE "repos/$REPO/actions/runs/$id" >/dev/null \
+                  && deleted_runs=$((deleted_runs + 1)) \
+                  || echo "::warning::failed to delete run $id"
+              done
+              [ "$count" -lt 100 ] && break
+              page=$((page + 1))
+            done
+          done
+          echo "deleted runs: $deleted_runs, deleted artifacts: $deleted_artifacts"
